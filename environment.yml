@@ -1,0 +1,23 @@
+name: autodrive_3d
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch>=2.0.0
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - cudatoolkit=11.8
+  - pip
+  - pip:
+    - transformers>=4.30.0
+    - flash-attn>=2.0.0
+    - spconv-cu124
+    - timm
+    - numpy
+    - opencv-python
+    - Pillow
+    - scipy
+    - tqdm

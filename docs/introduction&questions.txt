@@ -1,0 +1,322 @@
+
+明白。可以压成这几个部分就够了：
+
+````markdown
+# QUEST 项目介绍
+
+## 1. 项目定位
+
+QUEST 是一个面向自动驾驶场景的多任务感知模型原型。
+
+当前目标不是做完整自动驾驶系统，而是搭建一个统一的感知骨架：
+
+> 输入车载图像，通过 query-based 结构，同时输出语义分割、动态目标、地图元素和 3D occupancy 等结果。
+
+---
+
+## 2. 模型结构
+
+QUEST 当前整体流程为：
+
+```text
+RGB image
+   ↓
+DINOv2 backbone
+   ↓
+visual patch tokens
+   ↓
+task queries + Transformer decoder
+   ↓
+task heads
+````
+
+其中：
+
+* **DINOv2**：冻结参数，用作图像特征提取器
+* **Task Queries**：不同任务使用不同 query
+* **Transformer Decoder**：让 task queries 与图像特征交互
+* **Task Heads**：输出不同任务结果
+
+---
+
+## 3. 四个任务 Head
+
+### 3.1 Seg Head
+
+任务：图像语义分割。
+
+输出：
+
+```text
+seg_logits: [B, C_seg, H, W]
+```
+
+当前参考专家模型：
+
+```text
+SegFormer
+```
+
+---
+
+### 3.2 Agent Head
+
+任务：动态目标检测，例如车辆、行人、交通锥等。
+
+输出：
+
+```text
+agent_cls_logits: [B, N_agent, C_agent + 1]
+agent_boxes: [B, N_agent, 8]
+```
+
+box 格式：
+
+```text
+[cx, cy, cz, dx, dy, dz, sin(yaw), cos(yaw)]
+```
+
+当前参考专家模型：
+
+```text
+StreamPETR
+```
+
+---
+
+### 3.3 Map Head
+
+任务：BEV 矢量地图元素预测，例如车道线、边界线、道路结构等。
+
+输出：
+
+```text
+map_cls_logits: [B, N_map, C_map + 1]
+map_points: [B, N_map, P, 2]
+```
+
+当前参考专家模型：
+
+```text
+MapTRv2
+```
+
+---
+
+### 3.4 OCC Head
+
+任务：3D occupancy 语义占据预测。
+
+输出：
+
+```text
+occ_logits: [B, C_occ, X, Y, Z]
+```
+
+当前参考专家模型：
+
+```text
+FlashOCC
+```
+
+---
+
+## 4. 当前数据使用
+
+当前使用 OpenScene 小规模真实数据进行测试。
+
+目前数据中可以直接提供真实监督的是：
+
+| Head  | 是否有真实监督 | 来源                     |
+| ----- | ------: | ---------------------- |
+| Seg   |       否 | 需要 SegFormer 伪标签       |
+| Agent |       是 | `metadata.pkl -> anns` |
+| Map   |       否 | 暂无 polyline map GT     |
+| OCC   |       是 | `occ_gt_final.npy`     |
+
+因此当前最适合先训练：
+
+```text
+agent_head + occ_head
+```
+
+Seg 可以通过 SegFormer 生成伪标签后再接入。
+Map 暂时缺少直接可用的矢量地图标注。
+
+---
+
+## 5. 当前 Loss 设计
+
+### Agent Loss
+
+采用 DETR / StreamPETR 风格的检测监督：
+
+```text
+Hungarian matching + focal classification loss + box L1 loss
+```
+
+简化形式：
+
+```text
+agent_loss = agent_cls_loss + 0.25 * agent_box_loss
+```
+
+---
+
+### OCC Loss
+
+采用 semantic occupancy 的基础 voxel-wise CE：
+
+```text
+occ_loss = CrossEntropyLoss(occ_logits, occ_gt)
+```
+
+---
+
+### OpenScene 当前训练总损失
+
+当前真实数据训练建议只使用 agent 和 occ：
+
+```text
+total_loss = 2.0 * agent_loss + 1.0 * occ_loss
+```
+
+---
+
+## 6. ````markdown
+## 张量符号字典
+
+| `B` | 一次输入几张图 |
+| `C` | 类别数 / 通道数 |
+| `H` | 图像高度 |
+| `W` | 图像宽度 |
+| `N` | query 数量 / 候选数量 |
+| `P` | 一条线有几个点 |
+| `X` | 3D 网格 x 方向数量 |
+| `Y` | 3D 网格 y 方向数量 |
+| `Z` | 3D 网格高度方向数量 |
+| `D` | 一个向量有几个数字 |
+
+## 例子
+
+```text
+seg_logits: [B, C_seg, H, W]
+
+
+```text
+几张图，每张图每个像素预测 C_seg 个类别
+```
+
+```text
+agent_boxes: [B, N_agent, 8]
+```
+
+```text
+几张图，每张图 N_agent 个目标候选，每个目标 8 个参数
+```
+
+```text
+map_points: [B, N_map, P, 2]
+```
+
+```text
+几张图，每张图 N_map 条线，每条线 P 个点，每个点 2 个坐标
+```
+
+```text
+occ_logits: [B, C_occ, X, Y, Z]
+
+```text
+几张图，每个 3D 格子预测 C_occ 个类别
+```
+
+解码流程
+
+
+QUEST 先把图像变成视觉特征，再让不同任务的 query 去“询问”这些特征。
+
+## 1. 图像特征
+
+输入图像经过冻结的 DINOv2 后，得到：
+
+```text
+patch_tokens: [B, 256, 384]
+````
+
+```text
+256 = 16×16 个图像 patch
+384 = 每个 patch 的视觉特征维度
+```
+
+QUEST 不使用 CLS token，只使用 patch tokens。
+
+---
+
+## 2. 特征对齐
+
+DINOv2 的 384 维特征先映射到 QUEST decoder 使用的 256 维：
+
+```text
+[B, 256, 384] → [B, 256, 256]
+```
+
+这部分作为 Transformer decoder 的 memory。
+
+---
+
+## 3. Task Queries
+
+QUEST 使用四组可学习 query：
+
+```text
+seg queries   : 32
+agent queries : 100
+map queries   : 50
+occ queries   : 50
+```
+
+ query 是模型学习出来的任务槽位。
+不同任务用不同 queries 去读取图像特征
+```
+
+---
+
+## 4. Decoder 交互
+
+Transformer decoder 负责让 queries 和 DINO patch 特征交互：
+
+```text
+task queries + image patch tokens
+        ↓
+decoded task queries
+```
+
+交互后，每组 query 会带上对应任务需要的信息。
+
+---
+
+## 5. 输出逻辑
+
+最后，不同 head 接收对应的 decoded queries：
+
+```text
+seg queries   → seg_head
+agent queries → agent_head
+map queries   → map_head
+occ queries   → occ_head
+```
+
+```
+```
+问题
+```
+第一是 Pi3 要不要接进 QUEST。我的理解是，Pi3 能提供 3D 场景几何、相机位姿/运动、可能还有时序空间信息。那它在 QUEST 里更适合怎么用？是否有必要把它的某个 encoder 或中间特征直接接到我的模型里？
+
+第二是单视角和多视角的问题。选用的专家里使用单视角和多视角都有。LFG 是单视角视频输入，但它输出的内容相对偏几何、语义、运动；而 QUEST 现在做的是 agent(tracking)、occ、map、seg，尤其 agent/occ/map 好像更依赖多视角和标定信息。OpenScene 本身有多视角和连续帧，那我是不是应该直接按多视角路线设计，而不是参考 LFG 的单视角路线？
+
+第三是目前判断模型有没有学到东西，主要看 loss 有没有下降，以及看预测结果的可视化。但我发现这两个都有局限：
+
+1. loss 下降不一定代表模型真的学到了正确的空间结构，可能只是学到了类别分布、背景占比，或者某种捷径。
+2. 可视化也可能有问题，比如 OCC 的 sparse-to-dense 维度顺序、BEV 投影方式、agent top-k query 筛选方式，都可能让图看起来不准。经常出现loss下降很快但可视化完全没学到
+
+所以应该哪些指标或检查方法判断模型是否真的学得好？

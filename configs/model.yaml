@@ -1,0 +1,18 @@
+model:
+  backbone_name: facebook/dinov2-small
+  local_backbone_dir: weights/dinov2-small
+  hidden_dim: 256
+  num_seg_queries: 32
+  N_agent: 100
+  num_occ_queries: 50
+  C_seg: 6
+  seg_size: [64, 64]
+  C_agent: 10
+  D_box: 8
+  N_map: 50
+  C_map: 4
+  P: 20
+  C_occ: 4
+  X: 64
+  Y: 64
+  Z: 16

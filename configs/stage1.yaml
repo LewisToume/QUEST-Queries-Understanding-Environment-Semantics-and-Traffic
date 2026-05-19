@@ -1,0 +1,47 @@
+stage: 1
+train:
+  batch_size: 2
+  num_epochs: 1
+  num_samples: 8
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  device: auto
+dataset:
+  image_size: [224, 224]
+  max_agent_instances: 16
+  max_map_instances: 12
+loss:
+  task_weights:
+    seg: 1.0
+    agent: 2.0
+    map: 1.5
+    occ: 1.0
+  seg:
+    ignore_index: 255
+    class_weight:
+  agent:
+    cls_cost_weight: 2.0
+    bbox_cost_weight: 0.25
+    cls_gamma: 2.0
+    cls_alpha: 0.25
+    lambda_box: 0.25
+    lambda_dn: 0.0
+    dn_enabled: false
+    box_loss_type: l1
+  map:
+    cls_cost_weight: 2.0
+    pts_cost_weight: 5.0
+    cls_gamma: 2.0
+    cls_alpha: 0.25
+    lambda_cls: 2.0
+    lambda_pts: 5.0
+    lambda_dir: 0.005
+  occ:
+    class_weight:
+    use_camera_mask: false
+    enable_sem_scal_loss: false
+    enable_geo_scal_loss: false
+    enable_lovasz_loss: false
+    lambda_sem: 0.0
+    lambda_geo: 0.0
+    lambda_lovasz: 0.0

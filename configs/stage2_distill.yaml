@@ -1,0 +1,15 @@
+stage: 2
+distill:
+  batch_size: 1
+  num_samples: 8
+  lr: 5.0e-5
+  temperature: 2.0
+  device: auto
+  model_path:
+paths:
+  soft_labels_dir: data/soft_labels
+loss_weights:
+  seg: 1.0
+  agent: 1.0
+  map: 1.0
+  occ: 1.0
