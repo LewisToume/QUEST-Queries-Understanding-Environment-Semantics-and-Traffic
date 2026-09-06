@@ -13,17 +13,35 @@ from .utils import project_root
 
 
 TEACHER_CAMERA_ORDERS: dict[str, tuple[str, ...]] = {
-    "StreamPETR": ("CAM_F0", "CAM_L0", "CAM_R0", "CAM_L1", "CAM_R1", "CAM_L2", "CAM_R2", "CAM_B0"),
-    "MapTRv2": ("CAM_F0", "CAM_L0", "CAM_R0", "CAM_L1", "CAM_R1", "CAM_L2", "CAM_R2", "CAM_B0"),
+    "StreamPETR": ("CAM_F0", "CAM_R0", "CAM_R2", "CAM_B0", "CAM_L2", "CAM_L0"),
+    "MapTRv2": ("CAM_F0", "CAM_R0", "CAM_R2", "CAM_B0", "CAM_L2", "CAM_L0"),
     "OccNet": OPENSCENE_CAMERA_NAMES,
     "ViDAR": OPENSCENE_CAMERA_NAMES,
 }
 
+TEACHER_CAMERA_ALIASES: dict[str, dict[str, str]] = {
+    "StreamPETR": {
+        "CAM_F0": "FRONT",
+        "CAM_R0": "FRONT_RIGHT",
+        "CAM_R2": "BACK_RIGHT",
+        "CAM_B0": "BACK",
+        "CAM_L2": "BACK_LEFT",
+        "CAM_L0": "FRONT_LEFT",
+    },
+    "MapTRv2": {
+        "CAM_F0": "FRONT",
+        "CAM_R0": "FRONT_RIGHT",
+        "CAM_R2": "BACK_RIGHT",
+        "CAM_B0": "BACK",
+        "CAM_L2": "BACK_LEFT",
+        "CAM_L0": "FRONT_LEFT",
+    },
+}
+
 OPENSCENE_AGENT_CLASS_TO_STREAM_PETR = {
-    "vehicle": "car",
+    "vehicle": "vehicle",
     "pedestrian": "pedestrian",
     "traffic_cone": "traffic_cone",
-    "generic_object": "barrier",
 }
 
 OPENSCENE_MAP_CLASS_NOTE = (
@@ -33,8 +51,10 @@ OPENSCENE_MAP_CLASS_NOTE = (
 
 OCCNET_CLASS_MAPPING_VERSION = "openscene_nuplan_occ11_to_quest_occ11_v0"
 COORDINATE_CONVENTION = (
-    "OpenScene sample uses camera sensor2lidar extrinsics; QUEST normalizes "
-    "agent boxes into local lidar range and keeps occupancy as [C, X, Y, Z]."
+    "OpenScene sample uses camera sensor2lidar extrinsics. StreamPETR/MapTRv2 "
+    "consume selected 6-view nuScenes-style camera aliases at the same timestamp; "
+    "OccNet and ViDAR consume OpenScene 8-view tensors. QUEST keeps occupancy "
+    "as [C, X, Y, Z]."
 )
 
 
@@ -68,6 +88,8 @@ class TeacherCheckResult:
     dependencies_ok: bool
     inference_ok: bool
     frozen: bool
+    camera_count: int
+    camera_mapping: dict[str, str]
     status: str
     searched_paths: list[str] = field(default_factory=list)
     missing_dependencies: list[str] = field(default_factory=list)
@@ -90,6 +112,8 @@ class TeacherCheckResult:
             "dependencies_ok": self.dependencies_ok,
             "inference_ok": self.inference_ok,
             "frozen": self.frozen,
+            "camera_count": self.camera_count,
+            "camera_mapping": self.camera_mapping,
             "status": self.status,
             "searched_paths": self.searched_paths,
             "missing_dependencies": self.missing_dependencies,
@@ -220,9 +244,9 @@ def occnet_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def vidar_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
-    """Convert ViDAR future representation to QUEST flow only when the source tensor is verified as occupancy flow."""
+    """Expose ViDAR future-world output only after the real temporal representation is inspected."""
 
-    raise TeacherUnavailableError("ViDAR does not guarantee direct flow output; conversion must inspect real model output.")
+    raise TeacherUnavailableError("ViDAR is a Future World teacher, not a Flow teacher; conversion must inspect real output.")
 
 
 class ExternalTeacher(nn.Module):
@@ -272,7 +296,16 @@ class ExternalTeacher(nn.Module):
         if not dependencies_ok:
             errors.append("missing dependencies: " + ", ".join(missing_dependencies))
 
-        status = "READY_FOR_MODEL_BUILD" if repo_ok and config_ok and checkpoint_load_ok and dependencies_ok else "BLOCKED"
+        if not checkpoint_ok:
+            status = "BLOCKED_CHECKPOINT"
+        elif not checkpoint_load_ok:
+            status = "BLOCKED_CHECKPOINT_LOAD"
+        elif not dependencies_ok:
+            status = "BLOCKED_ENVIRONMENT"
+        elif not repo_ok or not config_ok:
+            status = "BLOCKED_CONFIG"
+        else:
+            status = "READY_FOR_NATIVE_BUILD"
         return TeacherCheckResult(
             task=self.spec.task,
             name=self.spec.name,
@@ -286,6 +319,8 @@ class ExternalTeacher(nn.Module):
             dependencies_ok=dependencies_ok,
             inference_ok=False,
             frozen=all(not p.requires_grad for p in self.parameters()),
+            camera_count=len(TEACHER_CAMERA_ORDERS.get(self.spec.name, OPENSCENE_CAMERA_NAMES)),
+            camera_mapping=TEACHER_CAMERA_ALIASES.get(self.spec.name, {}),
             status=status,
             searched_paths=searched,
             missing_dependencies=missing_dependencies,
@@ -304,6 +339,7 @@ class ExternalTeacher(nn.Module):
             "ego_pose": batch.get("ego_pose"),
             "metadata": batch.get("metadata"),
             "camera_order": target_order,
+            "camera_aliases": TEACHER_CAMERA_ALIASES.get(self.spec.name, {}),
             "coordinate_convention": COORDINATE_CONVENTION,
         }
 
@@ -315,7 +351,7 @@ class ExternalTeacher(nn.Module):
     @torch.no_grad()
     def forward(self, batch: Mapping[str, Any]) -> dict[str, Any]:
         self.eval()
-        if self.check_result.status != "READY_FOR_MODEL_BUILD":
+        if self.check_result.status != "READY_FOR_NATIVE_BUILD":
             raise TeacherUnavailableError(f"{self.spec.name} BLOCKED: {'; '.join(self.check_result.errors)}")
         del batch
         raise TeacherUnavailableError(
@@ -340,7 +376,7 @@ class OccNetTeacher(ExternalTeacher):
 
 class ViDARTeacher(ExternalTeacher):
     checkpoint_patterns = ("vidar",)
-    output_keys = ("flow", "future_world", "valid_mask")
+    output_keys = ("future_world", "raw_future", "valid_mask")
 
 
 TEACHER_CLASSES = {

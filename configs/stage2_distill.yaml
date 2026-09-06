@@ -23,8 +23,8 @@ teachers:
     name: MapTRv2
     enabled: true
     repo_path: third_party/MapTR
-    config_path: third_party/MapTR/projects/configs/maptr/maptr_tiny_r50_24e.py
-    checkpoint_path:
+    config_path: third_party/MapTR/projects/configs/maptrv2/maptrv2_nusc_r50_24ep.py
+    checkpoint_path: weights/teachers/maptrv2/maptrv2_nusc_r50_24ep.pth
     outputs:
       - map_class
       - vector_points
@@ -38,15 +38,15 @@ teachers:
     openscene_baseline_path: third_party/OpenScene/DriveEngine/projects/configs
     outputs:
       - semantic_occupancy
-  flow:
+  future_world:
     name: ViDAR
     enabled: true
     repo_path: third_party/ViDAR
-    config_path: third_party/ViDAR/projects/configs/vidar_pretrain/OpenScene/vidar_OpenScene_mini_1_8_3future.py
-    checkpoint_path:
+    config_path: third_party/ViDAR/projects/configs/vidar_pretrain/OpenScene/vidar_OpenScene_mini_full_3future.py
+    checkpoint_path: weights/teachers/vidar/vidar_openscene_mini_full_3future.pth
     outputs:
-      - occupancy_flow
       - future_world
+      - raw_future
   segformer:
     name: SegFormer
     enabled: false
@@ -55,7 +55,7 @@ loss_weights:
   agent: 1.0
   map: 1.0
   occ: 1.0
-  flow: 1.0
+  future_world: 1.0
 interfaces:
   hard_gt_supervision: true
   soft_label_distillation: false

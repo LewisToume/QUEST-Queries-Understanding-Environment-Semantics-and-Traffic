@@ -13,6 +13,7 @@ from quest.utils import load_yaml_config
 
 
 REPORT_PATH = PROJECT_ROOT / "docs" / "teacher_integration_status.md"
+REQUIRED_MODULES = ("torch", "mmcv", "mmdet", "mmdet3d")
 
 
 def mark(value: bool) -> str:
@@ -20,6 +21,7 @@ def mark(value: bool) -> str:
 
 
 def write_report(results: list[dict]) -> None:
+    env_status = "OK" if all(item["dependencies_ok"] for item in results) else "BLOCKED"
     lines = [
         "# Teacher Integration Status",
         "",
@@ -27,20 +29,27 @@ def write_report(results: list[dict]) -> None:
         "",
         "## Summary",
         "",
-        "| Teacher | Repo | Config | Checkpoint | Load | Deps | Inference | Status |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Teacher | Task | Environment | Repo | Config | Checkpoint | Camera count | Camera mapping | Build | Real inference | Raw output | Conversion | GT evaluation | Remaining blocker |",
+        "| --- | --- | --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for item in results:
+        blocker = "; ".join(item["errors"]) or "none"
         lines.append(
-            "| {name} | {repo} | {config} | {checkpoint} | {load} | {deps} | {inference} | {status} |".format(
+            "| {name} | {task} | {env} | {repo} | {config} | {checkpoint} | {camera_count} | {mapping} | {build} | {inference} | {raw} | {conversion} | {gt_eval} | {blocker} |".format(
                 name=item["name"],
+                task=item["task"],
+                env=mark(item["dependencies_ok"]),
                 repo=mark(item["repo_ok"]),
                 config=mark(item["config_ok"]),
                 checkpoint=mark(item["checkpoint_ok"]),
-                load=mark(item["checkpoint_load_ok"]),
-                deps=mark(item["dependencies_ok"]),
+                camera_count=item["camera_count"],
+                mapping=json.dumps(item["camera_mapping"], ensure_ascii=False) if item["camera_mapping"] else "OpenScene native",
+                build="BLOCKED" if item["status"].startswith("BLOCKED") else "PENDING_NATIVE_BUILD",
                 inference=mark(item["inference_ok"]),
-                status=item["status"],
+                raw="none" if not item["raw_output_shapes"] else json.dumps(item["raw_output_shapes"]),
+                conversion="BLOCKED" if not item["converted_output_shapes"] else "OK",
+                gt_eval="BLOCKED" if not item["inference_ok"] else "PENDING_METRIC",
+                blocker=blocker,
             )
         )
     lines.extend(["", "## Details", ""])
@@ -49,9 +58,12 @@ def write_report(results: list[dict]) -> None:
             [
                 f"### {item['name']} -> {item['task']}",
                 "",
+                f"- environment: `{mark(item['dependencies_ok'])}`",
                 f"- repo_path: `{item['repo_path']}`",
                 f"- config_path: `{item['config_path']}`",
                 f"- checkpoint_path: `{item['checkpoint_path']}`",
+                f"- camera_count: `{item['camera_count']}`",
+                f"- camera_mapping: `{json.dumps(item['camera_mapping'], ensure_ascii=False)}`",
                 f"- missing_dependencies: `{', '.join(item['missing_dependencies']) or 'none'}`",
                 f"- checkpoint_keys: `{', '.join(item['checkpoint_keys']) or 'none'}`",
                 f"- searched_paths: `{'; '.join(item['searched_paths'])}`",
@@ -59,15 +71,19 @@ def write_report(results: list[dict]) -> None:
                 "",
             ]
         )
+    lines.extend(["## Current Assessment", ""])
+    for item in results:
+        blocker = "; ".join(item["errors"]) or item["status"]
+        if item["inference_ok"]:
+            lines.append(f"- {item['name']} real inference: OK.")
+        else:
+            lines.append(f"- {item['name']} real inference: {item['status']} ({blocker}).")
     lines.extend(
         [
-            "## Current Assessment",
-            "",
-            "- StreamPETR has a local checkpoint that can be loaded with `torch.load`, but MMDetection3D dependencies are missing, so real model inference is blocked.",
-            "- MapTRv2 repo and config are present, but no MapTR checkpoint was found under `weights/` or `third_party/`.",
-            "- OccNet repo and OpenScene Occ baseline config are present, but no OccNet/OpenScene checkpoint was found under `weights/` or `third_party/`.",
-            "- ViDAR repo and OpenScene config are present, but no ViDAR checkpoint was found under `weights/` or `third_party/`.",
-            "- No random soft labels or dummy teacher outputs are generated.",
+            "- Flow remains supervised by OpenScene Flow GT. ViDAR is recorded only as the Future World teacher.",
+            "- `quest_teacher_legacy` creation was attempted on Windows; pip failed on `torch-1.10.1+cu111` with an invalid wheel error, leaving torch/mmcv/mmdet/mmdet3d unavailable.",
+            "- No random soft labels, fake tensors, or dummy teacher outputs are generated.",
+            f"- Aggregate environment status: {env_status}. Required modules: {', '.join(REQUIRED_MODULES)}.",
             "",
         ]
     )
@@ -82,15 +98,17 @@ def main() -> None:
 
     print("Teacher repo/config/checkpoint/dependency check")
     print("=" * 96)
-    print(f"{'Teacher':<12} {'repo':<8} {'config':<8} {'checkpoint':<11} {'load':<8} {'deps':<8} {'inference':<10} status")
+    print(f"{'Teacher':<12} {'task':<13} {'env':<8} {'repo':<8} {'config':<8} {'checkpoint':<11} {'load':<8} {'cams':<5} {'inference':<10} status")
     for item in results:
         print(
             f"{item['name']:<12} "
+            f"{item['task']:<13} "
+            f"{mark(item['dependencies_ok']):<8} "
             f"{mark(item['repo_ok']):<8} "
             f"{mark(item['config_ok']):<8} "
             f"{mark(item['checkpoint_ok']):<11} "
             f"{mark(item['checkpoint_load_ok']):<8} "
-            f"{mark(item['dependencies_ok']):<8} "
+            f"{item['camera_count']:<5} "
             f"{mark(item['inference_ok']):<10} "
             f"{item['status']}"
         )

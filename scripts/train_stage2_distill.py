@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -61,53 +60,59 @@ def zero_like_loss(preds: dict[str, torch.Tensor]) -> torch.Tensor:
     return sum(value.sum() * 0.0 for value in preds.values() if torch.is_tensor(value))
 
 
+def kd_agent_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
+    del teacher_output
+    return (
+        student_preds["agent_boxes"].sum() * 0.0,
+        "disabled: requires common box coordinate conversion, class mapping, and Hungarian/3D-box matching",
+    )
+
+
+def kd_map_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
+    del teacher_output
+    return (
+        student_preds["map_points"].sum() * 0.0,
+        "disabled: map taxonomy is NOT_VERIFIED and vector point resampling is not validated",
+    )
+
+
+def kd_occ_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
+    del teacher_output
+    return (
+        student_preds["occ_logits"].sum() * 0.0,
+        "disabled: requires physical voxel alignment, class mapping, and spatial resampling",
+    )
+
+
+def kd_future_world_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
+    del teacher_output
+    return (
+        student_preds["flow_logits"].sum() * 0.0,
+        "disabled: ViDAR future representation needs temporal/spatial projection adapter; it is not flow",
+    )
+
+
 def distill_from_teacher_outputs(
     student_preds: dict[str, torch.Tensor],
     teacher_outputs: dict[str, dict[str, Any]],
     loss_weights: dict[str, float],
-) -> tuple[torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, dict[str, Any]]:
     kd_loss = zero_like_loss(student_preds)
-    logs: dict[str, float] = {}
+    logs: dict[str, Any] = {}
 
-    agent = teacher_outputs.get("agent")
-    if agent and "cls_logits" in agent:
-        target = agent["cls_logits"].to(student_preds["agent_cls_logits"].device)
-        if target.shape == student_preds["agent_cls_logits"].shape:
-            loss = F.kl_div(
-                F.log_softmax(student_preds["agent_cls_logits"], dim=-1),
-                F.softmax(target, dim=-1),
-                reduction="batchmean",
-            )
-            kd_loss = kd_loss + float(loss_weights.get("agent", 0.0)) * loss
-            logs["kd_agent"] = float(loss.item())
-
-    occ = teacher_outputs.get("occ")
-    if occ and "occ_logits" in occ:
-        target = occ["occ_logits"].to(student_preds["occ_logits"].device)
-        if target.shape == student_preds["occ_logits"].shape:
-            loss = F.kl_div(
-                F.log_softmax(student_preds["occ_logits"], dim=1),
-                F.softmax(target, dim=1),
-                reduction="batchmean",
-            )
-            kd_loss = kd_loss + float(loss_weights.get("occ", 0.0)) * loss
-            logs["kd_occ"] = float(loss.item())
-
-    flow = teacher_outputs.get("flow")
-    if flow and "flow" in flow:
-        target = flow["flow"].to(student_preds["flow_logits"].device)
-        if target.shape == student_preds["flow_logits"].shape:
-            loss = F.smooth_l1_loss(student_preds["flow_logits"], target)
-            kd_loss = kd_loss + float(loss_weights.get("flow", 0.0)) * loss
-            logs["kd_flow"] = float(loss.item())
-
-    mapping = teacher_outputs.get("map")
-    if mapping and "points" in mapping:
-        target = mapping["points"].to(student_preds["map_points"].device)
-        if target.shape == student_preds["map_points"].shape:
-            loss = F.smooth_l1_loss(student_preds["map_points"], target)
-            kd_loss = kd_loss + float(loss_weights.get("map", 0.0)) * loss
-            logs["kd_map"] = float(loss.item())
+    adapters = {
+        "agent": kd_agent_adapter,
+        "map": kd_map_adapter,
+        "occ": kd_occ_adapter,
+        "future_world": kd_future_world_adapter,
+    }
+    for task, adapter in adapters.items():
+        loss, reason = adapter(student_preds, teacher_outputs.get(task))
+        weight = float(loss_weights.get(task, 0.0))
+        kd_loss = kd_loss + weight * loss
+        logs[f"kd_{task}"] = float(loss.item())
+        logs[f"kd_{task}_weight"] = weight
+        logs[f"kd_{task}_reason"] = reason
 
     return kd_loss, logs
 
@@ -195,7 +200,10 @@ def main() -> None:
     print(f"  hard_total  : {hard_losses['total_loss'].item():.4f}")
     print(f"  kd_total    : {kd_loss.item():.4f}")
     for key, value in kd_logs.items():
-        print(f"  {key:<11}: {value:.4f}")
+        if isinstance(value, str):
+            print(f"  {key:<22}: {value}")
+        else:
+            print(f"  {key:<22}: {value:.4f}")
     print(f"  total       : {total_loss.item():.4f}")
     print("=" * 72)
 

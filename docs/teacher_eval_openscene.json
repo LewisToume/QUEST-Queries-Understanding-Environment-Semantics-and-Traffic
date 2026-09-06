@@ -18,7 +18,7 @@
       "task": "map",
       "teacher": "MapTRv2",
       "status": "BLOCKED",
-      "reason": "MapTRv2 BLOCKED: checkpoint not found; searched: ['C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\weights', 'C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\third_party']; missing dependencies: mmcv, mmdet, mmdet3d",
+      "reason": "MapTRv2 BLOCKED: missing dependencies: mmcv, mmdet, mmdet3d",
       "gt_summary": {
         "agent_gt_count": 16,
         "occ_gt_occupied_voxels": 35778,
@@ -41,10 +41,10 @@
     },
     {
       "sample_token": "1d7583b3abc8553b",
-      "task": "flow",
+      "task": "future_world",
       "teacher": "ViDAR",
       "status": "BLOCKED",
-      "reason": "ViDAR BLOCKED: checkpoint not found; searched: ['C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\weights', 'C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\third_party']; missing dependencies: mmcv, mmdet, mmdet3d",
+      "reason": "ViDAR BLOCKED: missing dependencies: mmcv, mmdet, mmdet3d",
       "gt_summary": {
         "agent_gt_count": 16,
         "occ_gt_occupied_voxels": 35778,
