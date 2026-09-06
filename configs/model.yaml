@@ -2,17 +2,32 @@ model:
   backbone_name: facebook/dinov2-small
   local_backbone_dir: weights/dinov2-small
   hidden_dim: 256
-  num_seg_queries: 32
+  camera_names:
+    - CAM_F0
+    - CAM_B0
+    - CAM_L0
+    - CAM_L1
+    - CAM_L2
+    - CAM_R0
+    - CAM_R1
+    - CAM_R2
+  fusion_layers: 1
+  fusion_attention_heads: 8
+  decoder_layers: 2
+  decoder_attention_heads: 8
   N_agent: 100
-  num_occ_queries: 50
-  C_seg: 6
-  seg_size: [64, 64]
-  C_agent: 10
-  D_box: 8
   N_map: 50
+  num_occ_queries: 50
+  num_flow_queries: 50
+  C_agent: 4
+  D_box: 8
   C_map: 4
   P: 20
-  C_occ: 4
-  X: 64
-  Y: 64
+  C_occ: 11
+  C_flow: 3
+  X: 200
+  Y: 200
   Z: 16
+  num_seg_queries: 32
+  C_seg: 6
+  seg_size: [64, 64]

@@ -1,30 +1,48 @@
 stage: 1
 train:
-  batch_size: 2
+  batch_size: 1
   num_epochs: 1
-  num_samples: 8
+  num_samples: 2
   lr: 1.0e-4
   weight_decay: 1.0e-4
   device: auto
 dataset:
+  root: data/openscene_first_test_100
   image_size: [224, 224]
+  camera_names:
+    - CAM_F0
+    - CAM_B0
+    - CAM_L0
+    - CAM_L1
+    - CAM_L2
+    - CAM_R0
+    - CAM_R1
+    - CAM_R2
   max_agent_instances: 16
   max_map_instances: 12
+  C_agent: 4
+  C_map: 4
+  C_occ: 11
+  C_flow: 3
+  occ_size: [200, 200, 16]
 loss:
+  tasks:
+    agent: true
+    map: false
+    occ: true
+    flow: false
   task_weights:
-    seg: 1.0
     agent: 2.0
-    map: 1.5
+    map: 0.0
     occ: 1.0
-  seg:
-    ignore_index: 255
-    class_weight:
+    flow: 0.0
   agent:
     cls_cost_weight: 2.0
     bbox_cost_weight: 0.25
     cls_gamma: 2.0
     cls_alpha: 0.25
     lambda_box: 0.25
+    lambda_velocity: 0.2
     lambda_dn: 0.0
     dn_enabled: false
     box_loss_type: l1
@@ -45,3 +63,5 @@ loss:
     lambda_sem: 0.0
     lambda_geo: 0.0
     lambda_lovasz: 0.0
+  flow:
+    loss_type: smooth_l1

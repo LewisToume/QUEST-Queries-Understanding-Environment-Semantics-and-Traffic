@@ -12,9 +12,11 @@ from torch.utils.data import DataLoader
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from quest.dataset import NuPlanDummyDataset, collate_fn
+from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel
+from quest.openscene_dataset import OpenSceneFirstTestDataset
+from quest.teachers import TeacherInterface
 from quest.utils import load_yaml_config
 
 
@@ -55,8 +57,13 @@ class QUESTTrainer:
 
     def build_dataloader(self) -> DataLoader:
         dataset_kwargs = dict(self.dataset_config)
-        dataset_kwargs["num_samples"] = int(self.train_config["num_samples"])
-        dataset = NuPlanDummyDataset(**dataset_kwargs)
+        data_root = dataset_kwargs.pop("root")
+        dataset_kwargs.pop("C_agent", None)
+        dataset_kwargs.pop("D_box", None)
+        max_samples = int(self.train_config["num_samples"])
+        dataset = OpenSceneFirstTestDataset(root=data_root, **dataset_kwargs)
+        if max_samples > 0 and max_samples < len(dataset):
+            dataset.manifest = dataset.manifest[:max_samples]
         return DataLoader(
             dataset,
             batch_size=int(self.train_config["batch_size"]),
@@ -75,22 +82,34 @@ class QUESTTrainer:
         )
 
     def train_step(self, batch: dict) -> dict:
-        images = batch["image"].to(self.device)
+        images = batch["images"].to(self.device)
+        intrinsics = batch["intrinsics"].to(self.device)
+        extrinsics = batch["extrinsics"].to(self.device)
+        ego_state = batch["ego_state"].to(self.device)
         gts = {
-            "seg_gt": batch["seg_gt"].to(self.device),
             "agent_gt": {
                 "labels": batch["agent_gt"]["labels"].to(self.device),
                 "boxes": batch["agent_gt"]["boxes"].to(self.device),
+                "velocity": batch["agent_gt"]["velocity"].to(self.device),
             },
             "map_gt": {
                 "labels": batch["map_gt"]["labels"].to(self.device),
                 "points": batch["map_gt"]["points"].to(self.device),
             },
+            "map_valid": batch["map_gt"]["valid"].to(self.device),
             "occ_gt": batch["occ_gt"].to(self.device),
+            "occ_valid": batch["occ_valid"].to(self.device),
+            "flow_gt": batch["flow_gt"].to(self.device),
+            "flow_valid": batch["flow_valid"].to(self.device),
         }
 
         with autocast_context(self.device):
-            preds = self.model(images)
+            preds = self.model(
+                images,
+                intrinsics=intrinsics,
+                extrinsics=extrinsics,
+                ego_state=ego_state,
+            )
         preds = {key: value.float() for key, value in preds.items()}
         losses = compute_total_loss(preds, gts, self.loss_config)
 
@@ -105,9 +124,9 @@ class QUESTTrainer:
     def train_epoch(self, dataloader: DataLoader, epoch: int) -> None:
         self.model.train()
         tracked_keys = [
-            "seg_loss",
             "agent_cls_loss",
             "agent_box_loss",
+            "agent_velocity_loss",
             "agent_dn_loss",
             "map_cls_loss",
             "map_pts_loss",
@@ -116,6 +135,7 @@ class QUESTTrainer:
             "occ_sem_scal_loss",
             "occ_geo_scal_loss",
             "occ_lovasz_loss",
+            "flow_loss",
             "total_loss",
         ]
         running = {key: 0.0 for key in tracked_keys}
@@ -130,10 +150,11 @@ class QUESTTrainer:
                 current_lr = self.optimizer.param_groups[0]["lr"]
                 print(
                     f"Epoch [{epoch}] Step [{batch_idx}/{len(dataloader)}] "
-                    f"seg={losses['seg_loss'].item():.4f} "
                     f"agent_cls={losses['agent_cls_loss'].item():.4f} "
+                    f"agent_vel={losses['agent_velocity_loss'].item():.4f} "
                     f"map_pts={losses['map_pts_loss'].item():.4f} "
                     f"occ={losses['occ_main_loss'].item():.4f} "
+                    f"flow={losses['flow_loss'].item():.4f} "
                     f"total={losses['total_loss'].item():.4f} "
                     f"lr={current_lr:.6f}"
                 )
@@ -148,16 +169,19 @@ class QUESTTrainer:
 def load_configs() -> tuple[dict, dict]:
     model_config = load_yaml_config(PROJECT_ROOT / "configs" / "model.yaml")["model"]
     stage_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage1.yaml")
+    stage2_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage2_distill.yaml")
+    TeacherInterface.from_config(stage2_config.get("teachers", {})).require_disabled_for_stage1()
 
     dataset_config = stage_config.setdefault("dataset", {})
-    dataset_config.setdefault("seg_size", model_config["seg_size"])
-    dataset_config.setdefault("C_seg", model_config["C_seg"])
+    dataset_config.setdefault("root", str(PROJECT_ROOT / "data" / "openscene_first_test_100"))
+    dataset_config.setdefault("camera_names", model_config["camera_names"])
     dataset_config.setdefault("C_agent", model_config["C_agent"])
     dataset_config.setdefault("D_box", model_config["D_box"])
     dataset_config.setdefault("C_map", model_config["C_map"])
     dataset_config.setdefault("P", model_config["P"])
     dataset_config.setdefault("occ_size", (model_config["X"], model_config["Y"], model_config["Z"]))
     dataset_config.setdefault("C_occ", model_config["C_occ"])
+    dataset_config.setdefault("C_flow", model_config["C_flow"])
     return model_config, stage_config
 
 

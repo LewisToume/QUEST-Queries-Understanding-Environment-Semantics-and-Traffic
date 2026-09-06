@@ -11,6 +11,14 @@ def _zero_like(reference: torch.Tensor) -> torch.Tensor:
     return reference.sum() * 0.0
 
 
+def _is_available(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if torch.is_tensor(value):
+        return bool(value.bool().any().item())
+    return bool(value)
+
+
 def _as_tensor_or_none(
     values: list[float] | None,
     device: torch.device,
@@ -110,6 +118,7 @@ def compute_seg_loss(
 def compute_agent_loss(
     agent_cls_logits: torch.Tensor,
     agent_boxes: torch.Tensor,
+    agent_velocity: torch.Tensor | None,
     agent_gt: Mapping[str, torch.Tensor],
     config: Mapping[str, Any] | None = None,
 ) -> Dict[str, torch.Tensor]:
@@ -120,6 +129,7 @@ def compute_agent_loss(
         "cls_alpha": 0.25,
         "class_weight": None,
         "lambda_box": 0.25,
+        "lambda_velocity": 0.2,
         "lambda_dn": 0.0,
         "box_loss_type": "l1",
         "dn_enabled": False,
@@ -137,15 +147,20 @@ def compute_agent_loss(
 
     cls_losses: list[torch.Tensor] = []
     box_losses: list[torch.Tensor] = []
+    velocity_losses: list[torch.Tensor] = []
 
     for batch_index in range(batch_size):
         pred_cls = agent_cls_logits[batch_index]
         pred_boxes = agent_boxes[batch_index]
+        pred_velocity = agent_velocity[batch_index] if agent_velocity is not None else None
         gt_labels = agent_gt["labels"][batch_index]
         gt_boxes = agent_gt["boxes"][batch_index]
+        gt_velocity = agent_gt.get("velocity")
+        gt_velocity_item = gt_velocity[batch_index] if gt_velocity is not None else None
         valid_mask = gt_labels >= 0
         valid_labels = gt_labels[valid_mask]
         valid_boxes = gt_boxes[valid_mask]
+        valid_velocity = gt_velocity_item[valid_mask] if gt_velocity_item is not None else None
 
         target_labels = torch.full(
             (num_queries,),
@@ -178,10 +193,20 @@ def compute_agent_loss(
                         matched_gt_boxes,
                         reduction="mean",
                     )
+                if pred_velocity is not None and valid_velocity is not None:
+                    velocity_loss = F.smooth_l1_loss(
+                        pred_velocity[matched_pred],
+                        valid_velocity[matched_gt],
+                        reduction="mean",
+                    )
+                else:
+                    velocity_loss = _zero_like(pred_boxes)
             else:
                 box_loss = _zero_like(pred_boxes)
+                velocity_loss = _zero_like(pred_boxes)
         else:
             box_loss = _zero_like(pred_boxes)
+            velocity_loss = _zero_like(pred_boxes)
 
         cls_loss = _softmax_focal_loss(
             pred_cls,
@@ -192,18 +217,22 @@ def compute_agent_loss(
         )
         cls_losses.append(cls_loss)
         box_losses.append(box_loss)
+        velocity_losses.append(velocity_loss)
 
     agent_cls_loss = torch.stack(cls_losses).mean() if cls_losses else _zero_like(agent_cls_logits)
     agent_box_loss = torch.stack(box_losses).mean() if box_losses else _zero_like(agent_boxes)
+    agent_velocity_loss = torch.stack(velocity_losses).mean() if velocity_losses else _zero_like(agent_boxes)
     agent_dn_loss = _zero_like(agent_cls_logits)
     agent_loss = (
         agent_cls_loss
         + float(agent_config["lambda_box"]) * agent_box_loss
+        + float(agent_config["lambda_velocity"]) * agent_velocity_loss
         + float(agent_config["lambda_dn"]) * agent_dn_loss
     )
     return {
         "agent_cls_loss": agent_cls_loss,
         "agent_box_loss": agent_box_loss,
+        "agent_velocity_loss": agent_velocity_loss,
         "agent_dn_loss": agent_dn_loss,
         "agent_loss": agent_loss,
     }
@@ -387,6 +416,27 @@ def compute_occ_loss(
     }
 
 
+def compute_flow_loss(
+    flow_logits: torch.Tensor,
+    flow_gt: torch.Tensor,
+    config: Mapping[str, Any] | None = None,
+    valid: torch.Tensor | None = None,
+) -> Dict[str, torch.Tensor]:
+    flow_config = {
+        "loss_type": "smooth_l1",
+    }
+    if config is not None:
+        flow_config.update(config)
+
+    if valid is not None and not valid.bool().any():
+        flow_loss = _zero_like(flow_logits)
+    elif flow_config["loss_type"] == "l1":
+        flow_loss = F.l1_loss(flow_logits, flow_gt.float(), reduction="mean")
+    else:
+        flow_loss = F.smooth_l1_loss(flow_logits, flow_gt.float(), reduction="mean")
+    return {"flow_loss": flow_loss}
+
+
 def compute_total_loss(
     preds: Mapping[str, torch.Tensor],
     gts: Mapping[str, Any],
@@ -394,15 +444,21 @@ def compute_total_loss(
 ) -> Dict[str, torch.Tensor]:
     total_config = {
         "task_weights": {
-            "seg": 1.0,
             "agent": 2.0,
             "map": 1.5,
             "occ": 1.0,
+            "flow": 1.0,
         },
-        "seg": {},
+        "tasks": {
+            "agent": True,
+            "map": False,
+            "occ": True,
+            "flow": False,
+        },
         "agent": {},
         "map": {},
         "occ": {},
+        "flow": {},
     }
     if config is not None:
         for key, value in config.items():
@@ -413,43 +469,82 @@ def compute_total_loss(
             else:
                 total_config[key] = value
 
-    seg_losses = compute_seg_loss(
-        preds["seg_logits"],
-        gts["seg_gt"],
-        total_config["seg"],
+    tasks = total_config["tasks"]
+    agent_losses = (
+        compute_agent_loss(
+            preds["agent_cls_logits"],
+            preds["agent_boxes"],
+            preds.get("agent_velocity"),
+            gts["agent_gt"],
+            total_config["agent"],
+        )
+        if bool(tasks.get("agent", True))
+        else {
+            "agent_cls_loss": _zero_like(preds["agent_cls_logits"]),
+            "agent_box_loss": _zero_like(preds["agent_boxes"]),
+            "agent_velocity_loss": _zero_like(preds["agent_boxes"]),
+            "agent_dn_loss": _zero_like(preds["agent_cls_logits"]),
+            "agent_loss": _zero_like(preds["agent_cls_logits"]),
+        }
     )
-    agent_losses = compute_agent_loss(
-        preds["agent_cls_logits"],
-        preds["agent_boxes"],
-        gts["agent_gt"],
-        total_config["agent"],
+    map_available = bool(tasks.get("map", False)) and _is_available(gts.get("map_valid"), default=False)
+    map_losses = (
+        compute_map_loss(
+            preds["map_cls_logits"],
+            preds["map_points"],
+            gts["map_gt"],
+            total_config["map"],
+        )
+        if map_available
+        else {
+            "map_cls_loss": _zero_like(preds["map_cls_logits"]),
+            "map_pts_loss": _zero_like(preds["map_points"]),
+            "map_dir_loss": _zero_like(preds["map_points"]),
+            "map_loss": _zero_like(preds["map_cls_logits"]),
+        }
     )
-    map_losses = compute_map_loss(
-        preds["map_cls_logits"],
-        preds["map_points"],
-        gts["map_gt"],
-        total_config["map"],
+    occ_available = bool(tasks.get("occ", True)) and _is_available(gts.get("occ_valid"), default=True)
+    occ_losses = (
+        compute_occ_loss(
+            preds["occ_logits"],
+            gts["occ_gt"],
+            total_config["occ"],
+            mask_camera=gts.get("mask_camera"),
+        )
+        if occ_available
+        else {
+            "occ_main_loss": _zero_like(preds["occ_logits"]),
+            "occ_sem_scal_loss": _zero_like(preds["occ_logits"]),
+            "occ_geo_scal_loss": _zero_like(preds["occ_logits"]),
+            "occ_lovasz_loss": _zero_like(preds["occ_logits"]),
+            "occ_loss": _zero_like(preds["occ_logits"]),
+        }
     )
-    occ_losses = compute_occ_loss(
-        preds["occ_logits"],
-        gts["occ_gt"],
-        total_config["occ"],
-        mask_camera=gts.get("mask_camera"),
+    flow_available = bool(tasks.get("flow", False)) and _is_available(gts.get("flow_valid"), default=False)
+    flow_losses = (
+        compute_flow_loss(
+            preds["flow_logits"],
+            gts["flow_gt"],
+            total_config["flow"],
+            valid=gts.get("flow_valid"),
+        )
+        if flow_available
+        else {"flow_loss": _zero_like(preds["flow_logits"])}
     )
 
     task_weights = total_config["task_weights"]
     total_loss = (
-        float(task_weights["seg"]) * seg_losses["seg_loss"]
-        + float(task_weights["agent"]) * agent_losses["agent_loss"]
-        + float(task_weights["map"]) * map_losses["map_loss"]
-        + float(task_weights["occ"]) * occ_losses["occ_loss"]
+        float(task_weights.get("agent", 0.0)) * agent_losses["agent_loss"]
+        + float(task_weights.get("map", 0.0)) * map_losses["map_loss"]
+        + float(task_weights.get("occ", 0.0)) * occ_losses["occ_loss"]
+        + float(task_weights.get("flow", 0.0)) * flow_losses["flow_loss"]
     )
 
     output = {
-        **seg_losses,
         **agent_losses,
         **map_losses,
         **occ_losses,
+        **flow_losses,
         "total_loss": total_loss,
     }
     return output

@@ -81,10 +81,14 @@ def build_model_config() -> dict:
 
 def move_openscene_batch_to_device(batch: dict, device: str) -> dict:
     return {
-        "image": batch["image"].to(device),
+        "images": batch["images"].to(device),
+        "intrinsics": batch["intrinsics"].to(device),
+        "extrinsics": batch["extrinsics"].to(device),
+        "ego_state": batch["ego_state"].to(device),
         "agent_gt": {
             "labels": batch["agent_gt"]["labels"].to(device),
             "boxes": batch["agent_gt"]["boxes"].to(device),
+            "velocity": batch["agent_gt"]["velocity"].to(device),
         },
         "occ_gt": batch["occ_gt"].to(device),
     }
@@ -277,7 +281,12 @@ def save_openscene_visualization(
     model.eval()
     with torch.no_grad():
         with autocast_context(device):
-            outputs = model(batch["image"])
+            outputs = model(
+                batch["images"],
+                intrinsics=batch["intrinsics"],
+                extrinsics=batch["extrinsics"],
+                ego_state=batch["ego_state"],
+            )
     outputs = {key: value.float().detach().cpu() for key, value in outputs.items()}
     batch_cpu = {
         "agent_gt": {
@@ -399,22 +408,32 @@ def main() -> None:
 
     for step in range(1, args.steps + 1):
         batch = next(data_iter)
-        images = batch["image"].to(device)
+        images = batch["images"].to(device)
+        intrinsics = batch["intrinsics"].to(device)
+        extrinsics = batch["extrinsics"].to(device)
+        ego_state = batch["ego_state"].to(device)
         gts = {
             "agent_gt": {
                 "labels": batch["agent_gt"]["labels"].to(device),
                 "boxes": batch["agent_gt"]["boxes"].to(device),
+                "velocity": batch["agent_gt"]["velocity"].to(device),
             },
             "occ_gt": batch["occ_gt"].to(device),
         }
 
         with autocast_context(device):
-            preds = model(images)
+            preds = model(
+                images,
+                intrinsics=intrinsics,
+                extrinsics=extrinsics,
+                ego_state=ego_state,
+            )
         preds = {key: value.float() for key, value in preds.items()}
 
         agent_losses = compute_agent_loss(
             preds["agent_cls_logits"],
             preds["agent_boxes"],
+            preds["agent_velocity"],
             gts["agent_gt"],
             agent_loss_config,
         )

@@ -66,6 +66,7 @@ class AgentHead(nn.Module):
     Outputs:
     - agent_cls_logits: [B, N_agent, C_agent + 1]
     - agent_boxes: [B, N_agent, D_box]
+    - agent_velocity: [B, N_agent, 3]
     """
 
     def __init__(
@@ -91,10 +92,16 @@ class AgentHead(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, D_box),
         )
+        self.velocity_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 3),
+        )
 
-    def forward(self, agent_queries: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, agent_queries: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         agent_cls_logits = self.cls_head(agent_queries)
         raw_boxes = self.box_head(agent_queries)
+        agent_velocity = self.velocity_head(agent_queries)
 
         box_center_size = raw_boxes[..., :6].sigmoid()
         box_yaw = F.normalize(raw_boxes[..., 6:8], dim=-1)
@@ -103,7 +110,7 @@ class AgentHead(nn.Module):
         else:
             extra = raw_boxes[..., 8:]
             agent_boxes = torch.cat([box_center_size, box_yaw, extra], dim=-1)
-        return agent_cls_logits, agent_boxes
+        return agent_cls_logits, agent_boxes, agent_velocity
 
 
 class MapHead(nn.Module):
@@ -150,7 +157,7 @@ class MapHead(nn.Module):
 
 class OCCHead(nn.Module):
     """
-    FlashOCC-style voxel semantic head.
+    OccNet-baseline-style voxel semantic head.
 
     The previous version pooled all occupancy queries with a simple mean before
     decoding, which erased query-to-query differences too early. This version
@@ -218,3 +225,68 @@ class OCCHead(nn.Module):
             align_corners=False,
         )
         return occ_logits.permute(0, 1, 4, 3, 2).contiguous()
+
+
+class FlowHead(nn.Module):
+    """
+    Lightweight occupancy-flow decoder.
+
+    Output:
+    - flow_logits: [B, C_flow, X, Y, Z]
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        C_flow: int = 3,
+        flow_size: Tuple[int, int, int] = (64, 64, 16),
+        base_channels: int = 32,
+    ) -> None:
+        super().__init__()
+        self.C_flow = C_flow
+        self.flow_size = flow_size
+        self.base_channels = base_channels
+        self.seed_x = 4
+        self.seed_y = 4
+        self.seed_z = 2
+        self.num_seed_cells = self.seed_x * self.seed_y * self.seed_z
+
+        self.query_value_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, base_channels),
+        )
+        self.query_seed_score = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.num_seed_cells),
+        )
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose3d(base_channels, 32, kernel_size=4, stride=2, padding=1),
+            nn.GELU(),
+            nn.ConvTranspose3d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.GELU(),
+            nn.ConvTranspose3d(16, C_flow, kernel_size=4, stride=2, padding=1),
+        )
+
+    def forward(self, flow_queries: torch.Tensor) -> torch.Tensor:
+        batch_size = flow_queries.shape[0]
+        query_values = self.query_value_proj(flow_queries)
+        seed_scores = self.query_seed_score(flow_queries)
+        seed_weights = torch.softmax(seed_scores, dim=1)
+        seed = torch.einsum("bns,bnc->bsc", seed_weights, query_values)
+        seed = seed.transpose(1, 2).contiguous().view(
+            batch_size,
+            self.base_channels,
+            self.seed_z,
+            self.seed_y,
+            self.seed_x,
+        )
+        flow_logits = self.decoder(seed)
+        flow_logits = F.interpolate(
+            flow_logits,
+            size=(self.flow_size[2], self.flow_size[1], self.flow_size[0]),
+            mode="trilinear",
+            align_corners=False,
+        )
+        return flow_logits.permute(0, 1, 4, 3, 2).contiguous()

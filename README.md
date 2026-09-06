@@ -1,17 +1,18 @@
 # QUEST
 
-QUEST is a runnable research prototype for a single-frame visual front-end with
-four explicit task lines:
+QUEST is a runnable research prototype for current-scene 8-camera 2D-to-3D
+perception on OpenScene with four explicit task lines:
 
-1. segmentation
-2. agent
-3. map
-4. occ
+1. agent
+2. map
+3. occ
+4. flow
 
 The current repository is an engineering skeleton, not a final production
 system. The goal is to keep the main training and forward paths executable while
-making the task semantics clear enough for future real-data and distillation
-integration.
+making the task semantics clear enough for real-data and distillation
+integration. Segmentation code is preserved, but it is not part of the main
+Stage1 task set.
 
 ## Current Project Layout
 
@@ -28,30 +29,31 @@ QUEST/
 
 ## Four Task Lines
 
-- `seg`: image-plane semantic segmentation logits
-- `agent`: object-level predictions for future detection/tracking expansion
-- `map`: BEV map-element logits such as road, lane, and boundary
-- `occ`: 3D occupancy logits
+- `agent`: class, normalized 3D box, and velocity
+- `map`: map class and vector/polyline points
+- `occ`: 3D semantic occupancy logits
+- `flow`: occupancy/voxel flow
 
-The current dummy dataset and training pipeline already use the future-facing
-task interface:
+The Stage1 OpenScene path uses fixed camera order:
+
+```text
+CAM_F0, CAM_B0, CAM_L0, CAM_L1, CAM_L2, CAM_R0, CAM_R1, CAM_R2
+```
+
+The model input is:
 
 ```python
-{
-    "image": ...,
-    "seg_gt": ...,
-    "agent_gt": ...,
-    "map_gt": ...,
-    "occ_gt": ...,
-}
+images: [B, 8, 3, H, W]
 ```
 
 ## Status
 
-- Stage 1 training is runnable with dummy data.
-- Stage 2 distillation is still a demo path with placeholder soft labels.
-- Real nuPlan data loading is not connected yet.
-- Real teacher exports are not connected yet.
+- Stage1 training runs on real extracted OpenScene samples.
+- Agent uses real OpenScene 3D boxes, classes, and velocity.
+- OCC uses real OpenScene semantic occupancy.
+- Map and flow interfaces are present, but their losses stay masked until real
+  vector map GT and flow GT are wired.
+- Teacher distillation is not active in Stage1.
 
 ## Quick Checks
 
@@ -60,6 +62,7 @@ Run from the project root:
 ```powershell
 python scripts/check_env.py
 python -m quest.backbone
+python scripts/inspect_openscene.py
 python -m quest.model
 python scripts/train_stage1.py
 ```
@@ -74,14 +77,16 @@ python scripts/train_stage2_distill.py
 
 - `configs/model.yaml`: backbone, query counts, and head output dimensions
 - `configs/stage1.yaml`: stage1 optimizer, dataset, and loss weights
-- `configs/stage2_distill.yaml`: stage2 distillation settings and placeholder
-  soft-label path
+- `configs/stage2_distill.yaml`: teacher interface settings for future
+  distillation
 
 ## Notes
 
-- The backbone is a frozen DINOv2 encoder.
-- The decoder uses task-specific query groups for `seg`, `agent`, `map`, and
-  `occ`.
+- The backbone is one shared frozen DINOv2 encoder reused across all 8 cameras.
+- Multi-view fusion is a lightweight camera-aware Transformer using camera
+  embeddings plus intrinsic/extrinsic/ego geometry features.
+- The decoder uses task-specific query groups for `agent`, `map`, `occ`, and
+  `flow`.
 - Losses are now centralized in `quest/losses.py`.
-- The code is intentionally minimal so the main chain stays runnable while the
-  repo transitions from demo naming to clearer research semantics.
+- Teacher mapping for later Stage2 is StreamPETR -> Agent, MapTRv2 -> Map,
+  OccNet -> OCC, and ViDAR -> Flow / future world.

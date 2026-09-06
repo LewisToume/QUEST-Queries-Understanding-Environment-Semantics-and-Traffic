@@ -8,8 +8,43 @@ distill:
   model_path:
 paths:
   soft_labels_dir: data/soft_labels
+teachers:
+  agent:
+    name: StreamPETR
+    enabled: false
+    outputs:
+      - class
+      - 3d_box
+      - velocity
+  map:
+    name: MapTRv2
+    enabled: false
+    outputs:
+      - map_class
+      - vector_points
+      - polyline
+  occ:
+    name: OccNet
+    enabled: false
+    outputs:
+      - semantic_occupancy
+  flow:
+    name: ViDAR
+    enabled: false
+    outputs:
+      - occupancy_flow
+      - future_world
+  segformer:
+    name: SegFormer
+    enabled: false
+    role: archived_non_core
 loss_weights:
-  seg: 1.0
   agent: 1.0
   map: 1.0
   occ: 1.0
+  flow: 1.0
+interfaces:
+  hard_gt_supervision: true
+  soft_label_distillation: false
+  feature_distillation: false
+  unlabeled_video: false
