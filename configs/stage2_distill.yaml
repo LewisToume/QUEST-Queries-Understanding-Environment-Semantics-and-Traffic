@@ -12,6 +12,7 @@ teachers:
   agent:
     name: StreamPETR
     enabled: false
+    repo_path: third_party/StreamPETR
     outputs:
       - class
       - 3d_box
@@ -19,6 +20,7 @@ teachers:
   map:
     name: MapTRv2
     enabled: false
+    repo_path: third_party/MapTR
     outputs:
       - map_class
       - vector_points
@@ -26,11 +28,14 @@ teachers:
   occ:
     name: OccNet
     enabled: false
+    repo_path: third_party/OccNet
+    openscene_baseline_path: third_party/OpenScene/DriveEngine/projects/configs
     outputs:
       - semantic_occupancy
   flow:
     name: ViDAR
     enabled: false
+    repo_path: third_party/ViDAR
     outputs:
       - occupancy_flow
       - future_world
