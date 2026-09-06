@@ -11,31 +11,39 @@ paths:
 teachers:
   agent:
     name: StreamPETR
-    enabled: false
+    enabled: true
     repo_path: third_party/StreamPETR
+    config_path: third_party/StreamPETR/projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_90e.py
+    checkpoint_path: third_party/StreamPETR-main/ckpts/stream_petr_r50_flash_704_bs2_seq_90e.pth
     outputs:
       - class
       - 3d_box
       - velocity
   map:
     name: MapTRv2
-    enabled: false
+    enabled: true
     repo_path: third_party/MapTR
+    config_path: third_party/MapTR/projects/configs/maptr/maptr_tiny_r50_24e.py
+    checkpoint_path:
     outputs:
       - map_class
       - vector_points
       - polyline
   occ:
     name: OccNet
-    enabled: false
+    enabled: true
     repo_path: third_party/OccNet
+    config_path: third_party/OpenScene/DriveEngine/projects/configs/bevformer/bev_tiny_occ_r50_nuplan.py
+    checkpoint_path:
     openscene_baseline_path: third_party/OpenScene/DriveEngine/projects/configs
     outputs:
       - semantic_occupancy
   flow:
     name: ViDAR
-    enabled: false
+    enabled: true
     repo_path: third_party/ViDAR
+    config_path: third_party/ViDAR/projects/configs/vidar_pretrain/OpenScene/vidar_OpenScene_mini_1_8_3future.py
+    checkpoint_path:
     outputs:
       - occupancy_flow
       - future_world

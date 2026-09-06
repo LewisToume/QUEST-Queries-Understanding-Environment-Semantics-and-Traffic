@@ -16,7 +16,6 @@ from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel
 from quest.openscene_dataset import OpenSceneFirstTestDataset
-from quest.teachers import TeacherInterface
 from quest.utils import load_yaml_config
 
 
@@ -169,8 +168,6 @@ class QUESTTrainer:
 def load_configs() -> tuple[dict, dict]:
     model_config = load_yaml_config(PROJECT_ROOT / "configs" / "model.yaml")["model"]
     stage_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage1.yaml")
-    stage2_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage2_distill.yaml")
-    TeacherInterface.from_config(stage2_config.get("teachers", {})).require_disabled_for_stage1()
 
     dataset_config = stage_config.setdefault("dataset", {})
     dataset_config.setdefault("root", str(PROJECT_ROOT / "data" / "openscene_first_test_100"))

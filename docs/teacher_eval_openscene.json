@@ -1,0 +1,56 @@
+{
+  "items": [
+    {
+      "sample_token": "1d7583b3abc8553b",
+      "task": "agent",
+      "teacher": "StreamPETR",
+      "status": "BLOCKED",
+      "reason": "StreamPETR BLOCKED: missing dependencies: mmcv, mmdet, mmdet3d",
+      "gt_summary": {
+        "agent_gt_count": 16,
+        "occ_gt_occupied_voxels": 35778,
+        "map_gt_available": false,
+        "flow_gt_available": false
+      }
+    },
+    {
+      "sample_token": "1d7583b3abc8553b",
+      "task": "map",
+      "teacher": "MapTRv2",
+      "status": "BLOCKED",
+      "reason": "MapTRv2 BLOCKED: checkpoint not found; searched: ['C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\weights', 'C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\third_party']; missing dependencies: mmcv, mmdet, mmdet3d",
+      "gt_summary": {
+        "agent_gt_count": 16,
+        "occ_gt_occupied_voxels": 35778,
+        "map_gt_available": false,
+        "flow_gt_available": false
+      }
+    },
+    {
+      "sample_token": "1d7583b3abc8553b",
+      "task": "occ",
+      "teacher": "OccNet",
+      "status": "BLOCKED",
+      "reason": "OccNet BLOCKED: checkpoint not found; searched: ['C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\weights', 'C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\third_party']; missing dependencies: mmcv, mmdet, mmdet3d",
+      "gt_summary": {
+        "agent_gt_count": 16,
+        "occ_gt_occupied_voxels": 35778,
+        "map_gt_available": false,
+        "flow_gt_available": false
+      }
+    },
+    {
+      "sample_token": "1d7583b3abc8553b",
+      "task": "flow",
+      "teacher": "ViDAR",
+      "status": "BLOCKED",
+      "reason": "ViDAR BLOCKED: checkpoint not found; searched: ['C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\weights', 'C:\\\\Users\\\\31722\\\\Desktop\\\\Research\\\\QUEST\\\\third_party']; missing dependencies: mmcv, mmdet, mmdet3d",
+      "gt_summary": {
+        "agent_gt_count": 16,
+        "occ_gt_occupied_voxels": 35778,
+        "map_gt_available": false,
+        "flow_gt_available": false
+      }
+    }
+  ]
+}
