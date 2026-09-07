@@ -115,11 +115,14 @@ class OpenSceneFirstTestDataset(Dataset):
             cam_info = metadata["cams"].get(cam_name)
             if cam_info is None:
                 raise KeyError(f"OpenScene sample missing camera metadata for {cam_name}")
-            images.append(self._load_image(self._camera_path(sample_dir, cam_name)))
+            image_path = self._camera_path(sample_dir, cam_name)
+            with Image.open(image_path) as source_image:
+                source_width, source_height = source_image.size
+            images.append(self._load_image(image_path))
             intrinsic = torch.as_tensor(cam_info["cam_intrinsic"], dtype=torch.float32)
             intrinsic = intrinsic.clone()
-            intrinsic[0, :] *= float(self.image_size[1]) / 1920.0
-            intrinsic[1, :] *= float(self.image_size[0]) / 1120.0
+            intrinsic[0, :] *= float(self.image_size[1]) / float(source_width)
+            intrinsic[1, :] *= float(self.image_size[0]) / float(source_height)
             intrinsics.append(intrinsic)
 
             extrinsic = torch.eye(4, dtype=torch.float32)

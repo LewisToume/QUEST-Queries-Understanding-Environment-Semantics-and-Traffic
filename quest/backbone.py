@@ -69,6 +69,11 @@ class FrozenDINOv2Backbone(torch.nn.Module):
             p.requires_grad = False
         self.model.eval()
 
+    def train(self, mode: bool = True) -> "FrozenDINOv2Backbone":
+        super().train(mode)
+        self.model.eval()
+        return self
+
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         with torch.inference_mode():
             outputs = self.model(pixel_values=images)
