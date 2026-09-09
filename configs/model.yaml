@@ -24,7 +24,7 @@ model:
   C_map: 4
   P: 20
   C_occ: 11
-  C_flow: 3
+  C_flow: 2
   X: 200
   Y: 200
   Z: 16

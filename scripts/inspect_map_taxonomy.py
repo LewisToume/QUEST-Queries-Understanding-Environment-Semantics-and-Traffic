@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import json
-import pickle
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.utils import load_yaml_config
+from quest.openscene_dataset import OpenSceneMetadataDataset
 
 
 def parse_assignment(path: Path, name: str) -> Any:
@@ -28,10 +28,13 @@ def main() -> None:
     stage1_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage1.yaml")
     stage2_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage2_distill.yaml")
     map_config = PROJECT_ROOT / stage2_config["teachers"]["map"]["config_path"]
-    data_root = PROJECT_ROOT / stage1_config["dataset"]["root"]
-    sample_dir = data_root / "sample_000"
-    with (sample_dir / "metadata.pkl").open("rb") as f:
-        metadata = pickle.load(f)
+    dataset_config = dict(stage1_config["dataset"])
+    dataset_config.pop("C_agent", None)
+    for path_key in ("metadata_path", "camera_root", "occupancy_root"):
+        path = Path(dataset_config[path_key])
+        if not path.is_absolute():
+            dataset_config[path_key] = str(PROJECT_ROOT / path)
+    metadata = OpenSceneMetadataDataset(max_samples=1, **dataset_config).infos[0]
 
     maptrv2_classes = parse_assignment(map_config, "map_classes")
     report = {

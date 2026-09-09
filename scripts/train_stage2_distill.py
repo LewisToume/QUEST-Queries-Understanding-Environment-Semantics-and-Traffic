@@ -14,7 +14,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel
-from quest.openscene_dataset import OpenSceneFirstTestDataset
+from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.teachers import TeacherUnavailableError, build_enabled_teachers
 from quest.utils import load_yaml_config
 
@@ -52,6 +52,7 @@ def move_batch_to_device(batch: dict[str, Any], device: str) -> tuple[torch.Tens
         "occ_valid": batch["occ_valid"].to(device),
         "flow_gt": batch["flow_gt"].to(device),
         "flow_valid": batch["flow_valid"].to(device),
+        "flow_mask": batch["flow_mask"].to(device),
     }
     return batch["images"].to(device), gts, model_inputs
 
@@ -124,9 +125,8 @@ def load_configs() -> tuple[dict, dict, dict]:
     return model_config, stage1_config, stage2_config
 
 
-def build_dataset(model_config: dict, stage1_config: dict, num_samples: int) -> OpenSceneFirstTestDataset:
+def build_dataset(model_config: dict, stage1_config: dict, num_samples: int) -> OpenSceneMetadataDataset:
     dataset_kwargs = dict(stage1_config.get("dataset", {}))
-    data_root = dataset_kwargs.pop("root", "data/openscene_first_test_100")
     dataset_kwargs.pop("C_agent", None)
     dataset_kwargs.pop("D_box", None)
     dataset_kwargs.setdefault("camera_names", model_config["camera_names"])
@@ -135,10 +135,11 @@ def build_dataset(model_config: dict, stage1_config: dict, num_samples: int) -> 
     dataset_kwargs.setdefault("C_occ", model_config["C_occ"])
     dataset_kwargs.setdefault("C_flow", model_config["C_flow"])
     dataset_kwargs.setdefault("occ_size", (model_config["X"], model_config["Y"], model_config["Z"]))
-    dataset = OpenSceneFirstTestDataset(root=data_root, **dataset_kwargs)
-    if num_samples > 0 and num_samples < len(dataset):
-        dataset.manifest = dataset.manifest[:num_samples]
-    return dataset
+    for path_key in ("metadata_path", "camera_root", "occupancy_root"):
+        path = Path(dataset_kwargs[path_key])
+        if not path.is_absolute():
+            dataset_kwargs[path_key] = str(PROJECT_ROOT / path)
+    return OpenSceneMetadataDataset(max_samples=num_samples, **dataset_kwargs)
 
 
 def main() -> None:

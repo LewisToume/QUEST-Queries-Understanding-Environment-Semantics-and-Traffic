@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.dataset import collate_fn
-from quest.openscene_dataset import OpenSceneFirstTestDataset
+from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.teachers import COORDINATE_CONVENTION, TeacherUnavailableError, build_enabled_teachers, tensor_shapes
 from quest.utils import load_yaml_config
 
@@ -50,10 +50,10 @@ def main() -> None:
     stage1_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage1.yaml")
     stage2_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage2_distill.yaml")
 
-    data_root = args.data_root or stage1_config.get("dataset", {}).get("root", "data/openscene_first_test_100")
     output_dir = Path(args.output_dir or stage2_config.get("paths", {}).get("soft_labels_dir", "data/soft_labels"))
     dataset_kwargs = dict(stage1_config.get("dataset", {}))
-    dataset_kwargs["root"] = data_root
+    if args.data_root:
+        dataset_kwargs["metadata_path"] = args.data_root
     dataset_kwargs.setdefault("camera_names", model_config["camera_names"])
     dataset_kwargs.setdefault("C_map", model_config["C_map"])
     dataset_kwargs.setdefault("P", model_config["P"])
@@ -62,10 +62,11 @@ def main() -> None:
     dataset_kwargs.setdefault("occ_size", (model_config["X"], model_config["Y"], model_config["Z"]))
     dataset_kwargs.pop("C_agent", None)
     dataset_kwargs.pop("D_box", None)
-    data_root_value = dataset_kwargs.pop("root")
-    dataset = OpenSceneFirstTestDataset(root=data_root_value, **dataset_kwargs)
-    if args.num_samples > 0 and args.num_samples < len(dataset):
-        dataset.manifest = dataset.manifest[: args.num_samples]
+    for path_key in ("metadata_path", "camera_root", "occupancy_root"):
+        path = Path(dataset_kwargs[path_key])
+        if not path.is_absolute():
+            dataset_kwargs[path_key] = str(PROJECT_ROOT / path)
+    dataset = OpenSceneMetadataDataset(max_samples=args.num_samples, **dataset_kwargs)
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_fn)
     teachers = build_enabled_teachers(stage2_config.get("teachers", {}))
@@ -76,7 +77,7 @@ def main() -> None:
     print("Export teacher outputs")
     print("=" * 96)
     for sample_index, batch in enumerate(dataloader):
-        sample_info = dataset.manifest[sample_index]
+        sample_info = dataset.infos[sample_index]
         sample_token = sample_info.get("token", sample_info.get("sample_id", f"sample_{sample_index:06d}"))
         print(f"sample={sample_index} token={sample_token}")
         for task, teacher in teachers.items():

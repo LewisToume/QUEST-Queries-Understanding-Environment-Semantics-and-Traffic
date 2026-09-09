@@ -162,7 +162,7 @@ class QUESTModel(nn.Module):
         C_map: int = 4,
         P: int = 20,
         C_occ: int = 4,
-        C_flow: int = 3,
+        C_flow: int = 2,
         X: int = 64,
         Y: int = 64,
         Z: int = 16,

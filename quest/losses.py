@@ -363,6 +363,7 @@ def compute_occ_loss(
         "enable_sem_scal_loss": False,
         "enable_geo_scal_loss": False,
         "enable_lovasz_loss": False,
+        "ignore_index": 255,
     }
     if config is not None:
         occ_config.update(config)
@@ -387,8 +388,9 @@ def compute_occ_loss(
             occ_main_loss = F.binary_cross_entropy_with_logits(logits, target)
     else:
         target = occ_gt.long()
+        ignore_index = int(occ_config["ignore_index"])
         if bool(occ_config["use_camera_mask"]) and mask_camera is not None:
-            valid = mask_camera.bool().view(-1)
+            valid = mask_camera.bool().view(-1) & (target.reshape(-1) != ignore_index)
             logits = occ_logits.permute(0, 2, 3, 4, 1).reshape(-1, C_occ)[valid]
             target = target.reshape(-1)[valid]
             if logits.numel() == 0:
@@ -396,7 +398,15 @@ def compute_occ_loss(
             else:
                 occ_main_loss = F.cross_entropy(logits, target, weight=class_weight)
         else:
-            occ_main_loss = F.cross_entropy(occ_logits, target, weight=class_weight)
+            if not bool((target != ignore_index).any()):
+                occ_main_loss = _zero_like(occ_logits)
+            else:
+                occ_main_loss = F.cross_entropy(
+                    occ_logits,
+                    target,
+                    weight=class_weight,
+                    ignore_index=ignore_index,
+                )
 
     occ_sem_scal_loss = _zero_like(occ_logits)
     occ_geo_scal_loss = _zero_like(occ_logits)
@@ -421,6 +431,7 @@ def compute_flow_loss(
     flow_gt: torch.Tensor,
     config: Mapping[str, Any] | None = None,
     valid: torch.Tensor | None = None,
+    mask: torch.Tensor | None = None,
 ) -> Dict[str, torch.Tensor]:
     flow_config = {
         "loss_type": "smooth_l1",
@@ -430,10 +441,30 @@ def compute_flow_loss(
 
     if valid is not None and not valid.bool().any():
         flow_loss = _zero_like(flow_logits)
-    elif flow_config["loss_type"] == "l1":
-        flow_loss = F.l1_loss(flow_logits, flow_gt.float(), reduction="mean")
     else:
-        flow_loss = F.smooth_l1_loss(flow_logits, flow_gt.float(), reduction="mean")
+        target = flow_gt.float()
+        if target.shape != flow_logits.shape:
+            raise ValueError(
+                f"Flow prediction/GT shape mismatch: {tuple(flow_logits.shape)} != {tuple(target.shape)}"
+            )
+        if mask is not None:
+            spatial_mask = mask.bool()
+            if spatial_mask.shape != flow_logits.shape[:1] + flow_logits.shape[2:]:
+                raise ValueError(
+                    "Flow mask must be [B, X, Y, Z], got "
+                    f"{tuple(spatial_mask.shape)} for {tuple(flow_logits.shape)}"
+                )
+            if valid is not None:
+                spatial_mask = spatial_mask & valid.bool().view(-1, 1, 1, 1)
+            channel_mask = spatial_mask.unsqueeze(1).expand_as(flow_logits)
+            if not channel_mask.any():
+                return {"flow_loss": _zero_like(flow_logits)}
+            flow_logits = flow_logits[channel_mask]
+            target = target[channel_mask]
+        if flow_config["loss_type"] == "l1":
+            flow_loss = F.l1_loss(flow_logits, target, reduction="mean")
+        else:
+            flow_loss = F.smooth_l1_loss(flow_logits, target, reduction="mean")
     return {"flow_loss": flow_loss}
 
 
@@ -527,6 +558,7 @@ def compute_total_loss(
             gts["flow_gt"],
             total_config["flow"],
             valid=gts.get("flow_valid"),
+            mask=gts.get("flow_mask"),
         )
         if flow_available
         else {"flow_loss": _zero_like(preds["flow_logits"])}

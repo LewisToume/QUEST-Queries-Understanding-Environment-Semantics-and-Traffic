@@ -2,12 +2,14 @@ stage: 1
 train:
   batch_size: 1
   num_epochs: 1
-  num_samples: 2
+  num_samples: 5
   lr: 1.0e-4
   weight_decay: 1.0e-4
   device: auto
 dataset:
-  root: data/openscene_first_test_100
+  metadata_path: data/openscene/meta_datas/openscene-v1.0/meta_datas/meta_data_mini.pkl
+  camera_root: data/openscene/sensor_blobs_mini
+  occupancy_root: data/openscene/occ_mini
   image_size: [224, 224]
   camera_names:
     - CAM_F0
@@ -23,19 +25,19 @@ dataset:
   C_agent: 4
   C_map: 4
   C_occ: 11
-  C_flow: 3
+  C_flow: 2
   occ_size: [200, 200, 16]
 loss:
   tasks:
     agent: true
     map: false
     occ: true
-    flow: false
+    flow: true
   task_weights:
     agent: 2.0
     map: 0.0
     occ: 1.0
-    flow: 0.0
+    flow: 1.0
   agent:
     cls_cost_weight: 2.0
     bbox_cost_weight: 0.25
@@ -56,6 +58,7 @@ loss:
     lambda_dir: 0.005
   occ:
     class_weight:
+    ignore_index: 255
     use_camera_mask: false
     enable_sem_scal_loss: false
     enable_geo_scal_loss: false

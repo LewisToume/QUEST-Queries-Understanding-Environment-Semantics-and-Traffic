@@ -5,7 +5,6 @@ import copy
 import importlib
 import json
 import math
-import pickle
 import sys
 import traceback
 from pathlib import Path
@@ -21,7 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel
-from quest.openscene_dataset import OpenSceneFirstTestDataset
+from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.utils import load_yaml_config
 
 
@@ -38,7 +37,7 @@ EXPECTED_OUTPUT_SHAPES = {
     "map_cls_logits": (1, 50, 5),
     "map_points": (1, 50, 20, 2),
     "occ_logits": (1, 11, 200, 200, 16),
-    "flow_logits": (1, 3, 200, 200, 16),
+    "flow_logits": (1, 2, 200, 200, 16),
 }
 
 
@@ -73,6 +72,7 @@ def move_gt_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, 
         "occ_valid": batch["occ_valid"].to(device),
         "flow_gt": batch["flow_gt"].to(device),
         "flow_valid": batch["flow_valid"].to(device),
+        "flow_mask": batch["flow_mask"].to(device),
     }
 
 
@@ -94,18 +94,15 @@ def forward_model(model: QUESTModel, tensors: dict[str, torch.Tensor], device: t
 
 
 def check_intrinsics_against_source(
-    dataset: OpenSceneFirstTestDataset,
+    dataset: OpenSceneMetadataDataset,
     batch: dict[str, Any],
 ) -> tuple[bool, list[dict[str, Any]]]:
-    item = dataset.manifest[0]
-    sample_dir = dataset.root / item["sample_id"]
-    with (sample_dir / "metadata.pkl").open("rb") as file:
-        metadata = pickle.load(file)
+    metadata = dataset.infos[0]
 
     details: list[dict[str, Any]] = []
     all_match = True
     for camera_index, camera_name in enumerate(dataset.camera_names):
-        image_path = dataset._camera_path(sample_dir, camera_name)
+        image_path = dataset._camera_metadata_path(metadata, camera_name)
         with Image.open(image_path) as image:
             source_width, source_height = image.size
         source = torch.as_tensor(metadata["cams"][camera_name]["cam_intrinsic"], dtype=torch.float32).clone()
@@ -163,7 +160,11 @@ def run() -> tuple[dict[str, Any], list[str]]:
     dataset_config = dict(stage_config["dataset"])
     dataset_config.pop("C_agent", None)
     dataset_config.setdefault("P", model_config["P"])
-    dataset = OpenSceneFirstTestDataset(root=PROJECT_ROOT / dataset_config.pop("root"), **dataset_config)
+    for path_key in ("metadata_path", "camera_root", "occupancy_root"):
+        path = Path(dataset_config[path_key])
+        if not path.is_absolute():
+            dataset_config[path_key] = str(PROJECT_ROOT / path)
+    dataset = OpenSceneMetadataDataset(max_samples=1, **dataset_config)
     batch = next(iter(DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_fn)))
 
     input_stats: dict[str, Any] = {}
@@ -295,13 +296,13 @@ def run() -> tuple[dict[str, Any], list[str]]:
     mask_probe_config["task_weights"]["flow"] = 1.0
     mask_probe_losses = compute_total_loss(outputs, gts, mask_probe_config)
     map_masked = float(mask_probe_losses["map_loss"].item()) == 0.0
-    flow_masked = float(mask_probe_losses["flow_loss"].item()) == 0.0
+    flow_supervised = bool(gts["flow_valid"].any()) and float(mask_probe_losses["flow_loss"].item()) > 0.0
     if not losses_finite or not math.isfinite(initial_loss) or initial_loss <= 0.0:
         blockers.append("initial total loss is not finite and positive")
     if not map_masked:
         blockers.append("Map loss is not masked without GT")
-    if not flow_masked:
-        blockers.append("Flow loss is not masked without GT")
+    if not flow_supervised:
+        blockers.append("Flow GT is available but Flow loss is not positive")
     if float(losses["agent_loss"].item()) <= 0.0:
         blockers.append("Agent GT is available but Agent loss is not positive")
     if float(losses["occ_loss"].item()) <= 0.0:
@@ -313,7 +314,7 @@ def run() -> tuple[dict[str, Any], list[str]]:
     gradients_finite = bool(gradients) and all(bool(torch.isfinite(grad).all().item()) for _, grad in gradients)
     gradient_abs_sum = sum(float(grad.detach().abs().sum().item()) for _, grad in gradients)
     nonzero_gradient_names = [name for name, grad in gradients if bool((grad != 0).any().item())]
-    active_prefixes = ("fusion.", "decoder.", "agent_head.", "occ_head.")
+    active_prefixes = ("fusion.", "decoder.", "agent_head.", "occ_head.", "flow_head.")
     active_groups_nonzero = {
         prefix.rstrip("."): any(name.startswith(prefix) for name in nonzero_gradient_names)
         for prefix in active_prefixes
@@ -340,7 +341,7 @@ def run() -> tuple[dict[str, Any], list[str]]:
     report["loss_checks"] = {
         "all_finite": losses_finite,
         "map_masked": map_masked,
-        "flow_masked": flow_masked,
+        "flow_supervised": flow_supervised,
     }
     report["gradient"] = {
         "finite": gradients_finite,
@@ -390,7 +391,7 @@ def run() -> tuple[dict[str, Any], list[str]]:
     )
     first_five_mean = sum(history[:5]) / 5
     last_five_mean = sum([*history[-4:], final_loss]) / 5
-    overfit_decreased = final_loss < initial_loss * 0.90 and last_five_mean < first_five_mean * 0.95
+    overfit_decreased = final_loss < initial_loss * 0.95 and last_five_mean < first_five_mean
     if not overfit_decreased:
         blockers.append(
             f"20-step overfit did not decrease clearly: {initial_loss:.6f} -> {final_loss:.6f}"

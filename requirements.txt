@@ -14,6 +14,7 @@ numpy
 opencv-python
 pillow
 pyyaml
+pyquaternion
 scipy
 tqdm
 easydict

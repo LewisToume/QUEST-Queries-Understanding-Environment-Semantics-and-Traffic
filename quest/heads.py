@@ -238,7 +238,7 @@ class FlowHead(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
-        C_flow: int = 3,
+        C_flow: int = 2,
         flow_size: Tuple[int, int, int] = (64, 64, 16),
         base_channels: int = 32,
     ) -> None:

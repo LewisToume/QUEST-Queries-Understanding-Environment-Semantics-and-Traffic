@@ -15,7 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel
-from quest.openscene_dataset import OpenSceneFirstTestDataset
+from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.utils import load_yaml_config
 
 
@@ -53,16 +53,14 @@ class QUESTTrainer:
             betas=(0.9, 0.999),
         )
         self.scheduler = None
+        self.backward_passed = False
 
     def build_dataloader(self) -> DataLoader:
         dataset_kwargs = dict(self.dataset_config)
-        data_root = dataset_kwargs.pop("root")
         dataset_kwargs.pop("C_agent", None)
         dataset_kwargs.pop("D_box", None)
         max_samples = int(self.train_config["num_samples"])
-        dataset = OpenSceneFirstTestDataset(root=data_root, **dataset_kwargs)
-        if max_samples > 0 and max_samples < len(dataset):
-            dataset.manifest = dataset.manifest[:max_samples]
+        dataset = OpenSceneMetadataDataset(max_samples=max_samples, **dataset_kwargs)
         return DataLoader(
             dataset,
             batch_size=int(self.train_config["batch_size"]),
@@ -100,6 +98,7 @@ class QUESTTrainer:
             "occ_valid": batch["occ_valid"].to(self.device),
             "flow_gt": batch["flow_gt"].to(self.device),
             "flow_valid": batch["flow_valid"].to(self.device),
+            "flow_mask": batch["flow_mask"].to(self.device),
         }
 
         with autocast_context(self.device):
@@ -111,9 +110,23 @@ class QUESTTrainer:
             )
         preds = {key: value.float() for key, value in preds.items()}
         losses = compute_total_loss(preds, gts, self.loss_config)
+        if not torch.isfinite(losses["total_loss"]):
+            raise RuntimeError("Stage1 total loss is not finite")
 
         self.optimizer.zero_grad()
         losses["total_loss"].backward()
+        gradients = [parameter.grad for parameter in self.model.parameters() if parameter.grad is not None]
+        if not gradients or not all(torch.isfinite(gradient).all() for gradient in gradients):
+            raise RuntimeError("Stage1 backward produced missing or non-finite gradients")
+        if bool(gts["flow_valid"].any()) and bool(self.loss_config["tasks"].get("flow", False)):
+            flow_gradients = [
+                parameter.grad
+                for name, parameter in self.model.named_parameters()
+                if name.startswith("flow_head.") and parameter.grad is not None
+            ]
+            if not flow_gradients or not any(bool((gradient != 0).any()) for gradient in flow_gradients):
+                raise RuntimeError("Flow loss did not produce nonzero Flow Head gradients")
+        self.backward_passed = True
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
@@ -123,6 +136,7 @@ class QUESTTrainer:
     def train_epoch(self, dataloader: DataLoader, epoch: int) -> None:
         self.model.train()
         tracked_keys = [
+            "agent_loss",
             "agent_cls_loss",
             "agent_box_loss",
             "agent_velocity_loss",
@@ -134,6 +148,7 @@ class QUESTTrainer:
             "occ_sem_scal_loss",
             "occ_geo_scal_loss",
             "occ_lovasz_loss",
+            "occ_loss",
             "flow_loss",
             "total_loss",
         ]
@@ -170,7 +185,18 @@ def load_configs() -> tuple[dict, dict]:
     stage_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage1.yaml")
 
     dataset_config = stage_config.setdefault("dataset", {})
-    dataset_config.setdefault("root", str(PROJECT_ROOT / "data" / "openscene_first_test_100"))
+    dataset_config.setdefault(
+        "metadata_path",
+        str(PROJECT_ROOT / "data" / "openscene" / "meta_datas" / "openscene-v1.0" / "meta_datas" / "meta_data_mini.pkl"),
+    )
+    dataset_config.setdefault(
+        "camera_root",
+        str(PROJECT_ROOT / "data" / "openscene" / "sensor_blobs_mini"),
+    )
+    dataset_config.setdefault(
+        "occupancy_root",
+        str(PROJECT_ROOT / "data" / "openscene" / "occ_mini"),
+    )
     dataset_config.setdefault("camera_names", model_config["camera_names"])
     dataset_config.setdefault("C_agent", model_config["C_agent"])
     dataset_config.setdefault("D_box", model_config["D_box"])
@@ -179,10 +205,17 @@ def load_configs() -> tuple[dict, dict]:
     dataset_config.setdefault("occ_size", (model_config["X"], model_config["Y"], model_config["Z"]))
     dataset_config.setdefault("C_occ", model_config["C_occ"])
     dataset_config.setdefault("C_flow", model_config["C_flow"])
+    for path_key in ("metadata_path", "camera_root", "occupancy_root"):
+        path = Path(dataset_config[path_key])
+        if not path.is_absolute():
+            dataset_config[path_key] = str(PROJECT_ROOT / path)
     return model_config, stage_config
 
 
 if __name__ == "__main__":
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
     model_config, stage_config = load_configs()
     train_config = stage_config["train"]
     loss_config = stage_config.get("loss", {})
@@ -213,6 +246,7 @@ if __name__ == "__main__":
         trainer.train_epoch(dataloader, epoch)
 
     print("\nStage1 training finished")
+    print(f"backward     : {'PASS' if trainer.backward_passed else 'FAIL'}")
     print("=" * 60)
 
     if torch.cuda.is_available():

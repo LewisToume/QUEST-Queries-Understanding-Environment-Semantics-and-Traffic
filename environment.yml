@@ -19,5 +19,6 @@ dependencies:
     - numpy
     - opencv-python
     - Pillow
+    - pyquaternion
     - scipy
     - tqdm
