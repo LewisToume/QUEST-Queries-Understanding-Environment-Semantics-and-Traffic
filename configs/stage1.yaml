@@ -9,7 +9,6 @@ train:
 dataset:
   metadata_path: data/openscene/meta_datas/openscene-v1.0/meta_datas/meta_data_mini.pkl
   camera_root: data/openscene/sensor_blobs_mini
-  occupancy_root: data/openscene/occ_mini
   image_size: [224, 224]
   camera_names:
     - CAM_F0
@@ -21,23 +20,22 @@ dataset:
     - CAM_R1
     - CAM_R2
   max_agent_instances: 16
-  max_map_instances: 12
-  C_agent: 4
-  C_map: 4
-  C_occ: 11
-  C_flow: 2
-  occ_size: [200, 200, 16]
 loss:
   tasks:
+    seg: false
+    depth: false
     agent: true
     map: false
-    occ: true
-    flow: true
   task_weights:
+    seg: 0.0
+    depth: 0.0
     agent: 2.0
     map: 0.0
-    occ: 1.0
-    flow: 1.0
+  seg:
+    ignore_index: 255
+  depth:
+    loss_type: smooth_l1
+    eps: 1.0e-3
   agent:
     cls_cost_weight: 2.0
     bbox_cost_weight: 0.25
@@ -45,8 +43,6 @@ loss:
     cls_alpha: 0.25
     lambda_box: 0.25
     lambda_velocity: 0.2
-    lambda_dn: 0.0
-    dn_enabled: false
     box_loss_type: l1
   map:
     cls_cost_weight: 2.0
@@ -56,15 +52,3 @@ loss:
     lambda_cls: 2.0
     lambda_pts: 5.0
     lambda_dir: 0.005
-  occ:
-    class_weight:
-    ignore_index: 255
-    use_camera_mask: false
-    enable_sem_scal_loss: false
-    enable_geo_scal_loss: false
-    enable_lovasz_loss: false
-    lambda_sem: 0.0
-    lambda_geo: 0.0
-    lambda_lovasz: 0.0
-  flow:
-    loss_type: smooth_l1

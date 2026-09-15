@@ -75,7 +75,9 @@ class FrozenDINOv2Backbone(torch.nn.Module):
         return self
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        with torch.inference_mode():
+        # no_grad keeps the backbone frozen while allowing downstream trainable
+        # layers to save these activations for their parameter gradients.
+        with torch.no_grad():
             outputs = self.model(pixel_values=images)
         return outputs.last_hidden_state
 

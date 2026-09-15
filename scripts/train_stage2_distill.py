@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import contextlib
+import argparse
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 from torch.utils.data import DataLoader
@@ -15,199 +15,136 @@ from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel
 from quest.openscene_dataset import OpenSceneMetadataDataset
-from quest.teachers import TeacherUnavailableError, build_enabled_teachers
 from quest.utils import load_yaml_config
 
 
-def resolve_device(device_name: str) -> str:
-    if device_name == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    return device_name
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Offline soft-label training for QUEST")
+    parser.add_argument("--num-samples", type=int, default=None)
+    return parser.parse_args()
 
 
-def autocast_context(device: str):
-    if device == "cuda":
-        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-    return contextlib.nullcontext()
+def _to_device(value: Any, device: torch.device) -> Any:
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, Mapping):
+        return {key: _to_device(item, device) for key, item in value.items()}
+    return value
 
 
-def move_batch_to_device(batch: dict[str, Any], device: str) -> tuple[torch.Tensor, dict[str, Any], dict[str, torch.Tensor]]:
-    model_inputs = {
-        "intrinsics": batch["intrinsics"].to(device),
-        "extrinsics": batch["extrinsics"].to(device),
-        "ego_state": batch["ego_state"].to(device),
+def build_targets(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    targets: dict[str, Any] = {
+        "agent_gt": _to_device(batch["agent_gt"], device),
+        "agent_valid": batch["agent_valid"].to(device),
+        "seg_valid": torch.tensor([False], device=device),
+        "depth_valid": torch.tensor([False], device=device),
+        "map_valid": torch.tensor([False], device=device),
     }
-    gts = {
-        "agent_gt": {
-            "labels": batch["agent_gt"]["labels"].to(device),
-            "boxes": batch["agent_gt"]["boxes"].to(device),
-            "velocity": batch["agent_gt"]["velocity"].to(device),
-        },
-        "map_gt": {
-            "labels": batch["map_gt"]["labels"].to(device),
-            "points": batch["map_gt"]["points"].to(device),
-        },
-        "map_valid": batch["map_gt"]["valid"].to(device),
-        "occ_gt": batch["occ_gt"].to(device),
-        "occ_valid": batch["occ_valid"].to(device),
-        "flow_gt": batch["flow_gt"].to(device),
-        "flow_valid": batch["flow_valid"].to(device),
-        "flow_mask": batch["flow_mask"].to(device),
-    }
-    return batch["images"].to(device), gts, model_inputs
+    labels = batch.get("soft_labels", {})
+    if isinstance(labels, list):
+        if len(labels) != 1:
+            raise ValueError("offline distillation currently requires batch_size=1")
+        labels = labels[0]
+    labels = _to_device(labels, device)
+    if "seg" in labels:
+        seg = labels["seg"]
+        targets["seg_gt"] = seg["labels"] if isinstance(seg, Mapping) else seg
+        targets["seg_valid"] = torch.tensor([True], device=device)
+    if "depth" in labels:
+        depth = labels["depth"]
+        targets["depth_gt"] = depth["values"] if isinstance(depth, Mapping) else depth
+        if isinstance(depth, Mapping) and "valid_mask" in depth:
+            targets["depth_mask"] = depth["valid_mask"]
+        targets["depth_valid"] = torch.tensor([True], device=device)
+    if "agent" in labels:
+        agent = labels["agent"]
+        required = {"labels", "boxes", "velocity"}
+        if not isinstance(agent, Mapping) or not required.issubset(agent):
+            raise ValueError("agent soft label requires labels, boxes, and velocity")
+        targets["agent_gt"] = dict(agent)
+        targets["agent_valid"] = torch.tensor([True], device=device)
+    if "map" in labels:
+        vector_map = labels["map"]
+        required = {"labels", "points"}
+        if not isinstance(vector_map, Mapping) or not required.issubset(vector_map):
+            raise ValueError("map soft label requires labels and points")
+        targets["map_gt"] = dict(vector_map)
+        targets["map_valid"] = torch.tensor([True], device=device)
+    return targets
 
 
-def zero_like_loss(preds: dict[str, torch.Tensor]) -> torch.Tensor:
-    return sum(value.sum() * 0.0 for value in preds.values() if torch.is_tensor(value))
-
-
-def kd_agent_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
-    del teacher_output
-    return (
-        student_preds["agent_boxes"].sum() * 0.0,
-        "disabled: requires common box coordinate conversion, class mapping, and Hungarian/3D-box matching",
-    )
-
-
-def kd_map_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
-    del teacher_output
-    return (
-        student_preds["map_points"].sum() * 0.0,
-        "disabled: map taxonomy is NOT_VERIFIED and vector point resampling is not validated",
-    )
-
-
-def kd_occ_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
-    del teacher_output
-    return (
-        student_preds["occ_logits"].sum() * 0.0,
-        "disabled: requires physical voxel alignment, class mapping, and spatial resampling",
-    )
-
-
-def kd_future_world_adapter(student_preds: dict[str, torch.Tensor], teacher_output: dict[str, Any] | None) -> tuple[torch.Tensor, str]:
-    del teacher_output
-    return (
-        student_preds["flow_logits"].sum() * 0.0,
-        "disabled: ViDAR future representation needs temporal/spatial projection adapter; it is not flow",
-    )
-
-
-def distill_from_teacher_outputs(
-    student_preds: dict[str, torch.Tensor],
-    teacher_outputs: dict[str, dict[str, Any]],
-    loss_weights: dict[str, float],
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    kd_loss = zero_like_loss(student_preds)
-    logs: dict[str, Any] = {}
-
-    adapters = {
-        "agent": kd_agent_adapter,
-        "map": kd_map_adapter,
-        "occ": kd_occ_adapter,
-        "future_world": kd_future_world_adapter,
-    }
-    for task, adapter in adapters.items():
-        loss, reason = adapter(student_preds, teacher_outputs.get(task))
-        weight = float(loss_weights.get(task, 0.0))
-        kd_loss = kd_loss + weight * loss
-        logs[f"kd_{task}"] = float(loss.item())
-        logs[f"kd_{task}_weight"] = weight
-        logs[f"kd_{task}_reason"] = reason
-
-    return kd_loss, logs
-
-
-def load_configs() -> tuple[dict, dict, dict]:
+def main() -> int:
+    args = parse_args()
     model_config = load_yaml_config(PROJECT_ROOT / "configs" / "model.yaml")["model"]
-    stage1_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage1.yaml")
-    stage2_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage2_distill.yaml")
-    return model_config, stage1_config, stage2_config
-
-
-def build_dataset(model_config: dict, stage1_config: dict, num_samples: int) -> OpenSceneMetadataDataset:
-    dataset_kwargs = dict(stage1_config.get("dataset", {}))
-    dataset_kwargs.pop("C_agent", None)
-    dataset_kwargs.pop("D_box", None)
-    dataset_kwargs.setdefault("camera_names", model_config["camera_names"])
-    dataset_kwargs.setdefault("C_map", model_config["C_map"])
-    dataset_kwargs.setdefault("P", model_config["P"])
-    dataset_kwargs.setdefault("C_occ", model_config["C_occ"])
-    dataset_kwargs.setdefault("C_flow", model_config["C_flow"])
-    dataset_kwargs.setdefault("occ_size", (model_config["X"], model_config["Y"], model_config["Z"]))
-    for path_key in ("metadata_path", "camera_root", "occupancy_root"):
-        path = Path(dataset_kwargs[path_key])
+    stage1 = load_yaml_config(PROJECT_ROOT / "configs" / "stage1.yaml")
+    stage2 = load_yaml_config(PROJECT_ROOT / "configs" / "stage2_distill.yaml")
+    if stage2["interfaces"].get("online_teacher"):
+        raise RuntimeError("Stage2 must not instantiate online teachers")
+    dataset_config = dict(stage1["dataset"])
+    for key in ("metadata_path", "camera_root"):
+        path = Path(dataset_config[key])
         if not path.is_absolute():
-            dataset_kwargs[path_key] = str(PROJECT_ROOT / path)
-    return OpenSceneMetadataDataset(max_samples=num_samples, **dataset_kwargs)
-
-
-def main() -> None:
-    model_config, stage1_config, stage2_config = load_configs()
-    distill_config = stage2_config["distill"]
-    device = resolve_device(distill_config.get("device", "auto"))
-    dataset = build_dataset(model_config, stage1_config, int(distill_config.get("num_samples", 1)))
-    dataloader = DataLoader(
+            dataset_config[key] = str(PROJECT_ROOT / path)
+    soft_root = Path(stage2["paths"]["soft_labels_dir"])
+    if not soft_root.is_absolute():
+        soft_root = PROJECT_ROOT / soft_root
+    num_samples = args.num_samples or int(stage2["distill"]["num_samples"])
+    dataset = OpenSceneMetadataDataset(
+        max_samples=num_samples,
+        soft_labels_root=soft_root,
+        **dataset_config,
+    )
+    loader = DataLoader(
         dataset,
-        batch_size=int(distill_config.get("batch_size", 1)),
+        batch_size=int(stage2["distill"]["batch_size"]),
         shuffle=False,
         num_workers=0,
         collate_fn=collate_fn,
-        drop_last=False,
     )
-
-    student = QUESTModel(**model_config).to(device).train()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = QUESTModel(**model_config).to(device).train()
+    model_path = stage2["distill"].get("model_path")
+    if model_path:
+        checkpoint_path = Path(model_path)
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = PROJECT_ROOT / checkpoint_path
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     optimizer = torch.optim.AdamW(
-        [p for p in student.parameters() if p.requires_grad],
-        lr=float(distill_config.get("lr", 5e-5)),
-        weight_decay=1e-4,
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=float(stage2["distill"]["lr"]),
     )
-    teachers = build_enabled_teachers(stage2_config.get("teachers", {}))
-    for teacher in teachers.values():
-        teacher.eval()
-        teacher.requires_grad_(False)
-
-    batch = next(iter(dataloader))
-    images, gts, model_inputs = move_batch_to_device(batch, device)
-    teacher_outputs: dict[str, dict[str, Any]] = {}
-    teacher_status: dict[str, str] = {}
-    for task, teacher in teachers.items():
-        try:
-            with torch.no_grad():
-                teacher_outputs[task] = teacher(batch)
-            teacher_status[task] = "available"
-        except TeacherUnavailableError as exc:
-            teacher_status[task] = f"skipped: {exc}"
-
-    with autocast_context(device):
-        preds = student(images, **model_inputs)
-    preds = {key: value.float() for key, value in preds.items()}
-    hard_losses = compute_total_loss(preds, gts, stage1_config.get("loss", {}))
-    kd_loss, kd_logs = distill_from_teacher_outputs(preds, teacher_outputs, stage2_config.get("loss_weights", {}))
-    total_loss = hard_losses["total_loss"] + kd_loss
-
-    optimizer.zero_grad()
-    total_loss.backward()
-    optimizer.step()
-
-    print("=" * 72)
-    print("QUEST stage2 distillation skeleton")
-    print(f"device        : {device}")
-    print(f"samples       : {len(dataset)}")
-    print("teacher status:")
-    for task, status in teacher_status.items():
-        print(f"  {task:<6}: {status}")
-    print("loss:")
-    print(f"  hard_total  : {hard_losses['total_loss'].item():.4f}")
-    print(f"  kd_total    : {kd_loss.item():.4f}")
-    for key, value in kd_logs.items():
-        if isinstance(value, str):
-            print(f"  {key:<22}: {value}")
-        else:
-            print(f"  {key:<22}: {value:.4f}")
-    print(f"  total       : {total_loss.item():.4f}")
-    print("=" * 72)
+    for step, batch in enumerate(loader, start=1):
+        targets = build_targets(batch, device)
+        loss_config = {
+            **stage1["loss"],
+            "tasks": {
+                "seg": bool(targets["seg_valid"].any()),
+                "depth": bool(targets["depth_valid"].any()),
+                "agent": bool(targets["agent_valid"].any()),
+                "map": bool(targets["map_valid"].any()),
+            },
+            "task_weights": stage2["loss_weights"],
+        }
+        optimizer.zero_grad(set_to_none=True)
+        predictions = model(
+            batch["images"].to(device),
+            batch["intrinsics"].to(device),
+            batch["extrinsics"].to(device),
+            batch["ego_state"].to(device),
+        )
+        losses = compute_total_loss(predictions, targets, loss_config)
+        if losses["total_loss"].item() == 0:
+            print(f"step={step} token={batch['sample_token'][0]} skipped: no labels")
+            continue
+        losses["total_loss"].backward()
+        optimizer.step()
+        active = [task for task in ("seg", "depth", "agent", "map") if loss_config["tasks"][task]]
+        print(
+            f"step={step} token={batch['sample_token'][0]} "
+            f"tasks={','.join(active)} total={losses['total_loss'].item():.6f}"
+        )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

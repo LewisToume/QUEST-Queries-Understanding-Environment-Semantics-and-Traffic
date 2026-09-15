@@ -29,8 +29,7 @@ def main() -> None:
     stage2_config = load_yaml_config(PROJECT_ROOT / "configs" / "stage2_distill.yaml")
     map_config = PROJECT_ROOT / stage2_config["teachers"]["map"]["config_path"]
     dataset_config = dict(stage1_config["dataset"])
-    dataset_config.pop("C_agent", None)
-    for path_key in ("metadata_path", "camera_root", "occupancy_root"):
+    for path_key in ("metadata_path", "camera_root"):
         path = Path(dataset_config[path_key])
         if not path.is_absolute():
             dataset_config[path_key] = str(PROJECT_ROOT / path)

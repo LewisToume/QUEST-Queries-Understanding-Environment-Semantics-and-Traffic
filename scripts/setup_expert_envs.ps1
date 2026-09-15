@@ -1,6 +1,5 @@
 param(
-    [switch]$CreateStreamPETR,
-    [switch]$CreateFlashOCC
+    [switch]$CreateStreamPETR
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,19 +19,7 @@ if ($CreateStreamPETR) {
     conda run -n streampetr_env pip install -e $MMDet3D
 }
 
-if ($CreateFlashOCC) {
-    conda env create -f (Join-Path $Root "envs\flashocc_env.yml")
-    $MMDet3D = Join-Path $Root "third_party\FlashOCC-master\mmdetection3d"
-    if (-not (Test-Path $MMDet3D)) {
-        git clone https://github.com/open-mmlab/mmdetection3d.git $MMDet3D
-        git -C $MMDet3D checkout v1.0.0rc4
-    }
-    conda run -n flashocc_env pip install -e $MMDet3D
-    conda run -n flashocc_env pip install -e (Join-Path $Root "third_party\FlashOCC-master\projects")
-}
-
-if (-not $CreateStreamPETR -and -not $CreateFlashOCC) {
+if (-not $CreateStreamPETR) {
     Write-Host "Usage:"
     Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\setup_expert_envs.ps1 -CreateStreamPETR"
-    Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\setup_expert_envs.ps1 -CreateFlashOCC"
 }

@@ -15,8 +15,6 @@ from .utils import project_root
 TEACHER_CAMERA_ORDERS: dict[str, tuple[str, ...]] = {
     "StreamPETR": ("CAM_F0", "CAM_R0", "CAM_R2", "CAM_B0", "CAM_L2", "CAM_L0"),
     "MapTRv2": ("CAM_F0", "CAM_R0", "CAM_R2", "CAM_B0", "CAM_L2", "CAM_L0"),
-    "OccNet": OPENSCENE_CAMERA_NAMES,
-    "ViDAR": OPENSCENE_CAMERA_NAMES,
 }
 
 TEACHER_CAMERA_ALIASES: dict[str, dict[str, str]] = {
@@ -49,12 +47,9 @@ OPENSCENE_MAP_CLASS_NOTE = (
     "map taxonomy must be verified before enabling map distillation."
 )
 
-OCCNET_CLASS_MAPPING_VERSION = "openscene_nuplan_occ11_to_quest_occ11_v0"
 COORDINATE_CONVENTION = (
     "OpenScene sample uses camera sensor2lidar extrinsics. StreamPETR/MapTRv2 "
-    "consume selected 6-view nuScenes-style camera aliases at the same timestamp; "
-    "OccNet and ViDAR consume OpenScene 8-view tensors. QUEST keeps occupancy "
-    "as [C, X, Y, Z]."
+    "consume selected 6-view nuScenes-style camera aliases at the same timestamp."
 )
 
 
@@ -237,18 +232,6 @@ def maptr_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
     raise TeacherUnavailableError(OPENSCENE_MAP_CLASS_NOTE)
 
 
-def occnet_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
-    """Convert OccNet occupancy logits to QUEST [B, C_occ, X, Y, Z] only after axis order and class mapping are verified."""
-
-    raise TeacherUnavailableError("OccNet output conversion requires actual OccNet inference output and voxel metadata.")
-
-
-def vidar_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
-    """Expose ViDAR future-world output only after the real temporal representation is inspected."""
-
-    raise TeacherUnavailableError("ViDAR is a Future World teacher, not a Flow teacher; conversion must inspect real output.")
-
-
 class ExternalTeacher(nn.Module):
     required_modules = ("mmcv", "mmdet", "mmdet3d")
     checkpoint_patterns: tuple[str, ...] = ()
@@ -369,21 +352,9 @@ class MapTRv2Teacher(ExternalTeacher):
     output_keys = ("cls_logits", "points", "scores", "valid_mask")
 
 
-class OccNetTeacher(ExternalTeacher):
-    checkpoint_patterns = ("occnet", "openocc", "occupancy")
-    output_keys = ("occ_logits",)
-
-
-class ViDARTeacher(ExternalTeacher):
-    checkpoint_patterns = ("vidar",)
-    output_keys = ("future_world", "raw_future", "valid_mask")
-
-
 TEACHER_CLASSES = {
     "StreamPETR": StreamPETRTeacher,
     "MapTRv2": MapTRv2Teacher,
-    "OccNet": OccNetTeacher,
-    "ViDAR": ViDARTeacher,
 }
 
 
@@ -435,7 +406,7 @@ def build_enabled_teachers(config: Mapping[str, Any]) -> dict[str, ExternalTeach
 def build_all_teachers(config: Mapping[str, Any]) -> dict[str, ExternalTeacher]:
     teachers: dict[str, ExternalTeacher] = {}
     for task, raw in config.items():
-        if not isinstance(raw, Mapping) or task == "segformer":
+        if not isinstance(raw, Mapping) or raw.get("name") == "external_offline":
             continue
         spec = teacher_spec_from_config(task, raw)
         teachers[task] = build_teacher(spec)

@@ -80,9 +80,8 @@ def write_report(results: list[dict]) -> None:
             lines.append(f"- {item['name']} real inference: {item['status']} ({blocker}).")
     lines.extend(
         [
-            "- Flow remains supervised by OpenScene Flow GT. ViDAR is recorded only as the Future World teacher.",
             "- `quest_teacher_legacy` creation was attempted on Windows; pip failed on `torch-1.10.1+cu111` with an invalid wheel error, leaving torch/mmcv/mmdet/mmdet3d unavailable.",
-            "- No random soft labels, fake tensors, or dummy teacher outputs are generated.",
+            "- Stage2 consumes only verified token-aligned offline labels and never creates placeholder targets.",
             f"- Aggregate environment status: {env_status}. Required modules: {', '.join(REQUIRED_MODULES)}.",
             "",
         ]

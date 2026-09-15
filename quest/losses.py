@@ -1,582 +1,354 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping
+from typing import Any, Mapping
 
 import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
 
-def _zero_like(reference: torch.Tensor) -> torch.Tensor:
+def _zero(reference: torch.Tensor) -> torch.Tensor:
     return reference.sum() * 0.0
 
 
-def _is_available(value: Any, default: bool = True) -> bool:
+def _available_mask(value: Any, batch_size: int, device: torch.device) -> torch.Tensor:
     if value is None:
-        return default
+        return torch.zeros(batch_size, dtype=torch.bool, device=device)
     if torch.is_tensor(value):
-        return bool(value.bool().any().item())
-    return bool(value)
+        mask = value.to(device=device).bool()
+        if mask.ndim == 0:
+            return mask.expand(batch_size)
+        if mask.shape[0] != batch_size:
+            raise ValueError(f"availability batch mismatch: {tuple(mask.shape)}")
+        return mask.reshape(batch_size, -1).any(dim=1)
+    return torch.full((batch_size,), bool(value), dtype=torch.bool, device=device)
 
 
-def _as_tensor_or_none(
-    values: list[float] | None,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor | None:
-    if values is None:
-        return None
-    return torch.tensor(values, device=device, dtype=dtype)
+def _select_batch(
+    values: Mapping[str, torch.Tensor], mask: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    return {key: value[mask] for key, value in values.items()}
 
 
-def _softmax_focal_loss(
+def _hungarian(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if cost.numel() == 0:
+        empty = torch.empty(0, dtype=torch.long, device=cost.device)
+        return empty, empty
+    safe = torch.nan_to_num(cost.detach(), nan=1e6, posinf=1e6, neginf=-1e6)
+    rows, cols = linear_sum_assignment(safe.cpu().numpy())
+    return (
+        torch.as_tensor(rows, dtype=torch.long, device=cost.device),
+        torch.as_tensor(cols, dtype=torch.long, device=cost.device),
+    )
+
+
+def _focal_classification_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    gamma: float = 2.0,
-    alpha: float = 0.25,
-    class_weight: torch.Tensor | None = None,
-    ignore_index: int = -100,
+    gamma: float,
+    alpha: float,
 ) -> torch.Tensor:
-    valid_mask = targets != ignore_index
-    if not valid_mask.any():
-        return _zero_like(logits)
-
-    valid_logits = logits[valid_mask]
-    valid_targets = targets[valid_mask]
-    log_probs = F.log_softmax(valid_logits, dim=-1)
+    log_probs = F.log_softmax(logits, dim=-1)
     probs = log_probs.exp()
-    ce_loss = F.nll_loss(
-        log_probs,
-        valid_targets,
-        reduction="none",
-        weight=class_weight,
-    )
-    pt = probs.gather(dim=1, index=valid_targets.unsqueeze(1)).squeeze(1)
-    focal_weight = (1.0 - pt).pow(gamma)
-    if alpha is not None:
-        focal_weight = focal_weight * alpha
-    return (focal_weight * ce_loss).mean()
-
-
-def _classification_cost(logits: torch.Tensor, gt_labels: torch.Tensor) -> torch.Tensor:
-    probs = F.softmax(logits, dim=-1).clamp_min(1e-8)
-    return -torch.log(probs[:, gt_labels])
-
-
-def _l1_cost(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    if pred.numel() == 0 or target.numel() == 0:
-        return pred.new_zeros((pred.shape[0], target.shape[0]))
-    pred_flat = pred.reshape(pred.shape[0], -1)
-    target_flat = target.reshape(target.shape[0], -1)
-    return torch.cdist(pred_flat, target_flat, p=1) / pred_flat.shape[-1]
-
-
-def _hungarian_match(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    num_pred, num_gt = cost.shape
-    if num_pred == 0 or num_gt == 0:
-        empty = cost.new_zeros((0,), dtype=torch.long)
-        return empty, empty
-    safe_cost = torch.nan_to_num(
-        cost.detach(),
-        nan=1e6,
-        posinf=1e6,
-        neginf=-1e6,
-    ).cpu()
-    row_ind, col_ind = linear_sum_assignment(safe_cost.numpy())
-    return (
-        torch.as_tensor(row_ind, device=cost.device, dtype=torch.long),
-        torch.as_tensor(col_ind, device=cost.device, dtype=torch.long),
-    )
+    ce = F.nll_loss(log_probs, targets, reduction="none")
+    pt = probs.gather(1, targets[:, None]).squeeze(1)
+    return (alpha * (1.0 - pt).pow(gamma) * ce).mean()
 
 
 def compute_seg_loss(
     seg_logits: torch.Tensor,
     seg_gt: torch.Tensor,
     config: Mapping[str, Any] | None = None,
-) -> Dict[str, torch.Tensor]:
-    seg_config = {
-        "ignore_index": 255,
-        "class_weight": None,
+) -> dict[str, torch.Tensor]:
+    settings = {"ignore_index": 255}
+    settings.update(config or {})
+    if seg_gt.ndim != 4 or seg_logits.ndim != 5:
+        raise ValueError("seg logits/GT must be [B,N,C,H,W] and [B,N,H,W]")
+    if seg_logits.shape[:2] != seg_gt.shape[:2] or seg_logits.shape[-2:] != seg_gt.shape[-2:]:
+        raise ValueError(
+            f"segmentation shape mismatch: {tuple(seg_logits.shape)} vs {tuple(seg_gt.shape)}"
+        )
+    logits = seg_logits.flatten(0, 1)
+    target = seg_gt.long().flatten(0, 1)
+    if not (target != int(settings["ignore_index"])).any():
+        return {"seg_loss": _zero(seg_logits)}
+    return {
+        "seg_loss": F.cross_entropy(
+            logits, target, ignore_index=int(settings["ignore_index"])
+        )
     }
-    if config is not None:
-        seg_config.update(config)
 
-    class_weight = _as_tensor_or_none(
-        seg_config.get("class_weight"),
-        device=seg_logits.device,
-        dtype=seg_logits.dtype,
-    )
-    seg_loss = F.cross_entropy(
-        seg_logits,
-        seg_gt.long(),
-        weight=class_weight,
-        ignore_index=int(seg_config["ignore_index"]),
-    )
-    return {"seg_loss": seg_loss}
+
+def compute_depth_loss(
+    depth: torch.Tensor,
+    depth_gt: torch.Tensor,
+    config: Mapping[str, Any] | None = None,
+    valid_mask: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    settings = {"eps": 1e-3, "loss_type": "smooth_l1"}
+    settings.update(config or {})
+    target = depth_gt.to(device=depth.device, dtype=depth.dtype)
+    if target.ndim == 4:
+        target = target.unsqueeze(2)
+    if target.shape != depth.shape:
+        raise ValueError(f"depth shape mismatch: {tuple(depth.shape)} vs {tuple(target.shape)}")
+    valid = torch.isfinite(target) & (target > 0)
+    if valid_mask is not None:
+        supplied = valid_mask.to(device=depth.device).bool()
+        if supplied.ndim == 4:
+            supplied = supplied.unsqueeze(2)
+        if supplied.shape != depth.shape:
+            supplied = supplied.expand_as(depth)
+        valid &= supplied
+    if not valid.any():
+        return {"depth_loss": _zero(depth)}
+    eps = float(settings["eps"])
+    pred_log = torch.log(depth[valid].clamp_min(eps))
+    target_log = torch.log(target[valid].clamp_min(eps))
+    if settings["loss_type"] == "l1":
+        loss = F.l1_loss(pred_log, target_log)
+    else:
+        loss = F.smooth_l1_loss(pred_log, target_log)
+    return {"depth_loss": loss}
 
 
 def compute_agent_loss(
-    agent_cls_logits: torch.Tensor,
-    agent_boxes: torch.Tensor,
-    agent_velocity: torch.Tensor | None,
+    cls_logits: torch.Tensor,
+    boxes: torch.Tensor,
+    velocity: torch.Tensor,
     agent_gt: Mapping[str, torch.Tensor],
     config: Mapping[str, Any] | None = None,
-) -> Dict[str, torch.Tensor]:
-    agent_config = {
+) -> dict[str, torch.Tensor]:
+    settings = {
         "cls_cost_weight": 2.0,
         "bbox_cost_weight": 0.25,
         "cls_gamma": 2.0,
         "cls_alpha": 0.25,
-        "class_weight": None,
         "lambda_box": 0.25,
         "lambda_velocity": 0.2,
-        "lambda_dn": 0.0,
         "box_loss_type": "l1",
-        "dn_enabled": False,
     }
-    if config is not None:
-        agent_config.update(config)
-
-    batch_size, num_queries, num_classes_with_bg = agent_cls_logits.shape
-    no_object_index = num_classes_with_bg - 1
-    class_weight = _as_tensor_or_none(
-        agent_config.get("class_weight"),
-        device=agent_cls_logits.device,
-        dtype=agent_cls_logits.dtype,
-    )
-
+    settings.update(config or {})
+    background = cls_logits.shape[-1] - 1
     cls_losses: list[torch.Tensor] = []
     box_losses: list[torch.Tensor] = []
     velocity_losses: list[torch.Tensor] = []
-
-    for batch_index in range(batch_size):
-        pred_cls = agent_cls_logits[batch_index]
-        pred_boxes = agent_boxes[batch_index]
-        pred_velocity = agent_velocity[batch_index] if agent_velocity is not None else None
-        gt_labels = agent_gt["labels"][batch_index]
-        gt_boxes = agent_gt["boxes"][batch_index]
-        gt_velocity = agent_gt.get("velocity")
-        gt_velocity_item = gt_velocity[batch_index] if gt_velocity is not None else None
-        valid_mask = gt_labels >= 0
-        valid_labels = gt_labels[valid_mask]
-        valid_boxes = gt_boxes[valid_mask]
-        valid_velocity = gt_velocity_item[valid_mask] if gt_velocity_item is not None else None
-
-        target_labels = torch.full(
-            (num_queries,),
-            no_object_index,
-            device=pred_cls.device,
-            dtype=torch.long,
+    for batch_index in range(cls_logits.shape[0]):
+        pred_cls = cls_logits[batch_index]
+        pred_boxes = boxes[batch_index]
+        pred_velocity = velocity[batch_index]
+        valid = agent_gt["labels"][batch_index] >= 0
+        gt_labels = agent_gt["labels"][batch_index][valid].long()
+        gt_boxes = agent_gt["boxes"][batch_index][valid]
+        gt_velocity = agent_gt["velocity"][batch_index][valid]
+        targets = torch.full(
+            (pred_cls.shape[0],), background, dtype=torch.long, device=pred_cls.device
         )
-
-        if valid_labels.numel() > 0:
-            cls_cost = _classification_cost(pred_cls, valid_labels)
-            reg_cost = _l1_cost(pred_boxes, valid_boxes)
-            total_cost = (
-                float(agent_config["cls_cost_weight"]) * cls_cost
-                + float(agent_config["bbox_cost_weight"]) * reg_cost
+        if gt_labels.numel():
+            class_cost = -F.log_softmax(pred_cls, dim=-1)[:, gt_labels]
+            box_cost = torch.cdist(pred_boxes, gt_boxes, p=1) / pred_boxes.shape[-1]
+            pred_indices, gt_indices = _hungarian(
+                float(settings["cls_cost_weight"]) * class_cost
+                + float(settings["bbox_cost_weight"]) * box_cost
             )
-            matched_pred, matched_gt = _hungarian_match(total_cost)
-            if matched_pred.numel() > 0:
-                target_labels[matched_pred] = valid_labels[matched_gt]
-                matched_pred_boxes = pred_boxes[matched_pred]
-                matched_gt_boxes = valid_boxes[matched_gt]
-                if agent_config["box_loss_type"] == "smooth_l1":
-                    box_loss = F.smooth_l1_loss(
-                        matched_pred_boxes,
-                        matched_gt_boxes,
-                        reduction="mean",
-                    )
-                else:
-                    box_loss = F.l1_loss(
-                        matched_pred_boxes,
-                        matched_gt_boxes,
-                        reduction="mean",
-                    )
-                if pred_velocity is not None and valid_velocity is not None:
-                    velocity_loss = F.smooth_l1_loss(
-                        pred_velocity[matched_pred],
-                        valid_velocity[matched_gt],
-                        reduction="mean",
-                    )
-                else:
-                    velocity_loss = _zero_like(pred_boxes)
-            else:
-                box_loss = _zero_like(pred_boxes)
-                velocity_loss = _zero_like(pred_boxes)
+            targets[pred_indices] = gt_labels[gt_indices]
+            regression = F.smooth_l1_loss if settings["box_loss_type"] == "smooth_l1" else F.l1_loss
+            box_loss = regression(pred_boxes[pred_indices], gt_boxes[gt_indices])
+            velocity_loss = F.smooth_l1_loss(
+                pred_velocity[pred_indices], gt_velocity[gt_indices]
+            )
         else:
-            box_loss = _zero_like(pred_boxes)
-            velocity_loss = _zero_like(pred_boxes)
-
-        cls_loss = _softmax_focal_loss(
-            pred_cls,
-            target_labels,
-            gamma=float(agent_config["cls_gamma"]),
-            alpha=float(agent_config["cls_alpha"]),
-            class_weight=class_weight,
+            box_loss = _zero(pred_boxes)
+            velocity_loss = _zero(pred_velocity)
+        cls_losses.append(
+            _focal_classification_loss(
+                pred_cls,
+                targets,
+                float(settings["cls_gamma"]),
+                float(settings["cls_alpha"]),
+            )
         )
-        cls_losses.append(cls_loss)
         box_losses.append(box_loss)
         velocity_losses.append(velocity_loss)
-
-    agent_cls_loss = torch.stack(cls_losses).mean() if cls_losses else _zero_like(agent_cls_logits)
-    agent_box_loss = torch.stack(box_losses).mean() if box_losses else _zero_like(agent_boxes)
-    agent_velocity_loss = torch.stack(velocity_losses).mean() if velocity_losses else _zero_like(agent_boxes)
-    agent_dn_loss = _zero_like(agent_cls_logits)
-    agent_loss = (
-        agent_cls_loss
-        + float(agent_config["lambda_box"]) * agent_box_loss
-        + float(agent_config["lambda_velocity"]) * agent_velocity_loss
-        + float(agent_config["lambda_dn"]) * agent_dn_loss
+    cls_loss = torch.stack(cls_losses).mean()
+    box_loss = torch.stack(box_losses).mean()
+    velocity_loss = torch.stack(velocity_losses).mean()
+    total = (
+        cls_loss
+        + float(settings["lambda_box"]) * box_loss
+        + float(settings["lambda_velocity"]) * velocity_loss
     )
     return {
-        "agent_cls_loss": agent_cls_loss,
-        "agent_box_loss": agent_box_loss,
-        "agent_velocity_loss": agent_velocity_loss,
-        "agent_dn_loss": agent_dn_loss,
-        "agent_loss": agent_loss,
+        "agent_cls_loss": cls_loss,
+        "agent_box_loss": box_loss,
+        "agent_velocity_loss": velocity_loss,
+        "agent_loss": total,
     }
 
 
-def _direction_loss(pred_points: torch.Tensor, target_points: torch.Tensor) -> torch.Tensor:
-    if pred_points.shape[1] < 2:
-        return _zero_like(pred_points)
-    pred_dir = pred_points[:, 1:, :] - pred_points[:, :-1, :]
-    target_dir = target_points[:, 1:, :] - target_points[:, :-1, :]
-    pred_dir = F.normalize(pred_dir, dim=-1)
-    target_dir = F.normalize(target_dir, dim=-1)
-    cosine = (pred_dir * target_dir).sum(dim=-1)
-    return (1.0 - cosine).mean()
-
-
 def compute_map_loss(
-    map_cls_logits: torch.Tensor,
-    map_points: torch.Tensor,
+    cls_logits: torch.Tensor,
+    points: torch.Tensor,
     map_gt: Mapping[str, torch.Tensor],
     config: Mapping[str, Any] | None = None,
-) -> Dict[str, torch.Tensor]:
-    map_config = {
+) -> dict[str, torch.Tensor]:
+    settings = {
         "cls_cost_weight": 2.0,
         "pts_cost_weight": 5.0,
         "cls_gamma": 2.0,
         "cls_alpha": 0.25,
-        "class_weight": None,
         "lambda_cls": 2.0,
         "lambda_pts": 5.0,
         "lambda_dir": 0.005,
     }
-    if config is not None:
-        map_config.update(config)
-
-    batch_size, num_queries, num_classes_with_bg = map_cls_logits.shape
-    no_object_index = num_classes_with_bg - 1
-    class_weight = _as_tensor_or_none(
-        map_config.get("class_weight"),
-        device=map_cls_logits.device,
-        dtype=map_cls_logits.dtype,
-    )
-
+    settings.update(config or {})
+    background = cls_logits.shape[-1] - 1
     cls_losses: list[torch.Tensor] = []
-    pts_losses: list[torch.Tensor] = []
-    dir_losses: list[torch.Tensor] = []
-
-    for batch_index in range(batch_size):
-        pred_cls = map_cls_logits[batch_index]
-        pred_points = map_points[batch_index]
-        gt_labels = map_gt["labels"][batch_index]
-        gt_points = map_gt["points"][batch_index]
-        valid_mask = gt_labels >= 0
-        valid_labels = gt_labels[valid_mask]
-        valid_points = gt_points[valid_mask]
-
-        target_labels = torch.full(
-            (num_queries,),
-            no_object_index,
-            device=pred_cls.device,
-            dtype=torch.long,
+    point_losses: list[torch.Tensor] = []
+    direction_losses: list[torch.Tensor] = []
+    for batch_index in range(cls_logits.shape[0]):
+        pred_cls = cls_logits[batch_index]
+        pred_points = points[batch_index]
+        valid = map_gt["labels"][batch_index] >= 0
+        gt_labels = map_gt["labels"][batch_index][valid].long()
+        gt_points = map_gt["points"][batch_index][valid]
+        targets = torch.full(
+            (pred_cls.shape[0],), background, dtype=torch.long, device=pred_cls.device
         )
-
-        if valid_labels.numel() > 0:
-            cls_cost = _classification_cost(pred_cls, valid_labels)
-            pts_cost = _l1_cost(pred_points, valid_points)
-            total_cost = (
-                float(map_config["cls_cost_weight"]) * cls_cost
-                + float(map_config["pts_cost_weight"]) * pts_cost
+        if gt_labels.numel():
+            class_cost = -F.log_softmax(pred_cls, dim=-1)[:, gt_labels]
+            point_cost = torch.cdist(
+                pred_points.flatten(1), gt_points.flatten(1), p=1
+            ) / pred_points[0].numel()
+            pred_indices, gt_indices = _hungarian(
+                float(settings["cls_cost_weight"]) * class_cost
+                + float(settings["pts_cost_weight"]) * point_cost
             )
-            matched_pred, matched_gt = _hungarian_match(total_cost)
-            if matched_pred.numel() > 0:
-                target_labels[matched_pred] = valid_labels[matched_gt]
-                matched_pred_points = pred_points[matched_pred]
-                matched_gt_points = valid_points[matched_gt]
-                pts_loss = F.l1_loss(
-                    matched_pred_points,
-                    matched_gt_points,
-                    reduction="mean",
-                )
-                dir_loss = _direction_loss(matched_pred_points, matched_gt_points)
-            else:
-                pts_loss = _zero_like(pred_points)
-                dir_loss = _zero_like(pred_points)
+            targets[pred_indices] = gt_labels[gt_indices]
+            matched_pred = pred_points[pred_indices]
+            matched_gt = gt_points[gt_indices]
+            point_loss = F.l1_loss(matched_pred, matched_gt)
+            pred_direction = F.normalize(
+                matched_pred[:, 1:] - matched_pred[:, :-1], dim=-1
+            )
+            gt_direction = F.normalize(
+                matched_gt[:, 1:] - matched_gt[:, :-1], dim=-1
+            )
+            direction_loss = (1.0 - (pred_direction * gt_direction).sum(-1)).mean()
         else:
-            pts_loss = _zero_like(pred_points)
-            dir_loss = _zero_like(pred_points)
-
-        cls_loss = _softmax_focal_loss(
-            pred_cls,
-            target_labels,
-            gamma=float(map_config["cls_gamma"]),
-            alpha=float(map_config["cls_alpha"]),
-            class_weight=class_weight,
+            point_loss = _zero(pred_points)
+            direction_loss = _zero(pred_points)
+        cls_losses.append(
+            _focal_classification_loss(
+                pred_cls,
+                targets,
+                float(settings["cls_gamma"]),
+                float(settings["cls_alpha"]),
+            )
         )
-        cls_losses.append(cls_loss)
-        pts_losses.append(pts_loss)
-        dir_losses.append(dir_loss)
-
-    map_cls_loss = torch.stack(cls_losses).mean() if cls_losses else _zero_like(map_cls_logits)
-    map_pts_loss = torch.stack(pts_losses).mean() if pts_losses else _zero_like(map_points)
-    map_dir_loss = torch.stack(dir_losses).mean() if dir_losses else _zero_like(map_points)
-    map_loss = (
-        float(map_config["lambda_cls"]) * map_cls_loss
-        + float(map_config["lambda_pts"]) * map_pts_loss
-        + float(map_config["lambda_dir"]) * map_dir_loss
+        point_losses.append(point_loss)
+        direction_losses.append(direction_loss)
+    cls_loss = torch.stack(cls_losses).mean()
+    point_loss = torch.stack(point_losses).mean()
+    direction_loss = torch.stack(direction_losses).mean()
+    total = (
+        float(settings["lambda_cls"]) * cls_loss
+        + float(settings["lambda_pts"]) * point_loss
+        + float(settings["lambda_dir"]) * direction_loss
     )
     return {
-        "map_cls_loss": map_cls_loss,
-        "map_pts_loss": map_pts_loss,
-        "map_dir_loss": map_dir_loss,
-        "map_loss": map_loss,
+        "map_cls_loss": cls_loss,
+        "map_pts_loss": point_loss,
+        "map_dir_loss": direction_loss,
+        "map_loss": total,
     }
-
-
-def compute_occ_loss(
-    occ_logits: torch.Tensor,
-    occ_gt: torch.Tensor,
-    config: Mapping[str, Any] | None = None,
-    mask_camera: torch.Tensor | None = None,
-) -> Dict[str, torch.Tensor]:
-    occ_config = {
-        "class_weight": None,
-        "use_camera_mask": False,
-        "lambda_sem": 0.0,
-        "lambda_geo": 0.0,
-        "lambda_lovasz": 0.0,
-        "enable_sem_scal_loss": False,
-        "enable_geo_scal_loss": False,
-        "enable_lovasz_loss": False,
-        "ignore_index": 255,
-    }
-    if config is not None:
-        occ_config.update(config)
-
-    C_occ = occ_logits.shape[1]
-    class_weight = _as_tensor_or_none(
-        occ_config.get("class_weight"),
-        device=occ_logits.device,
-        dtype=occ_logits.dtype,
-    )
-
-    if C_occ == 1:
-        target = occ_gt.float()
-        logits = occ_logits.squeeze(1)
-        if bool(occ_config["use_camera_mask"]) and mask_camera is not None:
-            valid = mask_camera.bool()
-            logits = logits[valid]
-            target = target[valid]
-        if logits.numel() == 0:
-            occ_main_loss = _zero_like(occ_logits)
-        else:
-            occ_main_loss = F.binary_cross_entropy_with_logits(logits, target)
-    else:
-        target = occ_gt.long()
-        ignore_index = int(occ_config["ignore_index"])
-        if bool(occ_config["use_camera_mask"]) and mask_camera is not None:
-            valid = mask_camera.bool().view(-1) & (target.reshape(-1) != ignore_index)
-            logits = occ_logits.permute(0, 2, 3, 4, 1).reshape(-1, C_occ)[valid]
-            target = target.reshape(-1)[valid]
-            if logits.numel() == 0:
-                occ_main_loss = _zero_like(occ_logits)
-            else:
-                occ_main_loss = F.cross_entropy(logits, target, weight=class_weight)
-        else:
-            if not bool((target != ignore_index).any()):
-                occ_main_loss = _zero_like(occ_logits)
-            else:
-                occ_main_loss = F.cross_entropy(
-                    occ_logits,
-                    target,
-                    weight=class_weight,
-                    ignore_index=ignore_index,
-                )
-
-    occ_sem_scal_loss = _zero_like(occ_logits)
-    occ_geo_scal_loss = _zero_like(occ_logits)
-    occ_lovasz_loss = _zero_like(occ_logits)
-    occ_loss = (
-        occ_main_loss
-        + float(occ_config["lambda_sem"]) * occ_sem_scal_loss
-        + float(occ_config["lambda_geo"]) * occ_geo_scal_loss
-        + float(occ_config["lambda_lovasz"]) * occ_lovasz_loss
-    )
-    return {
-        "occ_main_loss": occ_main_loss,
-        "occ_sem_scal_loss": occ_sem_scal_loss,
-        "occ_geo_scal_loss": occ_geo_scal_loss,
-        "occ_lovasz_loss": occ_lovasz_loss,
-        "occ_loss": occ_loss,
-    }
-
-
-def compute_flow_loss(
-    flow_logits: torch.Tensor,
-    flow_gt: torch.Tensor,
-    config: Mapping[str, Any] | None = None,
-    valid: torch.Tensor | None = None,
-    mask: torch.Tensor | None = None,
-) -> Dict[str, torch.Tensor]:
-    flow_config = {
-        "loss_type": "smooth_l1",
-    }
-    if config is not None:
-        flow_config.update(config)
-
-    if valid is not None and not valid.bool().any():
-        flow_loss = _zero_like(flow_logits)
-    else:
-        target = flow_gt.float()
-        if target.shape != flow_logits.shape:
-            raise ValueError(
-                f"Flow prediction/GT shape mismatch: {tuple(flow_logits.shape)} != {tuple(target.shape)}"
-            )
-        if mask is not None:
-            spatial_mask = mask.bool()
-            if spatial_mask.shape != flow_logits.shape[:1] + flow_logits.shape[2:]:
-                raise ValueError(
-                    "Flow mask must be [B, X, Y, Z], got "
-                    f"{tuple(spatial_mask.shape)} for {tuple(flow_logits.shape)}"
-                )
-            if valid is not None:
-                spatial_mask = spatial_mask & valid.bool().view(-1, 1, 1, 1)
-            channel_mask = spatial_mask.unsqueeze(1).expand_as(flow_logits)
-            if not channel_mask.any():
-                return {"flow_loss": _zero_like(flow_logits)}
-            flow_logits = flow_logits[channel_mask]
-            target = target[channel_mask]
-        if flow_config["loss_type"] == "l1":
-            flow_loss = F.l1_loss(flow_logits, target, reduction="mean")
-        else:
-            flow_loss = F.smooth_l1_loss(flow_logits, target, reduction="mean")
-    return {"flow_loss": flow_loss}
 
 
 def compute_total_loss(
     preds: Mapping[str, torch.Tensor],
     gts: Mapping[str, Any],
     config: Mapping[str, Any] | None = None,
-) -> Dict[str, torch.Tensor]:
-    total_config = {
-        "task_weights": {
-            "agent": 2.0,
-            "map": 1.5,
-            "occ": 1.0,
-            "flow": 1.0,
-        },
-        "tasks": {
-            "agent": True,
-            "map": False,
-            "occ": True,
-            "flow": False,
-        },
+) -> dict[str, torch.Tensor]:
+    settings: dict[str, Any] = {
+        "tasks": {"seg": False, "depth": False, "agent": True, "map": False},
+        "task_weights": {"seg": 1.0, "depth": 1.0, "agent": 2.0, "map": 1.5},
+        "seg": {},
+        "depth": {},
         "agent": {},
         "map": {},
-        "occ": {},
-        "flow": {},
     }
-    if config is not None:
-        for key, value in config.items():
-            if isinstance(value, dict) and key in total_config:
-                merged = dict(total_config[key])
-                merged.update(value)
-                total_config[key] = merged
-            else:
-                total_config[key] = value
+    for key, value in (config or {}).items():
+        if isinstance(value, Mapping) and key in settings:
+            settings[key] = {**settings[key], **value}
+        else:
+            settings[key] = value
+    batch_size = preds["agent_cls_logits"].shape[0]
+    device = preds["agent_cls_logits"].device
+    tasks = settings["tasks"]
 
-    tasks = total_config["tasks"]
-    agent_losses = (
-        compute_agent_loss(
-            preds["agent_cls_logits"],
-            preds["agent_boxes"],
-            preds.get("agent_velocity"),
-            gts["agent_gt"],
-            total_config["agent"],
+    seg_available = _available_mask(gts.get("seg_valid"), batch_size, device)
+    if tasks.get("seg") and seg_available.any() and "seg_gt" in gts:
+        seg_losses = compute_seg_loss(
+            preds["seg_logits"][seg_available],
+            gts["seg_gt"][seg_available],
+            settings["seg"],
         )
-        if bool(tasks.get("agent", True))
-        else {
-            "agent_cls_loss": _zero_like(preds["agent_cls_logits"]),
-            "agent_box_loss": _zero_like(preds["agent_boxes"]),
-            "agent_velocity_loss": _zero_like(preds["agent_boxes"]),
-            "agent_dn_loss": _zero_like(preds["agent_cls_logits"]),
-            "agent_loss": _zero_like(preds["agent_cls_logits"]),
-        }
-    )
-    map_available = bool(tasks.get("map", False)) and _is_available(gts.get("map_valid"), default=False)
-    map_losses = (
-        compute_map_loss(
-            preds["map_cls_logits"],
-            preds["map_points"],
-            gts["map_gt"],
-            total_config["map"],
-        )
-        if map_available
-        else {
-            "map_cls_loss": _zero_like(preds["map_cls_logits"]),
-            "map_pts_loss": _zero_like(preds["map_points"]),
-            "map_dir_loss": _zero_like(preds["map_points"]),
-            "map_loss": _zero_like(preds["map_cls_logits"]),
-        }
-    )
-    occ_available = bool(tasks.get("occ", True)) and _is_available(gts.get("occ_valid"), default=True)
-    occ_losses = (
-        compute_occ_loss(
-            preds["occ_logits"],
-            gts["occ_gt"],
-            total_config["occ"],
-            mask_camera=gts.get("mask_camera"),
-        )
-        if occ_available
-        else {
-            "occ_main_loss": _zero_like(preds["occ_logits"]),
-            "occ_sem_scal_loss": _zero_like(preds["occ_logits"]),
-            "occ_geo_scal_loss": _zero_like(preds["occ_logits"]),
-            "occ_lovasz_loss": _zero_like(preds["occ_logits"]),
-            "occ_loss": _zero_like(preds["occ_logits"]),
-        }
-    )
-    flow_available = bool(tasks.get("flow", False)) and _is_available(gts.get("flow_valid"), default=False)
-    flow_losses = (
-        compute_flow_loss(
-            preds["flow_logits"],
-            gts["flow_gt"],
-            total_config["flow"],
-            valid=gts.get("flow_valid"),
-            mask=gts.get("flow_mask"),
-        )
-        if flow_available
-        else {"flow_loss": _zero_like(preds["flow_logits"])}
-    )
+    else:
+        seg_losses = {"seg_loss": _zero(preds["seg_logits"])}
 
-    task_weights = total_config["task_weights"]
-    total_loss = (
-        float(task_weights.get("agent", 0.0)) * agent_losses["agent_loss"]
-        + float(task_weights.get("map", 0.0)) * map_losses["map_loss"]
-        + float(task_weights.get("occ", 0.0)) * occ_losses["occ_loss"]
-        + float(task_weights.get("flow", 0.0)) * flow_losses["flow_loss"]
-    )
+    depth_available = _available_mask(gts.get("depth_valid"), batch_size, device)
+    if tasks.get("depth") and depth_available.any() and "depth_gt" in gts:
+        depth_mask = gts.get("depth_mask")
+        if torch.is_tensor(depth_mask) and depth_mask.shape[0] == batch_size:
+            depth_mask = depth_mask[depth_available]
+        depth_losses = compute_depth_loss(
+            preds["depth"][depth_available],
+            gts["depth_gt"][depth_available],
+            settings["depth"],
+            depth_mask,
+        )
+    else:
+        depth_losses = {"depth_loss": _zero(preds["depth"])}
 
-    output = {
-        **agent_losses,
-        **map_losses,
-        **occ_losses,
-        **flow_losses,
-        "total_loss": total_loss,
-    }
-    return output
+    agent_available = _available_mask(gts.get("agent_valid"), batch_size, device)
+    if tasks.get("agent") and agent_available.any() and "agent_gt" in gts:
+        agent_losses = compute_agent_loss(
+            preds["agent_cls_logits"][agent_available],
+            preds["agent_boxes"][agent_available],
+            preds["agent_velocity"][agent_available],
+            _select_batch(gts["agent_gt"], agent_available),
+            settings["agent"],
+        )
+    else:
+        agent_losses = {
+            "agent_cls_loss": _zero(preds["agent_cls_logits"]),
+            "agent_box_loss": _zero(preds["agent_boxes"]),
+            "agent_velocity_loss": _zero(preds["agent_velocity"]),
+            "agent_loss": _zero(preds["agent_cls_logits"]),
+        }
+
+    map_available = _available_mask(gts.get("map_valid"), batch_size, device)
+    if tasks.get("map") and map_available.any() and "map_gt" in gts:
+        map_losses = compute_map_loss(
+            preds["map_cls_logits"][map_available],
+            preds["map_points"][map_available],
+            _select_batch(gts["map_gt"], map_available),
+            settings["map"],
+        )
+    else:
+        map_losses = {
+            "map_cls_loss": _zero(preds["map_cls_logits"]),
+            "map_pts_loss": _zero(preds["map_points"]),
+            "map_dir_loss": _zero(preds["map_points"]),
+            "map_loss": _zero(preds["map_cls_logits"]),
+        }
+
+    losses = {**seg_losses, **depth_losses, **agent_losses, **map_losses}
+    weights = settings["task_weights"]
+    losses["total_loss"] = (
+        float(weights.get("seg", 0.0)) * losses["seg_loss"]
+        + float(weights.get("depth", 0.0)) * losses["depth_loss"]
+        + float(weights.get("agent", 0.0)) * losses["agent_loss"]
+        + float(weights.get("map", 0.0)) * losses["map_loss"]
+    )
+    return losses

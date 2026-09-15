@@ -13,21 +13,18 @@ model:
     - CAM_R2
   fusion_layers: 1
   fusion_attention_heads: 8
+  bev_h: 32
+  bev_w: 32
+  bev_layers: 2
+  bev_attention_heads: 8
   decoder_layers: 2
   decoder_attention_heads: 8
   N_agent: 100
   N_map: 50
-  num_occ_queries: 50
-  num_flow_queries: 50
+  C_seg: 6
+  seg_size: [64, 64]
+  depth_size: [64, 64]
   C_agent: 4
   D_box: 8
   C_map: 4
   P: 20
-  C_occ: 11
-  C_flow: 2
-  X: 200
-  Y: 200
-  Z: 16
-  num_seg_queries: 32
-  C_seg: 6
-  seg_size: [64, 64]
