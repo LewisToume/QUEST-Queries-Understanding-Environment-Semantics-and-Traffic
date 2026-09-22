@@ -253,6 +253,7 @@ def main():
     from mmcv.parallel import collate, scatter
     from mmcv.runner import load_checkpoint
     from mmdet3d.datasets.pipelines import Compose
+    from mmdet3d.core.bbox import get_box_type
     from mmdet3d.models import build_model
 
     if not torch.cuda.is_available():
@@ -270,6 +271,9 @@ def main():
     sys.path.insert(0, str(args.stream_petr_root.resolve()))
     importlib.import_module("projects.mmdet3d_plugin")
     import mmdet3d.datasets.pipelines
+    box_type_3d, box_mode_3d = get_box_type("LiDAR")
+    raw["box_type_3d"] = box_type_3d
+    raw["box_mode_3d"] = box_mode_3d
 
     source_height, source_width = set_test_image_size(cfg, raw["img_filename"])
     print("source JPEG size (H, W):", (source_height, source_width))
