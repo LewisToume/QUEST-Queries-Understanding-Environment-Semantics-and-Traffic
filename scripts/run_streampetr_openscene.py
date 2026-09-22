@@ -269,6 +269,8 @@ def main():
     cfg = load_native_config(args, mmcv)
     sys.path.insert(0, str(args.stream_petr_root.resolve()))
     importlib.import_module("projects.mmdet3d_plugin")
+    import mmdet3d.datasets.pipelines
+
     source_height, source_width = set_test_image_size(cfg, raw["img_filename"])
     print("source JPEG size (H, W):", (source_height, source_width))
     pipeline = Compose(cfg.test_pipeline)
