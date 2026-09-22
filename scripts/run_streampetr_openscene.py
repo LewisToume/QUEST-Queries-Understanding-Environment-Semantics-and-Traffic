@@ -252,7 +252,7 @@ def main():
     import mmdet3d
     from mmcv.parallel import collate, scatter
     from mmcv.runner import load_checkpoint
-    from mmdet.datasets.pipelines import Compose
+    from mmdet3d.datasets.pipelines import Compose
     from mmdet3d.models import build_model
 
     if not torch.cuda.is_available():
