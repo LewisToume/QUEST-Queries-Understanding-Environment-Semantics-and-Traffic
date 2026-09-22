@@ -7,7 +7,7 @@ train:
   weight_decay: 1.0e-4
   device: auto
 dataset:
-  metadata_path: data/openscene/meta_datas/openscene-v1.0/meta_datas/meta_data_mini.pkl
+  metadata_path: data/openscene/meta_datas/meta_data_mini.pkl
   camera_root: data/openscene/sensor_blobs_mini
   image_size: [224, 224]
   camera_names:
