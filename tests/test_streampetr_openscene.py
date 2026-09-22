@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from PIL import Image
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run_streampetr_openscene.py"
@@ -14,6 +15,28 @@ spec.loader.exec_module(module)
 
 
 class StreamPETROpenSceneAdapterTest(unittest.TestCase):
+    def test_test_pipeline_uses_real_jpeg_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for index in range(6):
+                path = Path(directory) / "{}.jpg".format(index)
+                Image.new("RGB", (80, 60)).save(path)
+                paths.append(str(path))
+            augmentation = {"H": 900, "W": 1600, "final_dim": (256, 704)}
+            cfg = SimpleNamespace(
+                test_pipeline=[
+                    {"type": "LoadMultiViewImageFromFiles"},
+                    {"type": "ResizeCropFlipRotImage", "data_aug_conf": augmentation},
+                ]
+            )
+            self.assertEqual(module.set_test_image_size(cfg, paths), (60, 80))
+            self.assertEqual(augmentation, {"H": 60, "W": 80, "final_dim": (256, 704)})
+
+            Image.new("RGB", (81, 60)).save(paths[-1])
+            with self.assertRaisesRegex(ValueError, "camera JPEG sizes differ"):
+                module.set_test_image_size(cfg, paths)
+            self.assertEqual(augmentation["W"], 80)
+
     def test_native_config_uses_available_base_files(self):
         class FakeConfig:
             @staticmethod

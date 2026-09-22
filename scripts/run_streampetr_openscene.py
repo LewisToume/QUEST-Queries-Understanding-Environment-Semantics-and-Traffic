@@ -197,6 +197,38 @@ def load_native_config(args, mmcv):
     return mmcv.Config.fromstring(source, file_format=".py")
 
 
+def set_test_image_size(cfg, filenames):
+    from PIL import Image
+
+    if len(filenames) != len(CAMERAS):
+        raise ValueError("expected {} camera JPEGs, got {}".format(len(CAMERAS), len(filenames)))
+    sizes = []
+    for filename in filenames:
+        with Image.open(filename) as image:
+            sizes.append(image.size)
+    if len(set(sizes)) != 1:
+        details = ", ".join(
+            "{}={}".format(camera, size) for camera, size in zip(CAMERAS, sizes)
+        )
+        raise ValueError("six OpenScene camera JPEG sizes differ: {}".format(details))
+
+    width, height = sizes[0]
+    resize_steps = [
+        step
+        for step in cfg.test_pipeline
+        if step.get("type") == "ResizeCropFlipRotImage"
+    ]
+    if len(resize_steps) != 1:
+        raise ValueError(
+            "expected one ResizeCropFlipRotImage in StreamPETR test pipeline, got {}".format(
+                len(resize_steps)
+            )
+        )
+    resize_steps[0]["data_aug_conf"]["H"] = height
+    resize_steps[0]["data_aug_conf"]["W"] = width
+    return height, width
+
+
 def main():
     args = parse_args()
     info = load_frame(args.metadata, args.sample_index)
@@ -237,6 +269,8 @@ def main():
     cfg = load_native_config(args, mmcv)
     sys.path.insert(0, str(args.stream_petr_root.resolve()))
     importlib.import_module("projects.mmdet3d_plugin")
+    source_height, source_width = set_test_image_size(cfg, raw["img_filename"])
+    print("source JPEG size (H, W):", (source_height, source_width))
     pipeline = Compose(cfg.test_pipeline)
     processed = pipeline(raw)
     if processed is None:
