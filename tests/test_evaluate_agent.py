@@ -59,7 +59,7 @@ class EvaluateAgentTest(unittest.TestCase):
         self.assertEqual(filtered["labels"].tolist(), [0])
         self.assertEqual(tuple(filtered["centers_m"].shape), (1, 3))
 
-    def test_hungarian_prefers_class_aware_assignment(self):
+    def test_hungarian_matches_within_each_class(self):
         prediction_centers = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
         prediction_labels = torch.tensor([0, 1])
         gt_centers = torch.tensor([[0.1, 0.0, 0.0], [0.9, 0.0, 0.0]])
@@ -72,6 +72,16 @@ class EvaluateAgentTest(unittest.TestCase):
             distance_threshold=2.0,
         )
         self.assertEqual([(pred, gt) for pred, gt, _ in matches], [(0, 1), (1, 0)])
+
+    def test_wrong_class_is_never_matched(self):
+        matches = evaluation.match_agents(
+            torch.tensor([[0.0, 0.0, 0.0]]),
+            torch.tensor([0]),
+            torch.tensor([[0.0, 0.0, 0.0]]),
+            torch.tensor([1]),
+            distance_threshold=2.0,
+        )
+        self.assertEqual(matches, [])
 
     def test_distance_threshold_rejects_match_over_two_meters(self):
         matches = evaluation.match_agents(
@@ -92,10 +102,10 @@ class EvaluateAgentTest(unittest.TestCase):
             agent_loss=2.0,
         )
         summary = metrics.summary()
-        self.assertAlmostEqual(summary["precision"], 2 / 3)
-        self.assertAlmostEqual(summary["recall"], 1.0)
-        self.assertAlmostEqual(summary["class_accuracy_on_matched"], 0.5)
-        self.assertAlmostEqual(summary["mean_center_error_m"], 0.75)
+        self.assertAlmostEqual(summary["precision"], 1 / 3)
+        self.assertAlmostEqual(summary["recall"], 1 / 2)
+        self.assertAlmostEqual(summary["class_accuracy_on_matched"], 1.0)
+        self.assertAlmostEqual(summary["mean_center_error_m"], 0.5)
         self.assertEqual(summary["per_class"]["vehicle"]["matched"], 1)
         self.assertEqual(summary["per_class"]["traffic_cone"]["matched"], 0)
 

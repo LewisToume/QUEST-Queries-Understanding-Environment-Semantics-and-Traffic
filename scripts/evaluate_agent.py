@@ -105,15 +105,35 @@ def match_agents(
 ) -> list[tuple[int, int, float]]:
     if prediction_centers.numel() == 0 or gt_centers.numel() == 0:
         return []
-    distances = torch.cdist(prediction_centers.float(), gt_centers.float(), p=2)
-    class_mismatch = prediction_labels[:, None] != gt_labels[None, :]
-    cost = distances + class_mismatch.float() * (float(distance_threshold) + 1e-6)
-    prediction_indices, gt_indices = linear_sum_assignment(cost.detach().cpu().numpy())
     matches = []
-    for prediction_index, gt_index in zip(prediction_indices, gt_indices):
-        distance = float(distances[prediction_index, gt_index])
-        if distance <= float(distance_threshold):
-            matches.append((int(prediction_index), int(gt_index), distance))
+    for class_id in range(len(CLASS_NAMES)):
+        class_prediction_indices = torch.nonzero(
+            prediction_labels == class_id, as_tuple=False
+        ).flatten()
+        class_gt_indices = torch.nonzero(gt_labels == class_id, as_tuple=False).flatten()
+        if not class_prediction_indices.numel() or not class_gt_indices.numel():
+            continue
+        distances = torch.cdist(
+            prediction_centers[class_prediction_indices].float(),
+            gt_centers[class_gt_indices].float(),
+            p=2,
+        )
+        prediction_indices, gt_indices = linear_sum_assignment(
+            distances.detach().cpu().numpy()
+        )
+        for prediction_index, gt_index in zip(prediction_indices, gt_indices):
+            global_prediction_index = int(class_prediction_indices[prediction_index])
+            global_gt_index = int(class_gt_indices[gt_index])
+            distance = float(distances[prediction_index, gt_index])
+            if (
+                prediction_labels[global_prediction_index]
+                == gt_labels[global_gt_index]
+                and distance <= float(distance_threshold)
+            ):
+                matches.append(
+                    (global_prediction_index, global_gt_index, distance)
+                )
+    matches.sort(key=lambda item: item[0])
     return matches
 
 
@@ -157,7 +177,6 @@ class AgentMetrics:
         self.evaluated_samples += 1
         self.total_gt += int(gt_labels.numel())
         self.total_predictions += int(prediction_labels.numel())
-        self.matched += len(matches)
         self.agent_loss_sum += float(agent_loss)
         for class_id in range(len(CLASS_NAMES)):
             self.class_gt[class_id] += int((gt_labels == class_id).sum())
@@ -167,10 +186,12 @@ class AgentMetrics:
         for prediction_index, gt_index, distance in matches:
             prediction_class = int(prediction_labels[prediction_index])
             gt_class = int(gt_labels[gt_index])
+            if prediction_class != gt_class:
+                continue
+            self.matched += 1
+            self.class_correct += 1
             self.center_error_sum += distance
-            if prediction_class == gt_class:
-                self.class_correct += 1
-                self.class_matched[gt_class] += 1
+            self.class_matched[gt_class] += 1
 
     @staticmethod
     def _ratio(numerator: int, denominator: int) -> float:
@@ -327,6 +348,7 @@ def main() -> int:
     ):
         value = summary[key]
         print(f"{key}: {value:.6f}" if isinstance(value, float) else f"{key}: {value}")
+    print("class_accuracy_on_matched_note: strict class-aware matches only")
     print("per_class:")
     for name in CLASS_NAMES:
         values = summary["per_class"][name]
