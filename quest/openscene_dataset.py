@@ -30,6 +30,13 @@ OPENSCENE_AGENT_CLASS_TO_ID = {
 SOFT_LABEL_TASKS = frozenset({"seg", "depth", "agent", "map"})
 
 
+def _load_torch_payload(path: Path) -> Any:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
 def resolve_openscene_camera_path(raw_path: str, camera_root: str | Path) -> Path:
     """Map an official OpenScene camera path to the extracted mini archive."""
     parts = list(Path(raw_path.replace("\\", "/")).parts)
@@ -242,17 +249,37 @@ class OpenSceneMetadataDataset(Dataset):
         path = self.soft_labels_root / f"{token}.pt"
         if not path.exists():
             return {}
-        payload = torch.load(path, map_location="cpu", weights_only=True)
+        payload = _load_torch_payload(path)
         if not isinstance(payload, Mapping):
             raise ValueError(f"soft-label file must contain a mapping: {path}")
         payload_token = str(payload.get("token", token))
         if payload_token != token:
             raise ValueError(f"soft-label token mismatch: {payload_token} != {token}")
-        return {
+        labels = {
             task: payload[task]
             for task in SOFT_LABEL_TASKS
             if task in payload and payload[task] is not None
         }
+        if "agent" in labels:
+            agent = labels["agent"]
+            if not isinstance(agent, Mapping):
+                raise ValueError(f"agent soft label must contain a mapping: {path}")
+            required = {"labels", "boxes", "velocity"}
+            if not required.issubset(agent):
+                raise ValueError(f"agent soft label requires {sorted(required)}: {path}")
+            expected = self.max_agent_instances
+            shapes = {
+                "labels": (expected,),
+                "boxes": (expected, 8),
+                "velocity": (expected, 3),
+            }
+            for key, shape in shapes.items():
+                if not torch.is_tensor(agent[key]) or tuple(agent[key].shape) != shape:
+                    raise ValueError(
+                        f"agent soft-label {key} must be {shape}, got "
+                        f"{getattr(agent[key], 'shape', None)}: {path}"
+                    )
+        return labels
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         info = self.infos[index]

@@ -1,4 +1,12 @@
 stage: 2
+use_hard_gt: false
+tasks:
+  agent: true
+  map: false
+  seg: false
+  depth: false
+dataset:
+  max_agent_instances: 64
 distill:
   batch_size: 1
   num_samples: 8

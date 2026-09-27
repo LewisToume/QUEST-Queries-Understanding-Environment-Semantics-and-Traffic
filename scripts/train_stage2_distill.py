@@ -32,14 +32,19 @@ def _to_device(value: Any, device: torch.device) -> Any:
     return value
 
 
-def build_targets(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+def build_targets(
+    batch: dict[str, Any], device: torch.device, use_hard_gt: bool = True
+) -> dict[str, Any]:
+    batch_size = int(batch["images"].shape[0])
     targets: dict[str, Any] = {
-        "agent_gt": _to_device(batch["agent_gt"], device),
-        "agent_valid": batch["agent_valid"].to(device),
-        "seg_valid": torch.tensor([False], device=device),
-        "depth_valid": torch.tensor([False], device=device),
-        "map_valid": torch.tensor([False], device=device),
+        "agent_valid": torch.zeros(batch_size, dtype=torch.bool, device=device),
+        "seg_valid": torch.zeros(batch_size, dtype=torch.bool, device=device),
+        "depth_valid": torch.zeros(batch_size, dtype=torch.bool, device=device),
+        "map_valid": torch.zeros(batch_size, dtype=torch.bool, device=device),
     }
+    if use_hard_gt:
+        targets["agent_gt"] = _to_device(batch["agent_gt"], device)
+        targets["agent_valid"] = batch["agent_valid"].to(device)
     labels = batch.get("soft_labels", {})
     if isinstance(labels, list):
         if len(labels) != 1:
@@ -62,7 +67,9 @@ def build_targets(batch: dict[str, Any], device: torch.device) -> dict[str, Any]
         if not isinstance(agent, Mapping) or not required.issubset(agent):
             raise ValueError("agent soft label requires labels, boxes, and velocity")
         targets["agent_gt"] = dict(agent)
-        targets["agent_valid"] = torch.tensor([True], device=device)
+        targets["agent_valid"] = torch.ones(
+            batch_size, dtype=torch.bool, device=device
+        )
     if "map" in labels:
         vector_map = labels["map"]
         required = {"labels", "points"}
@@ -81,6 +88,7 @@ def main() -> int:
     if stage2["interfaces"].get("online_teacher"):
         raise RuntimeError("Stage2 must not instantiate online teachers")
     dataset_config = dict(stage1["dataset"])
+    dataset_config.update(stage2.get("dataset", {}))
     for key in ("metadata_path", "camera_root"):
         path = Path(dataset_config[key])
         if not path.is_absolute():
@@ -114,15 +122,12 @@ def main() -> int:
         lr=float(stage2["distill"]["lr"]),
     )
     for step, batch in enumerate(loader, start=1):
-        targets = build_targets(batch, device)
+        targets = build_targets(
+            batch, device, use_hard_gt=bool(stage2.get("use_hard_gt", True))
+        )
         loss_config = {
             **stage1["loss"],
-            "tasks": {
-                "seg": bool(targets["seg_valid"].any()),
-                "depth": bool(targets["depth_valid"].any()),
-                "agent": bool(targets["agent_valid"].any()),
-                "map": bool(targets["map_valid"].any()),
-            },
+            "tasks": dict(stage2["tasks"]),
             "task_weights": stage2["loss_weights"],
         }
         optimizer.zero_grad(set_to_none=True)
