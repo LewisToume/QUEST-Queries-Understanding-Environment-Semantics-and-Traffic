@@ -9,12 +9,14 @@ dataset:
   max_agent_instances: 64
 distill:
   batch_size: 1
-  num_samples: 8
+  num_samples: 100
+  epochs: 5
   lr: 5.0e-5
   device: auto
   model_path:
 paths:
   soft_labels_dir: data/soft_labels
+  checkpoint_path: checkpoints/quest_stage2_agent.pt
 teachers:
   agent:
     name: StreamPETR

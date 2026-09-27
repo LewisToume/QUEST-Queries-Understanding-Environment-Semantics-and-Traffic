@@ -21,6 +21,8 @@ from quest.utils import load_yaml_config
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Offline soft-label training for QUEST")
     parser.add_argument("--num-samples", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--checkpoint-path", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -80,6 +82,87 @@ def build_targets(
     return targets
 
 
+def train_one_epoch(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    loss_config: Mapping[str, Any],
+    use_hard_gt: bool,
+    epoch: int,
+    epochs: int,
+) -> tuple[float, float]:
+    model.train()
+    total_loss_sum = 0.0
+    agent_loss_sum = 0.0
+    trained_steps = 0
+    skipped_steps = 0
+    for step, batch in enumerate(loader, start=1):
+        targets = build_targets(batch, device, use_hard_gt=use_hard_gt)
+        optimizer.zero_grad(set_to_none=True)
+        predictions = model(
+            batch["images"].to(device),
+            batch["intrinsics"].to(device),
+            batch["extrinsics"].to(device),
+            batch["ego_state"].to(device),
+        )
+        losses = compute_total_loss(predictions, targets, loss_config)
+        total_loss = losses["total_loss"]
+        if not torch.isfinite(total_loss):
+            raise RuntimeError(
+                f"non-finite total loss at epoch={epoch} step={step} "
+                f"token={batch['sample_token'][0]}"
+            )
+        if total_loss.item() == 0:
+            skipped_steps += 1
+            print(
+                f"epoch={epoch}/{epochs} step={step}/{len(loader)} "
+                f"token={batch['sample_token'][0]} skipped: no labels"
+            )
+            continue
+        total_loss.backward()
+        optimizer.step()
+        trained_steps += 1
+        total_loss_sum += float(total_loss.detach())
+        agent_loss_sum += float(losses["agent_loss"].detach())
+        print(
+            f"epoch={epoch}/{epochs} step={step}/{len(loader)} "
+            f"token={batch['sample_token'][0]} "
+            f"total={total_loss.item():.6f} agent={losses['agent_loss'].item():.6f}"
+        )
+    if trained_steps == 0:
+        raise RuntimeError(
+            f"epoch {epoch} has no trainable labels; "
+            "check data/soft_labels and use_hard_gt"
+        )
+    average_total = total_loss_sum / trained_steps
+    average_agent = agent_loss_sum / trained_steps
+    print(
+        f"epoch={epoch}/{epochs} summary trained={trained_steps} skipped={skipped_steps} "
+        f"avg_total_loss={average_total:.6f} avg_agent_loss={average_agent:.6f}"
+    )
+    return average_total, average_agent
+
+
+def save_training_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": int(epoch),
+        },
+        temporary_path,
+    )
+    temporary_path.replace(path)
+
+
 def main() -> int:
     args = parse_args()
     model_config = load_yaml_config(PROJECT_ROOT / "configs" / "model.yaml")["model"]
@@ -96,7 +179,20 @@ def main() -> int:
     soft_root = Path(stage2["paths"]["soft_labels_dir"])
     if not soft_root.is_absolute():
         soft_root = PROJECT_ROOT / soft_root
-    num_samples = args.num_samples or int(stage2["distill"]["num_samples"])
+    num_samples = (
+        args.num_samples
+        if args.num_samples is not None
+        else int(stage2["distill"]["num_samples"])
+    )
+    epochs = (
+        args.epochs
+        if args.epochs is not None
+        else int(stage2["distill"]["epochs"])
+    )
+    if num_samples <= 0:
+        raise ValueError(f"num_samples must be positive, got {num_samples}")
+    if epochs <= 0:
+        raise ValueError(f"epochs must be positive, got {epochs}")
     dataset = OpenSceneMetadataDataset(
         max_samples=num_samples,
         soft_labels_root=soft_root,
@@ -121,33 +217,29 @@ def main() -> int:
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=float(stage2["distill"]["lr"]),
     )
-    for step, batch in enumerate(loader, start=1):
-        targets = build_targets(
-            batch, device, use_hard_gt=bool(stage2.get("use_hard_gt", True))
+    loss_config = {
+        **stage1["loss"],
+        "tasks": dict(stage2["tasks"]),
+        "task_weights": stage2["loss_weights"],
+    }
+    use_hard_gt = bool(stage2.get("use_hard_gt", True))
+    for epoch in range(1, epochs + 1):
+        train_one_epoch(
+            model,
+            loader,
+            optimizer,
+            device,
+            loss_config,
+            use_hard_gt,
+            epoch,
+            epochs,
         )
-        loss_config = {
-            **stage1["loss"],
-            "tasks": dict(stage2["tasks"]),
-            "task_weights": stage2["loss_weights"],
-        }
-        optimizer.zero_grad(set_to_none=True)
-        predictions = model(
-            batch["images"].to(device),
-            batch["intrinsics"].to(device),
-            batch["extrinsics"].to(device),
-            batch["ego_state"].to(device),
-        )
-        losses = compute_total_loss(predictions, targets, loss_config)
-        if losses["total_loss"].item() == 0:
-            print(f"step={step} token={batch['sample_token'][0]} skipped: no labels")
-            continue
-        losses["total_loss"].backward()
-        optimizer.step()
-        active = [task for task in ("seg", "depth", "agent", "map") if loss_config["tasks"][task]]
-        print(
-            f"step={step} token={batch['sample_token'][0]} "
-            f"tasks={','.join(active)} total={losses['total_loss'].item():.6f}"
-        )
+
+    checkpoint_path = args.checkpoint_path or Path(stage2["paths"]["checkpoint_path"])
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = PROJECT_ROOT / checkpoint_path
+    save_training_checkpoint(checkpoint_path, model, optimizer, epochs)
+    print(f"checkpoint saved: {checkpoint_path}")
     return 0
 
 
