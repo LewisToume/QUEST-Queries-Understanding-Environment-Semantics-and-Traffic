@@ -69,6 +69,34 @@ def transform_points(points: torch.Tensor, transform: torch.Tensor) -> torch.Ten
     return (transform @ homogeneous.T).T[:, :3]
 
 
+def resolve_lidar2ego(info: dict[str, Any]) -> torch.Tensor | None:
+    def valid_transform(key: str) -> torch.Tensor | None:
+        if key not in info or info[key] is None:
+            return None
+        try:
+            value = torch.as_tensor(info[key], dtype=torch.float64)
+        except (TypeError, ValueError):
+            return None
+        if value.shape != (4, 4) or not torch.isfinite(value).all():
+            return None
+        return value
+
+    direct = valid_transform("lidar2ego")
+    if direct is not None:
+        return direct.float()
+    lidar2global = valid_transform("lidar2global")
+    ego2global = valid_transform("ego2global")
+    if lidar2global is None or ego2global is None:
+        return None
+    try:
+        derived = torch.linalg.inv(ego2global) @ lidar2global
+    except RuntimeError:
+        return None
+    if not torch.isfinite(derived).all():
+        return None
+    return derived.float()
+
+
 def class_aware_nearest_distances(
     source_centers: torch.Tensor,
     source_labels: torch.Tensor,
@@ -254,6 +282,12 @@ def main() -> int:
         print(f"timestamp: {info.get('timestamp')}")
         for key in REQUIRED_TRANSFORMS:
             _print_transform(info, key)
+        resolved_lidar2ego = resolve_lidar2ego(info)
+        if resolved_lidar2ego is None:
+            print("resolved_lidar2ego: UNAVAILABLE")
+        else:
+            print(f"resolved_lidar2ego: shape={tuple(resolved_lidar2ego.shape)}")
+            print(resolved_lidar2ego.numpy())
         additional_fields = [
             key for key in transform_fields(info) if key not in REQUIRED_TRANSFORMS
         ]
@@ -304,19 +338,13 @@ def main() -> int:
         aggregate["raw_xyz"].extend(raw_xyz.tolist())
 
         transformed_centers = None
-        if "lidar2ego" in info and info["lidar2ego"] is not None:
-            lidar2ego = torch.as_tensor(info["lidar2ego"], dtype=torch.float32)
-            if lidar2ego.shape == (4, 4):
-                transformed_centers = transform_points(raw_centers, lidar2ego)
-                print("streampetr_lidar_to_ego_first_5_xyz:")
-                for center in transformed_centers[order[:5]]:
-                    x, y, z = center.tolist()
-                    print(f"  xyz=({x:.6f},{y:.6f},{z:.6f})")
-            else:
-                print(
-                    "streampetr_lidar_to_ego_first_5_xyz: UNAVAILABLE "
-                    f"(lidar2ego shape={tuple(lidar2ego.shape)})"
-                )
+        lidar2ego = resolved_lidar2ego
+        if lidar2ego is not None:
+            transformed_centers = transform_points(raw_centers, lidar2ego)
+            print("streampetr_lidar_to_ego_first_5_xyz:")
+            for center in transformed_centers[order[:5]]:
+                x, y, z = center.tolist()
+                print(f"  xyz=({x:.6f},{y:.6f},{z:.6f})")
         else:
             print("streampetr_lidar_to_ego_first_5_xyz: UNAVAILABLE")
 

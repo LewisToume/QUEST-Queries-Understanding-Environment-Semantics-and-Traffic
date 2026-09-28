@@ -16,10 +16,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from convert_streampetr_to_quest import STREAM_PETR_TO_QUEST
+from convert_streampetr_to_quest import (
+    MAX_AGENT_INSTANCES,
+    STREAM_PETR_TO_QUEST,
+    XY_RANGE,
+    Z_RANGE,
+)
 from diagnose_streampetr_coordinates import (
     load_metric_agent_gt,
     load_raw_predictions,
+    resolve_lidar2ego,
     transform_points,
 )
 from quest.openscene_dataset import OpenSceneMetadataDataset
@@ -29,6 +35,7 @@ from quest.utils import load_yaml_config
 CLASS_NAMES = ("vehicle", "pedestrian", "traffic_cone", "generic_object")
 CONFIDENCE_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50)
 MODES = ("raw", "lidar_to_ego")
+STAGES = ("before_top64", "after_top64")
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,16 +58,32 @@ def filter_raw_predictions(
     scores: torch.Tensor,
     raw_labels: torch.Tensor,
     confidence_threshold: float,
+    apply_top64: bool,
 ) -> dict[str, torch.Tensor]:
     if boxes.ndim != 2 or boxes.shape[1] != 9:
         raise ValueError(f"boxes must be [N,9], got {tuple(boxes.shape)}")
     if scores.shape != (boxes.shape[0],) or raw_labels.shape != (boxes.shape[0],):
         raise ValueError("StreamPETR boxes, scores, and labels must have equal length")
-    keep = scores >= float(confidence_threshold)
+    xy_min, xy_max = XY_RANGE
+    z_min, z_max = Z_RANGE
+    keep = (
+        (scores >= float(confidence_threshold))
+        & (boxes[:, 0] >= xy_min)
+        & (boxes[:, 0] <= xy_max)
+        & (boxes[:, 1] >= xy_min)
+        & (boxes[:, 1] <= xy_max)
+        & (boxes[:, 2] >= z_min)
+        & (boxes[:, 2] <= z_max)
+    )
+    indices = torch.nonzero(keep, as_tuple=False).flatten()
+    if apply_top64:
+        order = torch.argsort(scores[indices], descending=True)
+        indices = indices[order[:MAX_AGENT_INSTANCES]]
     return {
-        "centers": boxes[keep, :3],
-        "scores": scores[keep],
-        "labels": STREAM_PETR_TO_QUEST[raw_labels[keep]],
+        "indices": indices,
+        "centers": boxes[indices, :3],
+        "scores": scores[indices],
+        "labels": STREAM_PETR_TO_QUEST[raw_labels[indices]],
     }
 
 
@@ -177,13 +200,13 @@ def _resolve(path: str | Path) -> Path:
 
 
 def _print_threshold_result(
-    threshold: float, mode: str, metrics: ThresholdMetrics
+    threshold: float, mode: str, stage: str, metrics: ThresholdMetrics
 ) -> None:
     if metrics.samples == 0:
-        print(f"threshold={threshold:.2f} mode={mode}: unavailable")
+        print(f"threshold={threshold:.2f} mode={mode} stage={stage}: unavailable")
         return
     summary = metrics.summary()
-    print(f"threshold={threshold:.2f} mode={mode}")
+    print(f"threshold={threshold:.2f} mode={mode} stage={stage}")
     for key in (
         "total_gt",
         "total_predictions",
@@ -202,14 +225,40 @@ def _print_threshold_result(
             f"matched={values['matched']} precision={values['precision']:.6f} "
             f"recall={values['recall']:.6f}"
         )
-    pedestrian = summary["per_class"]["pedestrian"]
-    print(
-        f"  pedestrian_summary: threshold={threshold:.2f} "
-        f"pedestrian_predictions={pedestrian['predictions']} "
-        f"pedestrian_matched={pedestrian['matched']} "
-        f"pedestrian_precision={pedestrian['precision']:.6f} "
-        f"pedestrian_recall={pedestrian['recall']:.6f}"
-    )
+
+
+def _print_top64_impact(
+    threshold: float,
+    mode: str,
+    before: ThresholdMetrics,
+    after: ThresholdMetrics,
+) -> None:
+    if before.samples == 0 or after.samples == 0:
+        print(f"top64_impact threshold={threshold:.2f} mode={mode}: unavailable")
+        return
+    before_summary = before.summary()["per_class"]
+    after_summary = after.summary()["per_class"]
+    print(f"top64_impact threshold={threshold:.2f} mode={mode}")
+    for name in ("vehicle", "pedestrian"):
+        before_class = before_summary[name]
+        after_class = after_summary[name]
+        print(f"  {name}:")
+        print(
+            f"    predictions_before_top64={before_class['predictions']} "
+            f"predictions_after_top64={after_class['predictions']} "
+            f"dropped_by_top64="
+            f"{before_class['predictions'] - after_class['predictions']}"
+        )
+        print(
+            f"    matched_before_top64={before_class['matched']} "
+            f"precision_before_top64={before_class['precision']:.6f} "
+            f"recall_before_top64={before_class['recall']:.6f}"
+        )
+        print(
+            f"    matched_after_top64={after_class['matched']} "
+            f"precision_after_top64={after_class['precision']:.6f} "
+            f"recall_after_top64={after_class['recall']:.6f}"
+        )
 
 
 def main() -> int:
@@ -233,7 +282,9 @@ def main() -> int:
     )
     raw_dir = _resolve(args.raw_dir)
     metrics = {
-        threshold: {mode: ThresholdMetrics() for mode in MODES}
+        threshold: {
+            mode: {stage: ThresholdMetrics() for stage in STAGES} for mode in MODES
+        }
         for threshold in CONFIDENCE_THRESHOLDS
     }
     unavailable_transforms = 0
@@ -249,41 +300,54 @@ def main() -> int:
         raw = load_raw_predictions(raw_dir / f"{token}.pt", token)
 
         lidar_to_ego_centers = None
-        if "lidar2ego" in info and info["lidar2ego"] is not None:
-            transform = torch.as_tensor(info["lidar2ego"], dtype=torch.float32)
-            if transform.shape == (4, 4):
-                lidar_to_ego_centers = transform_points(raw["boxes"][:, :3], transform)
+        transform = resolve_lidar2ego(info)
+        if transform is not None:
+            lidar_to_ego_centers = transform_points(raw["boxes"][:, :3], transform)
         if lidar_to_ego_centers is None:
             unavailable_transforms += 1
 
         for threshold in CONFIDENCE_THRESHOLDS:
-            predictions = filter_raw_predictions(
-                raw["boxes"], raw["scores"], raw["labels"], threshold
-            )
-            raw_matches = strict_class_aware_hungarian(
-                predictions["centers"],
-                predictions["labels"],
-                gt_centers,
-                gt_labels,
-                args.distance_threshold,
-            )
-            metrics[threshold]["raw"].update(
-                predictions["labels"], gt_labels, raw_matches
-            )
-
-            if lidar_to_ego_centers is not None:
-                keep = raw["scores"] >= threshold
-                transformed_centers = lidar_to_ego_centers[keep]
-                transformed_matches = strict_class_aware_hungarian(
-                    transformed_centers,
+            stage_predictions = {
+                "before_top64": filter_raw_predictions(
+                    raw["boxes"],
+                    raw["scores"],
+                    raw["labels"],
+                    threshold,
+                    apply_top64=False,
+                ),
+                "after_top64": filter_raw_predictions(
+                    raw["boxes"],
+                    raw["scores"],
+                    raw["labels"],
+                    threshold,
+                    apply_top64=True,
+                ),
+            }
+            for stage, predictions in stage_predictions.items():
+                raw_matches = strict_class_aware_hungarian(
+                    predictions["centers"],
                     predictions["labels"],
                     gt_centers,
                     gt_labels,
                     args.distance_threshold,
                 )
-                metrics[threshold]["lidar_to_ego"].update(
-                    predictions["labels"], gt_labels, transformed_matches
+                metrics[threshold]["raw"][stage].update(
+                    predictions["labels"], gt_labels, raw_matches
                 )
+                if lidar_to_ego_centers is not None:
+                    transformed_centers = lidar_to_ego_centers[
+                        predictions["indices"]
+                    ]
+                    transformed_matches = strict_class_aware_hungarian(
+                        transformed_centers,
+                        predictions["labels"],
+                        gt_centers,
+                        gt_labels,
+                        args.distance_threshold,
+                    )
+                    metrics[threshold]["lidar_to_ego"][stage].update(
+                        predictions["labels"], gt_labels, transformed_matches
+                    )
         print(f"\rprogress {offset}/{args.count} token={token}", end="", flush=True)
     print()
     if unavailable_transforms:
@@ -293,26 +357,38 @@ def main() -> int:
 
     for threshold in CONFIDENCE_THRESHOLDS:
         for mode in MODES:
-            _print_threshold_result(threshold, mode, metrics[threshold][mode])
+            for stage in STAGES:
+                _print_threshold_result(
+                    threshold, mode, stage, metrics[threshold][mode][stage]
+                )
+            _print_top64_impact(
+                threshold,
+                mode,
+                metrics[threshold][mode]["before_top64"],
+                metrics[threshold][mode]["after_top64"],
+            )
 
     print("summary_table")
     print(
-        "threshold | mode | vehicle_P | vehicle_R | pedestrian_P | pedestrian_R"
+        "threshold | mode | stage | vehicle_P | vehicle_R | "
+        "pedestrian_predictions | pedestrian_P | pedestrian_R"
     )
     for threshold in CONFIDENCE_THRESHOLDS:
         for mode in MODES:
-            mode_metrics = metrics[threshold][mode]
-            if mode_metrics.samples == 0:
-                print(f"{threshold:.2f} | {mode} | unavailable")
-                continue
-            per_class = mode_metrics.summary()["per_class"]
-            vehicle = per_class["vehicle"]
-            pedestrian = per_class["pedestrian"]
-            print(
-                f"{threshold:.2f} | {mode} | "
-                f"{vehicle['precision']:.6f} | {vehicle['recall']:.6f} | "
-                f"{pedestrian['precision']:.6f} | {pedestrian['recall']:.6f}"
-            )
+            for stage in STAGES:
+                stage_metrics = metrics[threshold][mode][stage]
+                if stage_metrics.samples == 0:
+                    print(f"{threshold:.2f} | {mode} | {stage} | unavailable")
+                    continue
+                per_class = stage_metrics.summary()["per_class"]
+                vehicle = per_class["vehicle"]
+                pedestrian = per_class["pedestrian"]
+                print(
+                    f"{threshold:.2f} | {mode} | {stage} | "
+                    f"{vehicle['precision']:.6f} | {vehicle['recall']:.6f} | "
+                    f"{pedestrian['predictions']} | "
+                    f"{pedestrian['precision']:.6f} | {pedestrian['recall']:.6f}"
+                )
     return 0
 
 

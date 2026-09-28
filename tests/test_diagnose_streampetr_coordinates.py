@@ -30,6 +30,33 @@ class DiagnoseStreamPETRCoordinatesTest(unittest.TestCase):
             )
         )
 
+    def test_lidar2ego_is_derived_from_global_transforms(self):
+        ego2global = torch.eye(4)
+        ego2global[:3, 3] = torch.tensor([10.0, 20.0, 30.0])
+        expected_lidar2ego = torch.eye(4)
+        expected_lidar2ego[:3, 3] = torch.tensor([1.0, -2.0, 3.0])
+        lidar2global = ego2global @ expected_lidar2ego
+        resolved = diagnostics.resolve_lidar2ego(
+            {
+                "lidar2global": lidar2global.numpy(),
+                "ego2global": ego2global.numpy(),
+            }
+        )
+        self.assertIsNotNone(resolved)
+        self.assertTrue(torch.allclose(resolved, expected_lidar2ego))
+
+    def test_direct_lidar2ego_takes_precedence(self):
+        direct = torch.eye(4)
+        direct[0, 3] = 4.0
+        resolved = diagnostics.resolve_lidar2ego(
+            {
+                "lidar2ego": direct,
+                "lidar2global": torch.eye(4),
+                "ego2global": torch.eye(4),
+            }
+        )
+        self.assertTrue(torch.equal(resolved, direct))
+
     def test_class_aware_bev_distance(self):
         distances, indices = diagnostics.class_aware_nearest_distances(
             source_centers=torch.tensor([[0.0, 0.0, 100.0], [5.0, 0.0, 0.0]]),

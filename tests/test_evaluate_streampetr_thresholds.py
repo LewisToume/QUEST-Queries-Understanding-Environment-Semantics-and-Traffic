@@ -23,12 +23,47 @@ class EvaluateStreamPETRThresholdsTest(unittest.TestCase):
         scores = torch.tensor([0.05, 0.10, 0.20, 0.90])
         raw_labels = torch.tensor([0, 8, 9, 5])
         filtered = evaluation.filter_raw_predictions(
-            boxes, scores, raw_labels, confidence_threshold=0.10
+            boxes,
+            scores,
+            raw_labels,
+            confidence_threshold=0.10,
+            apply_top64=False,
         )
         self.assertTrue(
             torch.allclose(filtered["scores"], torch.tensor([0.10, 0.20, 0.90]))
         )
         self.assertEqual(filtered["labels"].tolist(), [1, 2, 3])
+
+    def test_range_filter_matches_converter(self):
+        boxes = torch.zeros(4, 9)
+        boxes[1, 0] = 50.01
+        boxes[2, 1] = -50.01
+        boxes[3, 2] = 5.01
+        filtered = evaluation.filter_raw_predictions(
+            boxes,
+            torch.ones(4),
+            torch.zeros(4, dtype=torch.long),
+            confidence_threshold=0.0,
+            apply_top64=False,
+        )
+        self.assertEqual(filtered["indices"].tolist(), [0])
+
+    def test_top64_uses_descending_score_after_threshold_and_range(self):
+        boxes = torch.zeros(70, 9)
+        scores = torch.arange(70, dtype=torch.float32)
+        raw_labels = torch.zeros(70, dtype=torch.long)
+        raw_labels[:10] = 8
+        before = evaluation.filter_raw_predictions(
+            boxes, scores, raw_labels, confidence_threshold=0.0, apply_top64=False
+        )
+        after = evaluation.filter_raw_predictions(
+            boxes, scores, raw_labels, confidence_threshold=0.0, apply_top64=True
+        )
+        self.assertEqual(before["labels"].shape[0], 70)
+        self.assertEqual(after["labels"].shape[0], 64)
+        self.assertEqual(int((before["labels"] == 1).sum()), 10)
+        self.assertEqual(int((after["labels"] == 1).sum()), 4)
+        self.assertTrue(torch.equal(after["scores"], torch.arange(69, 5, -1)))
 
     def test_converter_class_mapping_is_complete(self):
         self.assertEqual(
