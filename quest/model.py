@@ -15,10 +15,8 @@ DEFAULT_CAMERA_NAMES = (
     "CAM_F0",
     "CAM_B0",
     "CAM_L0",
-    "CAM_L1",
     "CAM_L2",
     "CAM_R0",
-    "CAM_R1",
     "CAM_R2",
 )
 
@@ -30,7 +28,7 @@ class MultiViewFusion(nn.Module):
         self,
         backbone_dim: int,
         hidden_dim: int,
-        num_cameras: int = 8,
+        num_cameras: int = 6,
         num_layers: int = 1,
         num_attention_heads: int = 8,
         geometry_dim: int = 34,
@@ -147,7 +145,7 @@ class MultiViewFusion(nn.Module):
 
 
 class QUESTModel(nn.Module):
-    """8-camera multi-task perception model with shared BEV latent and four outputs:
+    """6-camera multi-task perception model with shared BEV latent and four outputs:
     Semantic Segmentation, Depth, Agent, Vector Map.
     """
 
@@ -219,7 +217,7 @@ class QUESTModel(nn.Module):
         ego_state: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor]:
         if images.ndim != 5:
-            raise ValueError(f"images must be [B, 8, 3, H, W], got {tuple(images.shape)}")
+            raise ValueError(f"images must be [B, 6, 3, H, W], got {tuple(images.shape)}")
         batch_size, num_cameras, channels, height, width = images.shape
         if num_cameras != self.num_cameras:
             raise ValueError(f"expected {self.num_cameras} cameras, got {num_cameras}")
@@ -273,9 +271,9 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = QUESTModel.from_yaml().to(device).eval()
-    images = torch.randn(1, 8, 3, 224, 224, device=device)
-    intrinsics = torch.eye(3, device=device).reshape(1, 1, 3, 3).expand(1, 8, 3, 3)
-    extrinsics = torch.eye(4, device=device).reshape(1, 1, 4, 4).expand(1, 8, 4, 4)
+    images = torch.randn(1, 6, 3, 224, 224, device=device)
+    intrinsics = torch.eye(3, device=device).reshape(1, 1, 3, 3).expand(1, 6, 3, 3)
+    extrinsics = torch.eye(4, device=device).reshape(1, 1, 4, 4).expand(1, 6, 4, 4)
     ego_state = torch.zeros(1, 9, device=device)
     with torch.no_grad():
         outputs = model(images, intrinsics, extrinsics, ego_state)

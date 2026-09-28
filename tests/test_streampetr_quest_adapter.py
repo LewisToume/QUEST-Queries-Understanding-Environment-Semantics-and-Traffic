@@ -187,7 +187,7 @@ class StreamPETRQuestAdapterTest(unittest.TestCase):
             )
         )["agent"]
         batch = {
-            "images": torch.zeros(1, 8, 3, 2, 2),
+            "images": torch.zeros(1, 6, 3, 2, 2),
             "agent_gt": {
                 "labels": torch.zeros(1, 64, dtype=torch.long),
                 "boxes": torch.zeros(1, 64, 8),
@@ -217,7 +217,7 @@ class StreamPETRQuestAdapterTest(unittest.TestCase):
 
     def test_disabled_hard_gt_does_not_fall_back_when_soft_label_is_missing(self):
         batch = {
-            "images": torch.zeros(1, 8, 3, 2, 2),
+            "images": torch.zeros(1, 6, 3, 2, 2),
             "agent_gt": {
                 "labels": torch.zeros(1, 64, dtype=torch.long),
                 "boxes": torch.zeros(1, 64, 8),

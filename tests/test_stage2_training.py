@@ -57,9 +57,9 @@ def make_batch(token):
     boxes[0, 0, 7] = 1.0
     velocity = torch.zeros(1, 64, 3)
     return {
-        "images": torch.zeros(1, 8, 3, 2, 2),
-        "intrinsics": torch.eye(3).reshape(1, 1, 3, 3).expand(1, 8, 3, 3),
-        "extrinsics": torch.eye(4).reshape(1, 1, 4, 4).expand(1, 8, 4, 4),
+        "images": torch.zeros(1, 6, 3, 2, 2),
+        "intrinsics": torch.eye(3).reshape(1, 1, 3, 3).expand(1, 6, 3, 3),
+        "extrinsics": torch.eye(4).reshape(1, 1, 4, 4).expand(1, 6, 4, 4),
         "ego_state": torch.zeros(1, 9),
         "sample_token": [token],
         "agent_gt": {

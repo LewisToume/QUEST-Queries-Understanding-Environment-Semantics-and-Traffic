@@ -14,10 +14,8 @@ dataset:
     - CAM_F0
     - CAM_B0
     - CAM_L0
-    - CAM_L1
     - CAM_L2
     - CAM_R0
-    - CAM_R1
     - CAM_R2
   max_agent_instances: 16
 loss:
