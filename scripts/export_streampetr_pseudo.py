@@ -20,6 +20,54 @@ from run_streampetr_openscene import (  # noqa: E402
     make_input,
     set_test_image_size,
 )
+from inspect_openscene_sequence import scene_and_timestamp, sort_infos_temporally  # noqa: E402
+
+
+class TemporalSequenceState:
+    def __init__(self):
+        self.previous_scene_token = None
+        self.previous_timestamp = None
+        self.memory_valid = False
+        self.pending = None
+
+    def begin(self, scene_token, timestamp):
+        if self.pending is not None:
+            raise RuntimeError("complete the pending temporal frame before begin")
+        scene_token = str(scene_token)
+        timestamp = float(timestamp)
+        new_scene = (
+            self.previous_scene_token is None
+            or scene_token != self.previous_scene_token
+        )
+        non_monotonic = (
+            not new_scene
+            and self.previous_timestamp is not None
+            and timestamp <= self.previous_timestamp
+        )
+        reset_required = new_scene or non_monotonic or not self.memory_valid
+        decision = {
+            "scene_token": scene_token,
+            "timestamp": timestamp,
+            "new_scene": new_scene,
+            "non_monotonic": non_monotonic,
+            "reset_required": reset_required,
+            "prev_exists": 0.0 if reset_required else 1.0,
+        }
+        self.pending = decision
+        return decision
+
+    def complete(self, success):
+        if self.pending is None:
+            raise RuntimeError("begin a temporal frame before complete")
+        self.previous_scene_token = self.pending["scene_token"]
+        self.previous_timestamp = self.pending["timestamp"]
+        self.memory_valid = bool(success)
+        self.pending = None
+
+
+def default_output_dir(temporal):
+    name = "streampetr_temporal" if temporal else "streampetr"
+    return ROOT / "data/pseudo_labels" / name
 
 
 def parse_args():
@@ -28,6 +76,17 @@ def parse_args():
     )
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--count", type=int, default=100)
+    temporal_group = parser.add_mutually_exclusive_group()
+    temporal_group.add_argument(
+        "--temporal", dest="temporal", action="store_true", help="Use scene-temporal inference"
+    )
+    temporal_group.add_argument(
+        "--no-temporal",
+        dest="temporal",
+        action="store_false",
+        help="Reset StreamPETR memory for every frame",
+    )
+    parser.set_defaults(temporal=True)
     parser.add_argument(
         "--metadata",
         type=Path,
@@ -65,7 +124,7 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=ROOT / "data/pseudo_labels/streampetr",
+        default=None,
     )
     return parser.parse_args()
 
@@ -119,6 +178,8 @@ def reset_temporal_memory(model):
 
 def main():
     args = parse_args()
+    if args.output_dir is None:
+        args.output_dir = default_output_dir(args.temporal)
 
     import torch
     import mmcv
@@ -137,7 +198,9 @@ def main():
         metadata = pickle.load(stream)
     if "infos" not in metadata:
         raise KeyError("OpenScene metadata does not contain 'infos'")
-    infos = select_range(metadata["infos"], args.start, args.count)
+    all_infos = metadata["infos"]
+    ordered_infos = sort_infos_temporally(all_infos) if args.temporal else list(all_infos)
+    infos = select_range(ordered_infos, args.start, args.count)
 
     print(
         "runtime:",
@@ -147,11 +210,9 @@ def main():
         "mmdet3d={}".format(mmdet3d.__version__),
         "gpu={}".format(torch.cuda.get_device_name(0)),
     )
-    print(
-        "range: [{}, {}) output: {}".format(
-            args.start, args.start + args.count, args.output_dir
-        )
-    )
+    print("temporal_order={}".format(str(args.temporal).lower()))
+    print("selected_range=[{},{})".format(args.start, args.start + args.count))
+    print("output: {}".format(args.output_dir))
 
     cfg = load_native_config(args, mmcv)
     sys.path.insert(0, str(args.stream_petr_root.resolve()))
@@ -169,12 +230,48 @@ def main():
     succeeded = 0
     failed = 0
     failures = []
+    scenes_processed = set()
+    temporal_frames = 0
+    first_frames = 0
+    resets = 0
+    temporal_state = TemporalSequenceState()
+    previous_item_scene = None
     for offset, info in enumerate(infos):
         sample_index = args.start + offset
         token = str(info.get("token", "index-{}".format(sample_index)))
-        progress = "[{}/{}] index={} token={}".format(
-            offset + 1, args.count, sample_index, token
-        )
+        scene_token, timestamp = scene_and_timestamp(info)
+        scenes_processed.add(scene_token)
+        if args.temporal:
+            temporal_decision = temporal_state.begin(scene_token, timestamp)
+        else:
+            temporal_decision = {
+                "scene_token": scene_token,
+                "timestamp": timestamp,
+                "new_scene": previous_item_scene != scene_token,
+                "non_monotonic": False,
+                "reset_required": True,
+                "prev_exists": 0.0,
+            }
+        previous_item_scene = scene_token
+        if temporal_decision["new_scene"]:
+            first_frames += 1
+        if temporal_decision["prev_exists"] == 1.0:
+            temporal_frames += 1
+        if temporal_decision["non_monotonic"]:
+            print(
+                "WARNING index={} token={} scene={} timestamp={} is not greater "
+                "than previous timestamp {}; resetting temporal memory".format(
+                    sample_index,
+                    token,
+                    scene_token,
+                    timestamp,
+                    temporal_state.previous_timestamp,
+                ),
+                flush=True,
+            )
+        if temporal_decision["reset_required"]:
+            reset_temporal_memory(model)
+            resets += 1
         try:
             raw = make_input(info, args.camera_root)
             raw["box_type_3d"] = box_type_3d
@@ -185,7 +282,9 @@ def main():
             if processed is None:
                 raise RuntimeError("StreamPETR native test pipeline rejected the sample")
             data = scatter(collate([processed], samples_per_gpu=1), [0])[0]
-            data["prev_exists"] = [[torch.tensor(0.0, device="cuda")]]
+            data["prev_exists"] = [[
+                torch.tensor(temporal_decision["prev_exists"], device="cuda")
+            ]]
 
             with torch.no_grad():
                 outputs = model(return_loss=False, rescale=True, **data)
@@ -198,25 +297,56 @@ def main():
             output_path = args.output_dir / "{}.pt".format(token)
             save_payload(payload, output_path, torch)
             succeeded += 1
+            if args.temporal:
+                temporal_state.complete(True)
             print(
-                "{} OK detections={} file={}".format(
-                    progress, payload["scores_3d"].shape[0], output_path
+                "index={} token={} scene_token={} timestamp={} "
+                "temporal_prev_exists={} new_scene={} detections={} file={}".format(
+                    sample_index,
+                    token,
+                    scene_token,
+                    timestamp,
+                    int(temporal_decision["prev_exists"]),
+                    str(temporal_decision["new_scene"]).lower(),
+                    payload["scores_3d"].shape[0],
+                    output_path,
                 ),
                 flush=True,
             )
         except Exception as error:
             failed += 1
             failures.append((sample_index, token, type(error).__name__, str(error)))
+            if args.temporal:
+                temporal_state.complete(False)
             reset_temporal_memory(model)
+            resets += 1
             torch.cuda.empty_cache()
             print(
-                "{} FAILED {}: {}".format(progress, type(error).__name__, error),
+                "index={} token={} scene_token={} timestamp={} "
+                "temporal_prev_exists={} new_scene={} FAILED {}: {}".format(
+                    sample_index,
+                    token,
+                    scene_token,
+                    timestamp,
+                    int(temporal_decision["prev_exists"]),
+                    str(temporal_decision["new_scene"]).lower(),
+                    type(error).__name__,
+                    error,
+                ),
                 flush=True,
             )
 
     print(
-        "summary: attempted={} succeeded={} failed={} output={}".format(
-            args.count, succeeded, failed, args.output_dir
+        "summary: attempted={} succeeded={} failed={} scenes_processed={} "
+        "temporal_frames={} first_frames={} resets={} output={}".format(
+            args.count,
+            succeeded,
+            failed,
+            len(scenes_processed),
+            temporal_frames,
+            first_frames,
+            resets,
+            args.output_dir,
         )
     )
     for sample_index, token, error_type, message in failures:
