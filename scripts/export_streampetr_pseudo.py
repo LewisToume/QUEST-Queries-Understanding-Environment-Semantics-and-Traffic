@@ -20,7 +20,7 @@ from run_streampetr_openscene import (  # noqa: E402
     make_input,
     set_test_image_size,
 )
-from inspect_openscene_sequence import scene_and_timestamp, sort_infos_temporally  # noqa: E402
+from inspect_openscene_sequence import scene_and_timestamp  # noqa: E402
 
 
 class TemporalSequenceState:
@@ -144,6 +144,83 @@ def select_range(infos, start, count):
     return infos[start:end]
 
 
+def target_token_set(target_infos):
+    tokens = [str(info["token"]) for info in target_infos]
+    if len(tokens) != len(set(tokens)):
+        raise ValueError("target metadata slice contains duplicate tokens")
+    return set(tokens)
+
+
+def build_relevant_by_scene(all_infos, target_scenes):
+    relevant_by_scene = {}
+    for info in all_infos:
+        scene_token = str(info["scene_token"])
+        if scene_token in target_scenes:
+            relevant_by_scene.setdefault(scene_token, []).append(info)
+    return relevant_by_scene
+
+
+def build_temporal_execution_plan(all_infos, target_infos):
+    target_tokens = target_token_set(target_infos)
+    ordered_target_scenes = []
+    target_scenes = set()
+    latest_target_timestamp_by_scene = {}
+    for info in target_infos:
+        scene_token = str(info["scene_token"])
+        if scene_token not in target_scenes:
+            target_scenes.add(scene_token)
+            ordered_target_scenes.append(scene_token)
+        timestamp = float(info["timestamp"])
+        latest_target_timestamp_by_scene[scene_token] = max(
+            timestamp,
+            latest_target_timestamp_by_scene.get(scene_token, timestamp),
+        )
+
+    relevant_by_scene = build_relevant_by_scene(all_infos, target_scenes)
+    plan = []
+    for scene_token in ordered_target_scenes:
+        scene_infos = relevant_by_scene.get(scene_token, [])
+        scene_infos.sort(key=lambda info: float(info["timestamp"]))
+        latest_target_timestamp = latest_target_timestamp_by_scene[scene_token]
+        for info in scene_infos:
+            if float(info["timestamp"]) > latest_target_timestamp:
+                break
+            plan.append(
+                {
+                    "info": info,
+                    "target": str(info["token"]) in target_tokens,
+                }
+            )
+    planned_targets = {
+        str(item["info"]["token"]) for item in plan if item["target"]
+    }
+    if planned_targets != target_tokens:
+        raise RuntimeError(
+            "temporal plan target mismatch: missing={} extra={}".format(
+                sorted(target_tokens - planned_targets),
+                sorted(planned_targets - target_tokens),
+            )
+        )
+    return plan
+
+
+def validate_target_outputs(target_tokens, saved_tokens, output_dir):
+    target_tokens = set(target_tokens)
+    saved_tokens = set(saved_tokens)
+    existing_target_outputs = {
+        token for token in target_tokens if (output_dir / "{}.pt".format(token)).is_file()
+    }
+    if saved_tokens != target_tokens or existing_target_outputs != target_tokens:
+        raise RuntimeError(
+            "target/output token mismatch: missing_saved={} extra_saved={} "
+            "missing_files={}".format(
+                sorted(target_tokens - saved_tokens),
+                sorted(saved_tokens - target_tokens),
+                sorted(target_tokens - existing_target_outputs),
+            )
+        )
+
+
 def make_payload(token, pts_bbox):
     boxes = pts_bbox["boxes_3d"].tensor.detach().cpu()
     scores = pts_bbox["scores_3d"].detach().cpu()
@@ -199,8 +276,14 @@ def main():
     if "infos" not in metadata:
         raise KeyError("OpenScene metadata does not contain 'infos'")
     all_infos = metadata["infos"]
-    ordered_infos = sort_infos_temporally(all_infos) if args.temporal else list(all_infos)
-    infos = select_range(ordered_infos, args.start, args.count)
+    target_infos = select_range(all_infos, args.start, args.count)
+    target_tokens = target_token_set(target_infos)
+    if args.temporal:
+        execution_plan = build_temporal_execution_plan(all_infos, target_infos)
+    else:
+        execution_plan = [
+            {"info": info, "target": True} for info in target_infos
+        ]
 
     print(
         "runtime:",
@@ -210,8 +293,11 @@ def main():
         "mmdet3d={}".format(mmdet3d.__version__),
         "gpu={}".format(torch.cuda.get_device_name(0)),
     )
-    print("temporal_order={}".format(str(args.temporal).lower()))
+    print("temporal_mode={}".format(str(args.temporal).lower()))
+    print("target_selection=metadata_slice")
     print("selected_range=[{},{})".format(args.start, args.start + args.count))
+    print("target_samples={}".format(len(target_tokens)))
+    print("total_inference_frames={}".format(len(execution_plan)))
     print("output: {}".format(args.output_dir))
 
     cfg = load_native_config(args, mmcv)
@@ -227,18 +313,19 @@ def main():
     model = model.cuda().eval()
     print("checkpoint loaded:", str(checkpoint_path))
 
-    succeeded = 0
     failed = 0
     failures = []
     scenes_processed = set()
-    temporal_frames = 0
-    first_frames = 0
+    saved_tokens = set()
+    warmup_frames_processed = 0
+    total_inference_frames = 0
     resets = 0
     temporal_state = TemporalSequenceState()
     previous_item_scene = None
-    for offset, info in enumerate(infos):
-        sample_index = args.start + offset
-        token = str(info.get("token", "index-{}".format(sample_index)))
+    for execution_index, item in enumerate(execution_plan):
+        info = item["info"]
+        is_target = bool(item["target"])
+        token = str(info.get("token", "execution-{}".format(execution_index)))
         scene_token, timestamp = scene_and_timestamp(info)
         scenes_processed.add(scene_token)
         if args.temporal:
@@ -253,15 +340,11 @@ def main():
                 "prev_exists": 0.0,
             }
         previous_item_scene = scene_token
-        if temporal_decision["new_scene"]:
-            first_frames += 1
-        if temporal_decision["prev_exists"] == 1.0:
-            temporal_frames += 1
         if temporal_decision["non_monotonic"]:
             print(
-                "WARNING index={} token={} scene={} timestamp={} is not greater "
+                "WARNING execution_index={} token={} scene={} timestamp={} is not greater "
                 "than previous timestamp {}; resetting temporal memory".format(
-                    sample_index,
+                    execution_index,
                     token,
                     scene_token,
                     timestamp,
@@ -273,6 +356,7 @@ def main():
             reset_temporal_memory(model)
             resets += 1
         try:
+            total_inference_frames += 1
             raw = make_input(info, args.camera_root)
             raw["box_type_3d"] = box_type_3d
             raw["box_mode_3d"] = box_mode_3d
@@ -293,43 +377,47 @@ def main():
                     "unexpected StreamPETR output: {}".format(type(outputs))
                 )
             pts_bbox = outputs[0]["pts_bbox"]
-            payload = make_payload(token, pts_bbox)
-            output_path = args.output_dir / "{}.pt".format(token)
-            save_payload(payload, output_path, torch)
-            succeeded += 1
+            detections = int(pts_bbox["scores_3d"].shape[0])
+            saved = False
+            if is_target:
+                payload = make_payload(token, pts_bbox)
+                output_path = args.output_dir / "{}.pt".format(token)
+                save_payload(payload, output_path, torch)
+                saved_tokens.add(token)
+                saved = True
+            else:
+                warmup_frames_processed += 1
             if args.temporal:
                 temporal_state.complete(True)
             print(
-                "index={} token={} scene_token={} timestamp={} "
-                "temporal_prev_exists={} new_scene={} detections={} file={}".format(
-                    sample_index,
-                    token,
+                "scene={} timestamp={} token={} prev_exists={} target={} saved={} "
+                "detections={}".format(
                     scene_token,
                     timestamp,
                     int(temporal_decision["prev_exists"]),
-                    str(temporal_decision["new_scene"]).lower(),
-                    payload["scores_3d"].shape[0],
-                    output_path,
+                    str(is_target).lower(),
+                    str(saved).lower(),
+                    detections,
                 ),
                 flush=True,
             )
         except Exception as error:
             failed += 1
-            failures.append((sample_index, token, type(error).__name__, str(error)))
+            failures.append(
+                (execution_index, token, type(error).__name__, str(error))
+            )
             if args.temporal:
                 temporal_state.complete(False)
             reset_temporal_memory(model)
             resets += 1
             torch.cuda.empty_cache()
             print(
-                "index={} token={} scene_token={} timestamp={} "
-                "temporal_prev_exists={} new_scene={} FAILED {}: {}".format(
-                    sample_index,
-                    token,
+                "scene={} timestamp={} token={} prev_exists={} target={} saved=false "
+                "FAILED {}: {}".format(
                     scene_token,
                     timestamp,
                     int(temporal_decision["prev_exists"]),
-                    str(temporal_decision["new_scene"]).lower(),
+                    str(is_target).lower(),
                     type(error).__name__,
                     error,
                 ),
@@ -337,24 +425,27 @@ def main():
             )
 
     print(
-        "summary: attempted={} succeeded={} failed={} scenes_processed={} "
-        "temporal_frames={} first_frames={} resets={} output={}".format(
-            args.count,
-            succeeded,
-            failed,
+        "summary: target_samples={} target_saved={} warmup_frames_processed={} "
+        "total_inference_frames={} scenes_processed={} failed_frames={} resets={} "
+        "output={}".format(
+            len(target_tokens),
+            len(saved_tokens),
+            warmup_frames_processed,
+            total_inference_frames,
             len(scenes_processed),
-            temporal_frames,
-            first_frames,
+            failed,
             resets,
             args.output_dir,
         )
     )
-    for sample_index, token, error_type, message in failures:
+    for execution_index, token, error_type, message in failures:
         print(
-            "failure: index={} token={} {}: {}".format(
-                sample_index, token, error_type, message
+            "failure: execution_index={} token={} {}: {}".format(
+                execution_index, token, error_type, message
             )
         )
+    validate_target_outputs(target_tokens, saved_tokens, args.output_dir)
+    print("target token set == output temporal .pt token set: true")
     return 0 if failed == 0 else 1
 
 
