@@ -182,16 +182,41 @@ class StreamPETRPseudoExportTest(unittest.TestCase):
             [item["target"] for item in plan], [False, True, True]
         )
 
-    def test_target_output_validation_requires_every_target_to_be_saved(self):
+    def test_success_and_failure_logs_include_token(self):
+        success = module.format_success_log(
+            "scene-a", 123.0, "token-a", 1.0, True, True, 7
+        )
+        self.assertEqual(
+            success,
+            "scene=scene-a timestamp=123.0 token=token-a prev_exists=1 "
+            "target=true saved=true detections=7",
+        )
+
+        error = RuntimeError("inference failed")
+        failure = module.format_failure_log(
+            "scene-b", 456.0, "token-b", 0.0, False, error
+        )
+        self.assertEqual(
+            failure,
+            "scene=scene-b timestamp=456.0 token=token-b prev_exists=0 "
+            "target=false saved=false FAILED RuntimeError: inference failed",
+        )
+
+    def test_target_output_validation_requires_exact_token_set(self):
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
             targets = {"target-a", "target-b"}
             for token in targets:
                 (output_dir / "{}.pt".format(token)).touch()
 
-            module.validate_target_outputs(targets, targets, output_dir)
-            with self.assertRaisesRegex(RuntimeError, "target/output token mismatch"):
-                module.validate_target_outputs(targets, {"target-a"}, output_dir)
+            module.validate_target_outputs(targets, output_dir)
+            (output_dir / "target-b.pt").unlink()
+            (output_dir / "extra.pt").touch()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"missing_files=\['target-b'\] extra_files=\['extra'\]",
+            ):
+                module.validate_target_outputs(targets, output_dir)
 
 
 if __name__ == "__main__":

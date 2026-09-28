@@ -204,21 +204,50 @@ def build_temporal_execution_plan(all_infos, target_infos):
     return plan
 
 
-def validate_target_outputs(target_tokens, saved_tokens, output_dir):
+def validate_target_outputs(target_tokens, output_dir):
     target_tokens = set(target_tokens)
-    saved_tokens = set(saved_tokens)
-    existing_target_outputs = {
-        token for token in target_tokens if (output_dir / "{}.pt".format(token)).is_file()
-    }
-    if saved_tokens != target_tokens or existing_target_outputs != target_tokens:
+    output_tokens = {path.stem for path in output_dir.glob("*.pt")}
+    if output_tokens != target_tokens:
         raise RuntimeError(
-            "target/output token mismatch: missing_saved={} extra_saved={} "
-            "missing_files={}".format(
-                sorted(target_tokens - saved_tokens),
-                sorted(saved_tokens - target_tokens),
-                sorted(target_tokens - existing_target_outputs),
+            "target/output token mismatch: missing_files={} extra_files={}".format(
+                sorted(target_tokens - output_tokens),
+                sorted(output_tokens - target_tokens),
             )
         )
+
+
+def format_success_log(
+    scene_token, timestamp, token, prev_exists, is_target, saved, detections
+):
+    return (
+        "scene={} timestamp={} token={} prev_exists={} target={} saved={} "
+        "detections={}".format(
+            scene_token,
+            timestamp,
+            token,
+            int(prev_exists),
+            str(is_target).lower(),
+            str(saved).lower(),
+            detections,
+        )
+    )
+
+
+def format_failure_log(
+    scene_token, timestamp, token, prev_exists, is_target, error
+):
+    return (
+        "scene={} timestamp={} token={} prev_exists={} target={} saved=false "
+        "FAILED {}: {}".format(
+            scene_token,
+            timestamp,
+            token,
+            int(prev_exists),
+            str(is_target).lower(),
+            type(error).__name__,
+            error,
+        )
+    )
 
 
 def make_payload(token, pts_bbox):
@@ -389,18 +418,6 @@ def main():
                 warmup_frames_processed += 1
             if args.temporal:
                 temporal_state.complete(True)
-            print(
-                "scene={} timestamp={} token={} prev_exists={} target={} saved={} "
-                "detections={}".format(
-                    scene_token,
-                    timestamp,
-                    int(temporal_decision["prev_exists"]),
-                    str(is_target).lower(),
-                    str(saved).lower(),
-                    detections,
-                ),
-                flush=True,
-            )
         except Exception as error:
             failed += 1
             failures.append(
@@ -412,17 +429,29 @@ def main():
             resets += 1
             torch.cuda.empty_cache()
             print(
-                "scene={} timestamp={} token={} prev_exists={} target={} saved=false "
-                "FAILED {}: {}".format(
+                format_failure_log(
                     scene_token,
                     timestamp,
-                    int(temporal_decision["prev_exists"]),
-                    str(is_target).lower(),
-                    type(error).__name__,
+                    token,
+                    temporal_decision["prev_exists"],
+                    is_target,
                     error,
                 ),
                 flush=True,
             )
+            continue
+        print(
+            format_success_log(
+                scene_token,
+                timestamp,
+                token,
+                temporal_decision["prev_exists"],
+                is_target,
+                saved,
+                detections,
+            ),
+            flush=True,
+        )
 
     print(
         "summary: target_samples={} target_saved={} warmup_frames_processed={} "
@@ -444,7 +473,7 @@ def main():
                 execution_index, token, error_type, message
             )
         )
-    validate_target_outputs(target_tokens, saved_tokens, args.output_dir)
+    validate_target_outputs(target_tokens, args.output_dir)
     print("target token set == output temporal .pt token set: true")
     return 0 if failed == 0 else 1
 
