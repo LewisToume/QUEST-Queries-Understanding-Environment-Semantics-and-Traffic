@@ -3,6 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 
+import numpy as np
 import torch
 
 
@@ -60,6 +61,20 @@ class DiagnoseStreamPETRCoordinatesTest(unittest.TestCase):
         )
         self.assertTrue(
             torch.equal(values["minus_half_height"], torch.tensor([0.0, -2.0]))
+        )
+
+    def test_transform_field_discovery(self):
+        fields = diagnostics.transform_fields(
+            {
+                "lidar2ego": np.eye(4),
+                "lidar2ego_rotation": np.eye(3),
+                "ego2global_translation": np.zeros(3),
+                "unrelated": np.eye(4),
+            }
+        )
+        self.assertEqual(
+            fields,
+            ["ego2global_translation", "lidar2ego", "lidar2ego_rotation"],
         )
 
 

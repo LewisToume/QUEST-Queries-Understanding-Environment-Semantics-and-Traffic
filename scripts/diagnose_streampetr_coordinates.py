@@ -261,6 +261,7 @@ def main() -> int:
         if additional_fields:
             for key in additional_fields:
                 print(f"  {key}: shape={np.asarray(info[key]).shape}")
+                print(np.asarray(info[key]))
         else:
             print("  NONE")
 
