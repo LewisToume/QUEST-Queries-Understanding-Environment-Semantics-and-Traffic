@@ -13,10 +13,8 @@ OPENSCENE_CAMERA_NAMES = (
     "CAM_F0",
     "CAM_B0",
     "CAM_L0",
-    "CAM_L1",
     "CAM_L2",
     "CAM_R0",
-    "CAM_R1",
     "CAM_R2",
 )
 
@@ -52,7 +50,7 @@ def resolve_openscene_camera_path(raw_path: str, camera_root: str | Path) -> Pat
 
 
 class OpenSceneMetadataDataset(Dataset):
-    """OpenScene 8-camera frames loaded directly from the official metadata."""
+    """OpenScene 6-camera frames loaded directly from the official metadata."""
 
     def __init__(
         self,
@@ -94,7 +92,7 @@ class OpenSceneMetadataDataset(Dataset):
                 if max_samples > 0 and len(self.infos) >= max_samples:
                     break
         if not self.infos:
-            raise RuntimeError(f"no complete 8-camera frames found in {self.metadata_path}")
+            raise RuntimeError(f"no complete 6-camera frames found in {self.metadata_path}")
         if max_samples > 0 and len(self.infos) < max_samples:
             raise RuntimeError(
                 f"requested {max_samples} complete frames, found {len(self.infos)}"

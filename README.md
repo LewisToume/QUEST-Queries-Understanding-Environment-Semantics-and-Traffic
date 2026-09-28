@@ -1,12 +1,12 @@
 # QUEST
 
-QUEST is an 8-camera multi-task perception model with shared BEV latent and four
+QUEST is a 6-camera multi-task perception model with shared BEV latent and four
 outputs: Semantic Segmentation, Depth, Agent, Vector Map.
 
 ## Model
 
 ```text
-8 camera images
+6 camera images
   -> shared frozen DINOv2
   -> camera-aware multi-view fusion
   -> learned BEV encoder
@@ -20,7 +20,7 @@ per-camera DINO patch features
 The fixed OpenScene camera order is:
 
 ```text
-CAM_F0, CAM_B0, CAM_L0, CAM_L1, CAM_L2, CAM_R0, CAM_R1, CAM_R2
+CAM_F0, CAM_B0, CAM_L0, CAM_L2, CAM_R0, CAM_R2
 ```
 
 Stage1 reads the official OpenScene metadata pickle directly. It currently uses

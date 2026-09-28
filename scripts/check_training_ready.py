@@ -19,14 +19,14 @@ from quest.utils import load_yaml_config
 
 
 EXPECTED_INPUTS = {
-    "images": (1, 8, 3, 224, 224),
-    "intrinsics": (1, 8, 3, 3),
-    "extrinsics": (1, 8, 4, 4),
+    "images": (1, 6, 3, 224, 224),
+    "intrinsics": (1, 6, 3, 3),
+    "extrinsics": (1, 6, 4, 4),
     "ego_state": (1, 9),
 }
 EXPECTED_OUTPUTS = {
-    "seg_logits": (1, 8, 6, 64, 64),
-    "depth": (1, 8, 1, 64, 64),
+    "seg_logits": (1, 6, 6, 64, 64),
+    "depth": (1, 6, 1, 64, 64),
     "agent_cls_logits": (1, 100, 5),
     "agent_boxes": (1, 100, 8),
     "agent_velocity": (1, 100, 3),
@@ -113,7 +113,7 @@ def main() -> int:
     print("output shapes", {key: tuple(value.shape) for key, value in predictions.items()})
     print(f"Stage1 loss {total.item():.6f}")
     print("blockers", blockers if blockers else "NONE")
-    print(f"QUEST_8VIEW_TRAINING_READY = {'NO' if blockers else 'YES'}")
+    print(f"QUEST_6VIEW_TRAINING_READY = {'NO' if blockers else 'YES'}")
     return 1 if blockers else 0
 
 

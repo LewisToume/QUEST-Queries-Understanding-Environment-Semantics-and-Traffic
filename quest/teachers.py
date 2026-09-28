@@ -215,7 +215,7 @@ def openscene_images_to_teacher(
     source_order: Sequence[str],
     target_order: Sequence[str],
 ) -> torch.Tensor:
-    """OpenScene image tensor is [B, 8, 3, H, W]; teachers receive [B, N_cam, 3, H, W]."""
+    """Reorder an OpenScene [B, N_cam, 3, H, W] tensor for a teacher."""
 
     return reorder_openscene_cameras(images, source_order, target_order)
 
