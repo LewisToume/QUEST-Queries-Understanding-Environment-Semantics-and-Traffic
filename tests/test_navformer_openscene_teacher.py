@@ -4,7 +4,7 @@ from scripts.run_navformer_openscene_teacher import (
     build_camera_geometry,
     find_transform,
     make_can_bus,
-    resolve_image_path,
+    resolve_camera_path,
 )
 
 
@@ -16,13 +16,13 @@ class FakeCV2:
         return np.asarray(intrinsic), (0, 0, image_size[0], image_size[1])
 
 
-def test_resolve_image_path_maps_sensor_blobs_mini(tmp_path):
-    image = tmp_path / "CAM_F0" / "frame.jpg"
-    image.parent.mkdir()
+def test_resolve_camera_path_maps_sensor_blobs_mini(tmp_path):
+    image = tmp_path / "sensor_blobs" / "mini" / "CAM_F0" / "frame.jpg"
+    image.parent.mkdir(parents=True)
     image.write_bytes(b"jpeg")
 
-    result = resolve_image_path(
-        "data/openscene-v1.0/sensor_blobs/mini/CAM_F0/frame.jpg", tmp_path
+    result = resolve_camera_path(
+        "dataset/sensor_blobs/CAM_F0/frame.jpg", tmp_path
     )
 
     assert result == image
@@ -33,8 +33,8 @@ def test_camera_geometry_preserves_metadata_order_and_builds_lidar2img(tmp_path)
     expected_names = ["CAM_{}".format(index) for index in range(8)]
     intrinsic = np.diag([2.0, 3.0, 1.0])
     for index, name in enumerate(expected_names):
-        image = tmp_path / name / "frame.jpg"
-        image.parent.mkdir()
+        image = tmp_path / "sensor_blobs" / "mini" / name / "frame.jpg"
+        image.parent.mkdir(parents=True)
         image.write_bytes(b"jpeg")
         cameras[name] = {
             "data_path": "sensor_blobs/mini/{}/frame.jpg".format(name),

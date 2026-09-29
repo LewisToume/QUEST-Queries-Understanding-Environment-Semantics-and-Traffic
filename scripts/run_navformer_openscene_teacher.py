@@ -20,7 +20,9 @@ DEFAULT_CHECKPOINT = (
     / "data/alg_engine/ckpts/track_map_nuplan_r50_navtrain_100pct_bs1x8.pth"
 )
 DEFAULT_METADATA = OPENSCENE_ROOT / "meta_datas/meta_data_mini.pkl"
-DEFAULT_IMAGE_ROOT = OPENSCENE_ROOT / "sensor_blobs_mini"
+DEFAULT_IMAGE_ROOT = Path(
+    "/home/user/DataDisk/QUEST_WORK/QUEST/data/openscene/sensor_blobs_mini"
+)
 
 
 def parse_args():
@@ -71,33 +73,22 @@ def load_info(metadata_path, sample_index):
     return info
 
 
-def resolve_image_path(raw_path, image_root):
-    raw = Path(str(raw_path).replace("\\", "/"))
-    if raw.is_absolute() and raw.is_file():
-        return raw
-
-    parts = list(raw.parts)
-    lowered = [part.lower() for part in parts]
-    suffix = None
-    for marker in ("sensor_blobs_mini", "sensor_blobs"):
-        if marker in lowered:
-            marker_index = lowered.index(marker)
-            suffix = parts[marker_index + 1 :]
-            if suffix and str(suffix[0]).lower() == "mini":
-                suffix = suffix[1:]
-            break
-    if suffix is None:
-        suffix = parts
-        if suffix and str(suffix[0]).lower() in ("dataset", "data"):
-            suffix = suffix[1:]
-
-    candidate = image_root.joinpath(*suffix)
+def resolve_camera_path(raw_path, camera_root):
+    parts = list(Path(raw_path.replace("\\", "/")).parts)
+    if parts and parts[0].lower() == "dataset":
+        parts.pop(0)
+    candidate = camera_root.joinpath(*parts)
+    if candidate.is_file():
+        return candidate
+    try:
+        sensor_index = parts.index("sensor_blobs") + 1
+    except ValueError:
+        raise ValueError("camera path lacks sensor_blobs: {}".format(raw_path))
+    if sensor_index >= len(parts) or parts[sensor_index] != "mini":
+        parts.insert(sensor_index, "mini")
+    candidate = camera_root.joinpath(*parts)
     if not candidate.is_file():
-        raise FileNotFoundError(
-            "OpenScene image does not exist: raw={} resolved={}".format(
-                raw_path, candidate
-            )
-        )
+        raise FileNotFoundError("OpenScene JPEG missing: {}".format(candidate))
     return candidate
 
 
@@ -198,7 +189,7 @@ def build_camera_geometry(info, image_root, cv2):
             if field not in camera:
                 raise KeyError("cams.{}.{} is required".format(camera_name, field))
 
-        filename = resolve_image_path(camera["data_path"], image_root)
+        filename = resolve_camera_path(camera["data_path"], image_root)
         sensor2lidar_rotation = require_matrix(
             camera["sensor2lidar_rotation"], (3, 3),
             "cams.{}.sensor2lidar_rotation".format(camera_name)
