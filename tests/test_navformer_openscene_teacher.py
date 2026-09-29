@@ -127,11 +127,11 @@ def test_build_preprocess_transforms_uses_official_order():
 
     expected_order = [
         "NormalizeMultiviewImage",
-        "RandomScaleImageMultiViewImage",
         "PadMultiViewImage",
+        "RandomScaleImageMultiViewImage",
     ]
     assert transforms == expected_order
     assert [config["type"] for config in configs] == expected_order
     assert [config["type"] for config in build_calls] == expected_order
-    assert configs[1]["scales"] == [0.5]
-    assert configs[2]["size_divisor"] == 32
+    assert configs[1]["size_divisor"] == 32
+    assert configs[2]["scales"] == [0.5]
