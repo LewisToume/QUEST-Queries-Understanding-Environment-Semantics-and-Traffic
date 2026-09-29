@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 
-NAVFORMER_ROOT = Path(__file__).resolve().parents[1]
+NAVFORMER_ROOT = Path("/home/user/DataDisk/QUEST_WORK/Navformer")
 DEFAULT_CONFIG = NAVFORMER_ROOT / "configs/navformer/track_map_nuplan_r50_navtrain.py"
 DEFAULT_CHECKPOINT = (
     NAVFORMER_ROOT
