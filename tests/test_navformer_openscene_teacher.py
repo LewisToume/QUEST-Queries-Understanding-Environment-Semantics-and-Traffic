@@ -2,6 +2,7 @@ import numpy as np
 
 from scripts.run_navformer_openscene_teacher import (
     build_camera_geometry,
+    build_preprocess_transforms,
     find_transform,
     make_can_bus,
     resolve_camera_path,
@@ -92,3 +93,45 @@ def test_find_transform_reads_nested_test_pipeline():
         "type": "RandomScaleImageMultiViewImage",
         "scales": [0.5],
     }
+
+
+def test_build_preprocess_transforms_uses_official_order():
+    class Config:
+        test_pipeline = [
+            {
+                "type": "NormalizeMultiviewImage",
+                "mean": [103.53, 116.28, 123.675],
+                "std": [1.0, 1.0, 1.0],
+                "to_rgb": False,
+            },
+            {"type": "PadMultiViewImage", "size_divisor": 32},
+            {
+                "type": "MultiScaleFlipAug3D",
+                "transforms": [
+                    {"type": "RandomScaleImageMultiViewImage", "scales": [0.5]}
+                ],
+            },
+        ]
+
+    registry = object()
+    build_calls = []
+
+    def fake_build_from_cfg(config, received_registry):
+        assert received_registry is registry
+        build_calls.append(config.copy())
+        return config["type"]
+
+    transforms, configs = build_preprocess_transforms(
+        Config(), fake_build_from_cfg, registry
+    )
+
+    expected_order = [
+        "NormalizeMultiviewImage",
+        "RandomScaleImageMultiViewImage",
+        "PadMultiViewImage",
+    ]
+    assert transforms == expected_order
+    assert [config["type"] for config in configs] == expected_order
+    assert [config["type"] for config in build_calls] == expected_order
+    assert configs[1]["scales"] == [0.5]
+    assert configs[2]["size_divisor"] == 32

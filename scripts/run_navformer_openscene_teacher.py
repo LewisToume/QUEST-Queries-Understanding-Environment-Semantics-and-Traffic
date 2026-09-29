@@ -267,7 +267,7 @@ def build_preprocess_transforms(cfg, build_from_cfg, pipeline_registry):
         raise ValueError("Navformer test pipeline pad divisor is not 32")
     if list(scale_cfg.get("scales", [])) != [0.5]:
         raise ValueError("Navformer test pipeline scale is not exactly [0.5]")
-    configs = (normalize_cfg, pad_cfg, scale_cfg)
+    configs = (normalize_cfg, scale_cfg, pad_cfg)
     transforms = [build_from_cfg(item, pipeline_registry) for item in configs]
     return transforms, configs
 
@@ -443,7 +443,7 @@ def main():
     from mmcv import Config
     from mmcv.utils import build_from_cfg
     from mmdet3d.core.bbox import get_box_type
-    from mmdet3d.datasets.builder import PIPELINES
+    from mmdet.datasets.builder import PIPELINES
     from mmdet3d.models import build_model
 
     custom_imports = Config.fromfile(str(config_path)).get("custom_imports", {})
@@ -462,8 +462,8 @@ def main():
         [item["type"] for item in transform_configs]
     ))
     print("normalize config: {}".format(transform_configs[0]))
-    print("scale config: {}".format(transform_configs[2]))
-    print("pad config: {}".format(transform_configs[1]))
+    print("scale config: {}".format(transform_configs[1]))
+    print("pad config: {}".format(transform_configs[2]))
     processed, image_tensor = preprocess_images(geometry, transforms, mmcv)
     print("preprocessed img shape: {}".format(tuple(image_tensor.shape)))
 
