@@ -116,6 +116,40 @@ def filter_predictions(
     }
 
 
+def filter_agent_gt_by_class_support(
+    agent_gt: dict[str, torch.Tensor],
+    trained_class_support_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    if "labels" not in agent_gt or "valid_mask" not in agent_gt:
+        raise ValueError("canonical Agent GT requires labels and valid_mask")
+    labels = agent_gt["labels"]
+    valid = agent_gt["valid_mask"].bool()
+    if labels.shape != valid.shape:
+        raise ValueError("Agent GT labels and valid_mask shapes must match")
+    support = torch.as_tensor(
+        trained_class_support_mask, dtype=torch.bool, device=labels.device
+    )
+    if tuple(support.shape) != (len(CLASS_NAMES),):
+        raise ValueError("trained_class_support_mask must have shape [4]")
+    label_in_range = (labels >= 0) & (labels < len(CLASS_NAMES))
+    supported = torch.zeros_like(valid)
+    supported[label_in_range] = support[labels[label_in_range].long()]
+    filtered = {
+        key: value.clone() if torch.is_tensor(value) else value
+        for key, value in agent_gt.items()
+    }
+    filtered["valid_mask"] = valid & label_in_range & supported
+    if labels.ndim == 1:
+        filtered["class_support_mask"] = support.clone()
+    elif labels.ndim == 2:
+        filtered["class_support_mask"] = support.unsqueeze(0).expand(
+            labels.shape[0], -1
+        ).clone()
+    else:
+        raise ValueError("Agent GT labels must be [N] or [B,N]")
+    return filtered
+
+
 def match_agents(
     prediction_centers: torch.Tensor,
     prediction_labels: torch.Tensor,
@@ -298,6 +332,15 @@ def main() -> int:
         f"complete_frames=[{args.start},{args.start + args.count})"
     )
     print(f"trained_class_support_mask={trained_class_support_mask.cpu().tolist()}")
+    evaluated_classes = [
+        name
+        for class_index, name in enumerate(CLASS_NAMES)
+        if bool(trained_class_support_mask[class_index])
+    ]
+    print(
+        f"evaluated_class_support_mask={trained_class_support_mask.cpu().tolist()}"
+    )
+    print(f"evaluated_classes={evaluated_classes}")
 
     metrics = AgentMetrics()
     agent_loss_config = stage1["loss"]["agent"]
@@ -321,9 +364,16 @@ def main() -> int:
                 args.confidence_threshold,
                 trained_class_support_mask,
             )
-            valid_gt = batch["agent_gt"]["valid_mask"][0].bool()
-            gt_labels = batch["agent_gt"]["labels"][0][valid_gt].to(device)
-            gt_centers = batch["agent_gt"]["boxes_metric"][0][valid_gt, :3].to(device)
+            hard_gt = filter_agent_gt_by_class_support(
+                {
+                    key: value.to(device)
+                    for key, value in batch["agent_gt"].items()
+                },
+                trained_class_support_mask,
+            )
+            valid_gt = hard_gt["valid_mask"][0]
+            gt_labels = hard_gt["labels"][0][valid_gt]
+            gt_centers = hard_gt["boxes_metric"][0][valid_gt, :3]
             matches = match_agents(
                 predictions["centers_m"],
                 predictions["labels"],
@@ -331,9 +381,6 @@ def main() -> int:
                 gt_labels,
                 args.distance_threshold,
             )
-            hard_gt = {
-                key: value.to(device) for key, value in batch["agent_gt"].items()
-            }
             agent_loss = compute_agent_loss(
                 outputs,
                 hard_gt,
@@ -369,7 +416,9 @@ def main() -> int:
         print(f"{key}: {value:.6f}" if isinstance(value, float) else f"{key}: {value}")
     print("class_accuracy_on_matched_note: strict class-aware matches only")
     print("per_class:")
-    for name in CLASS_NAMES:
+    for class_index, name in enumerate(CLASS_NAMES):
+        if not bool(trained_class_support_mask[class_index]):
+            continue
         values = summary["per_class"][name]
         print(
             f"  {name}: gt={values['gt']} predictions={values['predictions']} "

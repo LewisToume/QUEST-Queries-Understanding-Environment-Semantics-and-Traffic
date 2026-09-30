@@ -80,6 +80,37 @@ class EvaluateAgentTest(unittest.TestCase):
         )
         self.assertEqual(filtered["labels"].tolist(), [0])
 
+    def test_unsupported_gt_is_excluded_from_supported_metrics(self):
+        agent_gt = {
+            "labels": torch.tensor([[0, 2, 3, -1]]),
+            "boxes_metric": torch.zeros(1, 4, 7),
+            "velocity_mps": torch.zeros(1, 4, 3),
+            "scores": torch.ones(1, 4),
+            "class_support_mask": torch.ones(1, 4, dtype=torch.bool),
+            "valid_mask": torch.tensor([[True, True, True, False]]),
+        }
+        filtered = evaluation.filter_agent_gt_by_class_support(
+            agent_gt, torch.tensor([True, True, False, False])
+        )
+        self.assertEqual(filtered["valid_mask"].tolist(), [[True, False, False, False]])
+        self.assertEqual(
+            filtered["class_support_mask"].tolist(),
+            [[True, True, False, False]],
+        )
+        valid = filtered["valid_mask"][0]
+        metrics = evaluation.AgentMetrics()
+        metrics.update(
+            prediction_labels=torch.tensor([0]),
+            gt_labels=filtered["labels"][0][valid],
+            matches=[(0, 0, 0.25)],
+            agent_loss=1.0,
+        )
+        summary = metrics.summary()
+        self.assertEqual(summary["total_gt"], 1)
+        self.assertEqual(summary["per_class"]["traffic_cone"]["gt"], 0)
+        self.assertEqual(summary["per_class"]["generic_object"]["gt"], 0)
+        self.assertEqual(summary["recall"], 1.0)
+
     def test_hungarian_matches_within_each_class(self):
         prediction_centers = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
         prediction_labels = torch.tensor([0, 1])
