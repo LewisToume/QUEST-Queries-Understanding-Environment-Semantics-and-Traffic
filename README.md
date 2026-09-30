@@ -28,7 +28,8 @@ real Agent annotations; Semantic Segmentation, Depth, and Vector Map losses stay
 disabled until real labels are available.
 
 Stage2 is offline-only. Teacher inference and label export run separately, and
-student training reads token-aligned files from `data/soft_labels`.
+student training reads token-aligned Navformer Agent labels from
+`data/soft_labels_navformer`.
 
 ## Checks
 

@@ -30,7 +30,7 @@ CONVERTERS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export token-aligned teacher labels")
     parser.add_argument("--num-samples", type=int, default=1)
-    parser.add_argument("--output-dir", default="data/soft_labels")
+    parser.add_argument("--output-dir", default="data/soft_labels_navformer")
     return parser.parse_args()
 
 

@@ -133,7 +133,7 @@ def train_one_epoch(
     if trained_steps == 0:
         raise RuntimeError(
             f"epoch {epoch} has no trainable labels; "
-            "check data/soft_labels and use_hard_gt"
+            "check data/soft_labels_navformer and use_hard_gt"
         )
     average_total = total_loss_sum / trained_steps
     average_agent = agent_loss_sum / trained_steps
