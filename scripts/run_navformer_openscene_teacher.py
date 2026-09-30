@@ -27,9 +27,10 @@ DEFAULT_IMAGE_ROOT = Path(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run Navformer track+map inference directly on one OpenScene frame"
+        description="Run Navformer track+map inference directly on OpenScene frames"
     )
     parser.add_argument("--sample-index", type=int, default=0)
+    parser.add_argument("--num-frames", type=int, default=1)
     parser.add_argument("--navformer-root", type=Path, default=NAVFORMER_ROOT)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
@@ -52,7 +53,7 @@ def require_directory(path, label):
     return path
 
 
-def load_info(metadata_path, sample_index):
+def load_infos(metadata_path):
     with metadata_path.open("rb") as stream:
         metadata = pickle.load(stream)
     if isinstance(metadata, dict):
@@ -63,14 +64,36 @@ def load_info(metadata_path, sample_index):
         infos = None
     if not isinstance(infos, list):
         raise ValueError("OpenScene metadata does not contain an infos list")
+    return infos
+
+
+def select_infos(infos, sample_index, num_frames):
+    if num_frames <= 0:
+        raise ValueError("num-frames must be positive, got {}".format(num_frames))
     if sample_index < 0 or sample_index >= len(infos):
         raise IndexError(
             "sample-index {} outside [0, {})".format(sample_index, len(infos))
         )
-    info = infos[sample_index]
-    if not isinstance(info, dict):
-        raise TypeError("OpenScene info must be a dict, got {}".format(type(info)))
-    return info
+    end = sample_index + num_frames
+    if end > len(infos):
+        raise IndexError(
+            "requested [{}:{}) but metadata contains {} infos".format(
+                sample_index, end, len(infos)
+            )
+        )
+    selected = infos[sample_index:end]
+    for offset, info in enumerate(selected):
+        if not isinstance(info, dict):
+            raise TypeError(
+                "OpenScene info {} must be a dict, got {}".format(
+                    sample_index + offset, type(info)
+                )
+            )
+    return selected
+
+
+def load_info(metadata_path, sample_index):
+    return select_infos(load_infos(metadata_path), sample_index, 1)[0]
 
 
 def resolve_camera_path(raw_path, camera_root):
@@ -325,6 +348,12 @@ def build_model_and_load_checkpoint(cfg, checkpoint_path, build_model):
     print("checkpoint unexpected keys ({}): {}".format(
         len(incompatible.unexpected_keys), incompatible.unexpected_keys
     ))
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "checkpoint is not an exact model match: missing={} unexpected={}".format(
+                len(incompatible.missing_keys), len(incompatible.unexpected_keys)
+            )
+        )
     return model
 
 
@@ -373,12 +402,77 @@ def prepare_model_inputs(info, geometry, processed, image_tensor, get_box_type, 
         "l2g_r_mat": torch.as_tensor(
             lidar2global[:3, :3], dtype=torch.float32, device=device
         ).unsqueeze(0),
-        "timestamp": torch.tensor([timestamp_seconds], dtype=torch.float32, device=device),
+        "timestamp": torch.tensor([timestamp_seconds], dtype=torch.float64, device=device),
     }
 
 
-def run_track_and_map_without_gt(model, model_inputs):
-    """Run the forward_test prediction path without its GT-only map IoU branch."""
+def reset_tracking_state(model):
+    """Reset UniAD's runtime tracking memory at a scene boundary."""
+    for attribute in (
+        "test_track_instances",
+        "scene_token",
+        "prev_bev",
+        "timestamp",
+        "l2g_t",
+        "l2g_r_mat",
+    ):
+        if hasattr(model, attribute):
+            setattr(model, attribute, None)
+    previous = getattr(model, "prev_frame_info", None)
+    if isinstance(previous, dict):
+        previous.update(
+            {
+                "prev_bev": None,
+                "scene_token": None,
+                "prev_pos": None,
+                "prev_angle": None,
+                "timestamp": None,
+            }
+        )
+
+
+def prepare_temporal_metadata(model, model_inputs):
+    """Apply UniAD forward_test's relative CAN bus convention in place."""
+    meta = model_inputs["img_metas"][0]
+    timestamp = float(model_inputs["timestamp"][0].item())
+    scene_token = str(meta["scene_token"])
+    previous = getattr(model, "prev_frame_info", None)
+    if not isinstance(previous, dict):
+        previous = {
+            "prev_bev": None,
+            "scene_token": None,
+            "prev_pos": None,
+            "prev_angle": None,
+            "timestamp": None,
+        }
+        model.prev_frame_info = previous
+
+    can_bus = meta["can_bus"]
+    current_position = can_bus[:3].copy()
+    current_angle = float(can_bus[-1])
+    same_scene = previous.get("scene_token") == scene_token
+    previous_timestamp = previous.get("timestamp")
+    continuous = (
+        same_scene
+        and previous_timestamp is not None
+        and timestamp > float(previous_timestamp)
+        and timestamp - float(previous_timestamp) <= 1.1
+    )
+    if continuous:
+        can_bus[:3] -= previous["prev_pos"]
+        can_bus[-1] -= previous["prev_angle"]
+    else:
+        can_bus[:3] = 0.0
+        can_bus[-1] = 0.0
+
+    previous["scene_token"] = scene_token
+    previous["timestamp"] = timestamp
+    previous["prev_pos"] = current_position
+    previous["prev_angle"] = current_angle
+    return continuous
+
+
+def run_track_only(model, model_inputs):
     track_results = model.simple_test_track(
         model_inputs["img"],
         model_inputs["l2g_t"],
@@ -387,9 +481,15 @@ def run_track_and_map_without_gt(model, model_inputs):
         model_inputs["timestamp"],
     )
     track_results[0] = model.upsample_bev_if_tiny(track_results[0])
+    return track_results[0]
+
+
+def run_track_and_map_without_gt(model, model_inputs):
+    """Run the forward_test prediction path without its GT-only map IoU branch."""
+    track_result = run_track_only(model, model_inputs)
     if not getattr(model, "with_seg_head", False):
         raise RuntimeError("configured Navformer model has no segmentation/map head")
-    bev_embed = track_results[0]["bev_embed"]
+    bev_embed = track_result["bev_embed"]
     prediction = model.seg_head(bev_embed)
     map_results = model.seg_head.get_bboxes(
         prediction["outputs_classes"],
@@ -401,7 +501,7 @@ def run_track_and_map_without_gt(model, model_inputs):
         model_inputs["img_metas"],
         rescale=True,
     )
-    return track_results[0], map_results[0]
+    return track_result, map_results[0]
 
 
 def as_cpu(value):
@@ -412,14 +512,26 @@ def as_cpu(value):
     return value
 
 
-def print_outputs(track, mapping):
+def track_output_tensors(track):
     boxes = as_cpu(track.get("boxes_3d", track.get("track_bbox_results")))
     scores = as_cpu(track.get("scores_3d", track.get("track_scores")))
     labels = as_cpu(track.get("labels_3d"))
     track_ids = as_cpu(track.get("track_ids"))
+    if not all(torch.is_tensor(value) for value in (scores, labels, track_ids)):
+        raise KeyError("Navformer track output lacks scores, labels, or track ids")
+    return boxes, scores, labels, track_ids
+
+
+def print_outputs(track, mapping, frame_idx=None, token=None):
+    boxes, scores, labels, track_ids = track_output_tensors(track)
     drivable = as_cpu(mapping["score_list"][-1])
     lanes = as_cpu(mapping["lane_score"])
     print("\n=== Navformer outputs ===")
+    if frame_idx is not None:
+        print("frame_idx: {}".format(frame_idx))
+    if token is not None:
+        print("token: {}".format(token))
+    print("track count: {}".format(int(scores.numel())))
     print("track boxes: {}".format(boxes))
     print("track scores: {}".format(scores))
     print("track labels: {}".format(labels))
@@ -451,9 +563,7 @@ def main():
         importlib.import_module(module_name)
     cfg = Config.fromfile(str(config_path))
     print("model type: {}".format(cfg.model.get("type", "MISSING")))
-    info = load_info(metadata_path, args.sample_index)
-    geometry = build_camera_geometry(info, image_root, cv2)
-    print("camera names (metadata order): {}".format(geometry["camera_names"]))
+    infos = select_infos(load_infos(metadata_path), args.sample_index, args.num_frames)
 
     transforms, transform_configs = build_preprocess_transforms(
         cfg, build_from_cfg, PIPELINES
@@ -464,27 +574,37 @@ def main():
     print("normalize config: {}".format(transform_configs[0]))
     print("pad config: {}".format(transform_configs[1]))
     print("scale config: {}".format(transform_configs[2]))
-    processed, image_tensor = preprocess_images(geometry, transforms, mmcv)
-    print("preprocessed img shape: {}".format(tuple(image_tensor.shape)))
-
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for Navformer teacher inference")
     device = torch.device("cuda:0")
     model = build_model_and_load_checkpoint(cfg, checkpoint_path, build_model)
     model.to(device).eval()
-    model_inputs = prepare_model_inputs(
-        info, geometry, processed, image_tensor, get_box_type, device
-    )
-    print("sample_idx: {}".format(model_inputs["img_metas"][0]["sample_idx"]))
-    print("scene_token: {}".format(model_inputs["img_metas"][0]["scene_token"]))
-    print("frame_idx: {}".format(model_inputs["img_metas"][0]["frame_idx"]))
-    print("timestamp: {}".format(model_inputs["timestamp"].detach().cpu().tolist()))
-    print("l2g_t shape: {}".format(tuple(model_inputs["l2g_t"].shape)))
-    print("l2g_r_mat shape: {}".format(tuple(model_inputs["l2g_r_mat"].shape)))
-
-    with torch.no_grad():
-        track, mapping = run_track_and_map_without_gt(model, model_inputs)
-    print_outputs(track, mapping)
+    reset_tracking_state(model)
+    previous_scene = None
+    for sequence_offset, info in enumerate(infos):
+        scene_token = str(info.get("scene_token"))
+        if previous_scene is not None and scene_token != previous_scene:
+            print("scene switch: {} -> {}; resetting tracking".format(
+                previous_scene, scene_token
+            ))
+            reset_tracking_state(model)
+        geometry = build_camera_geometry(info, image_root, cv2)
+        if sequence_offset == 0:
+            print("camera names (metadata order): {}".format(geometry["camera_names"]))
+        processed, image_tensor = preprocess_images(geometry, transforms, mmcv)
+        model_inputs = prepare_model_inputs(
+            info, geometry, processed, image_tensor, get_box_type, device
+        )
+        prepare_temporal_metadata(model, model_inputs)
+        with torch.no_grad():
+            track, mapping = run_track_and_map_without_gt(model, model_inputs)
+        print_outputs(
+            track,
+            mapping,
+            frame_idx=info["frame_idx"],
+            token=str(info["token"]),
+        )
+        previous_scene = scene_token
     print("NAVFORMER_OPENSCENE_INFERENCE = PASS")
     return 0
 

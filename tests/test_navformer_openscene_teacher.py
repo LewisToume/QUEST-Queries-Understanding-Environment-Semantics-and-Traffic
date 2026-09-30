@@ -1,11 +1,16 @@
 import numpy as np
+import torch
 
 from scripts.run_navformer_openscene_teacher import (
     build_camera_geometry,
     build_preprocess_transforms,
     find_transform,
     make_can_bus,
+    prepare_model_inputs,
+    prepare_temporal_metadata,
+    reset_tracking_state,
     resolve_camera_path,
+    select_infos,
 )
 
 
@@ -135,3 +140,110 @@ def test_build_preprocess_transforms_uses_official_order():
     assert [config["type"] for config in build_calls] == expected_order
     assert configs[1]["size_divisor"] == 32
     assert configs[2]["scales"] == [0.5]
+
+
+def test_select_infos_uses_contiguous_metadata_slice_across_scenes():
+    infos = [
+        {"token": "a0", "scene_token": "a"},
+        {"token": "a1", "scene_token": "a"},
+        {"token": "b0", "scene_token": "b"},
+    ]
+
+    selected = select_infos(infos, sample_index=1, num_frames=2)
+
+    assert [info["token"] for info in selected] == ["a1", "b0"]
+
+
+def test_prepare_model_inputs_uses_float64_timestamp():
+    info = {
+        "token": "sample",
+        "scene_token": "scene",
+        "timestamp": 1_500_000,
+        "frame_idx": 3,
+        "lidar2global": np.eye(4),
+        "ego2global": np.eye(4),
+        "can_bus": np.zeros(18),
+    }
+    geometry = {
+        "filenames": ["camera.jpg"] * 8,
+        "lidar2cam": [np.eye(4)] * 8,
+        "cam_intrinsic": [np.eye(3)] * 8,
+        "cam_distortion": [np.zeros(5)] * 8,
+        "cam_optim_intrinsic": [np.eye(3)] * 8,
+    }
+    processed = {
+        "ori_shape": [(10, 10, 3)] * 8,
+        "img_shape": [(10, 10, 3)] * 8,
+        "pad_shape": [(10, 10, 3)] * 8,
+        "lidar2img": [np.eye(4)] * 8,
+        "img_norm_cfg": {},
+    }
+
+    inputs = prepare_model_inputs(
+        info,
+        geometry,
+        processed,
+        torch.zeros(8, 3, 10, 10),
+        lambda _: (object(), object()),
+        torch.device("cpu"),
+    )
+
+    assert inputs["timestamp"].dtype == torch.float64
+    assert inputs["timestamp"].tolist() == [1.5]
+
+
+def test_reset_tracking_state_clears_uniad_runtime_memory():
+    class Model:
+        test_track_instances = object()
+        scene_token = "scene-a"
+        prev_bev = object()
+        timestamp = torch.tensor([1.0])
+        l2g_t = torch.ones(1, 3)
+        l2g_r_mat = torch.eye(3).unsqueeze(0)
+        prev_frame_info = {
+            "prev_bev": object(),
+            "scene_token": "scene-a",
+            "prev_pos": np.ones(3),
+            "prev_angle": 1.0,
+            "timestamp": 1.0,
+        }
+
+    model = Model()
+    reset_tracking_state(model)
+
+    assert model.test_track_instances is None
+    assert model.scene_token is None
+    assert model.prev_bev is None
+    assert all(value is None for value in model.prev_frame_info.values())
+
+
+def test_prepare_temporal_metadata_zeros_first_frame_and_uses_delta_afterward():
+    class Model:
+        prev_frame_info = {
+            "prev_bev": None,
+            "scene_token": None,
+            "prev_pos": None,
+            "prev_angle": None,
+            "timestamp": None,
+        }
+
+    model = Model()
+    first = {
+        "img_metas": [{"scene_token": "scene", "can_bus": np.array(
+            [10.0, 20.0, 30.0] + [0.0] * 14 + [90.0], dtype=np.float32
+        )}],
+        "timestamp": torch.tensor([1.0], dtype=torch.float64),
+    }
+    second = {
+        "img_metas": [{"scene_token": "scene", "can_bus": np.array(
+            [11.0, 22.0, 33.0] + [0.0] * 14 + [95.0], dtype=np.float32
+        )}],
+        "timestamp": torch.tensor([1.5], dtype=torch.float64),
+    }
+
+    assert prepare_temporal_metadata(model, first) is False
+    np.testing.assert_allclose(first["img_metas"][0]["can_bus"][:3], 0.0)
+    assert first["img_metas"][0]["can_bus"][-1] == 0.0
+    assert prepare_temporal_metadata(model, second) is True
+    np.testing.assert_allclose(second["img_metas"][0]["can_bus"][:3], [1, 2, 3])
+    assert second["img_metas"][0]["can_bus"][-1] == 5.0
