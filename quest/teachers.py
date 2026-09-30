@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from .openscene_dataset import OPENSCENE_CAMERA_NAMES
+from .teacher_adapters import NavformerAgentAdapter
 from .utils import project_root
 
 
@@ -207,105 +208,29 @@ def navformer_output_to_quest(
     score_threshold: float = 0.25,
     max_distance_m: float = 50.0,
     allowed_teacher_classes: Sequence[int] = (0, 2),
+    lidar2img: torch.Tensor | None = None,
+    image_shapes: Sequence[Sequence[int]] | None = None,
     xy_range: tuple[float, float] = (-50.0, 50.0),
     z_range: tuple[float, float] = (-5.0, 5.0),
     size_norm: tuple[float, float, float] = (20.0, 10.0, 8.0),
     velocity_norm: float = 20.0,
 ) -> dict[str, torch.Tensor]:
-    """Convert Navformer LiDAR boxes into the offline QUEST Agent contract."""
+    """Convert Navformer output into canonical, observable Agent targets."""
 
-    boxes_value = raw_output.get("boxes_3d", raw_output.get("track_bbox_results"))
-    if hasattr(boxes_value, "tensor"):
-        boxes_value = boxes_value.tensor
-    scores_value = raw_output.get("scores_3d", raw_output.get("track_scores"))
-    labels_value = raw_output.get("labels_3d", raw_output.get("track_labels"))
-    if boxes_value is None or scores_value is None or labels_value is None:
-        raise ValueError("Navformer output requires boxes_3d, scores_3d, and labels_3d")
-
-    boxes = torch.as_tensor(boxes_value).detach().cpu().float()
-    scores = torch.as_tensor(scores_value).detach().cpu().float().reshape(-1)
-    labels = torch.as_tensor(labels_value).detach().cpu().long().reshape(-1)
-    if boxes.ndim != 2 or boxes.shape[1] < 9:
-        raise ValueError(f"Navformer boxes must be [N,>=9], got {tuple(boxes.shape)}")
-    if scores.shape[0] != boxes.shape[0] or labels.shape[0] != boxes.shape[0]:
-        raise ValueError("Navformer boxes, scores, and labels must have equal length")
-    if max_instances <= 0:
-        raise ValueError("max_instances must be positive")
-    if score_threshold < 0:
-        raise ValueError("score_threshold must be non-negative")
-    if max_distance_m <= 0:
-        raise ValueError("max_distance_m must be positive")
-    if velocity_norm <= 0:
-        raise ValueError("velocity_norm must be positive")
-    allowed_classes = {int(class_id) for class_id in allowed_teacher_classes}
-    unsupported = allowed_classes.difference(NAVFORMER_AGENT_CLASS_TO_QUEST)
-    if unsupported:
-        raise ValueError(f"unsupported Navformer Agent classes: {sorted(unsupported)}")
-
-    output_labels = torch.full((max_instances,), -1, dtype=torch.long)
-    output_boxes = torch.zeros((max_instances, 8), dtype=torch.float32)
-    output_velocity = torch.zeros((max_instances, 3), dtype=torch.float32)
-    if boxes.shape[0] == 0:
-        return {
-            "labels": output_labels,
-            "boxes": output_boxes,
-            "velocity": output_velocity,
-        }
-
-    xy_min, xy_max = (float(value) for value in xy_range)
-    z_min, z_max = (float(value) for value in z_range)
-    if xy_max <= xy_min or z_max <= z_min:
-        raise ValueError("coordinate ranges must have a positive extent")
-    size_scale = torch.tensor(size_norm, dtype=torch.float32)
-    if size_scale.shape != (3,) or bool((size_scale <= 0).any()):
-        raise ValueError("size_norm must contain three positive values")
-
-    finite = torch.isfinite(boxes[:, :9]).all(dim=1) & torch.isfinite(scores)
-    bev_distance = torch.linalg.vector_norm(boxes[:, :2], dim=1)
-    in_range = (
-        (bev_distance <= float(max_distance_m))
-        & (boxes[:, 2] >= z_min)
-        & (boxes[:, 2] <= z_max)
+    del xy_range, size_norm, velocity_norm
+    if tuple(int(value) for value in allowed_teacher_classes) != (0, 2):
+        raise ValueError("QUEST V3 Navformer supervision supports only classes 0 and 2")
+    adapter = NavformerAgentAdapter(
+        max_instances=max_instances,
+        score_threshold=score_threshold,
+        max_distance_m=max_distance_m,
+        z_range=z_range,
     )
-    allowed = torch.tensor(
-        [int(label) in allowed_classes for label in labels],
-        dtype=torch.bool,
+    return adapter.adapt(
+        raw_output,
+        lidar2img=lidar2img,
+        image_shapes=image_shapes,
     )
-    indices = torch.nonzero(
-        finite & in_range & allowed & (scores >= float(score_threshold)),
-        as_tuple=False,
-    ).flatten()
-    if indices.numel() == 0:
-        return {
-            "labels": output_labels,
-            "boxes": output_boxes,
-            "velocity": output_velocity,
-        }
-    indices = indices[torch.argsort(scores[indices], descending=True)][:max_instances]
-
-    selected = boxes[indices]
-    count = int(indices.numel())
-    output_labels[:count] = torch.tensor(
-        [NAVFORMER_AGENT_CLASS_TO_QUEST[int(label)] for label in labels[indices]],
-        dtype=torch.long,
-    )
-    output_boxes[:count, :3] = torch.stack(
-        (
-            (selected[:, 0] - xy_min) / (xy_max - xy_min),
-            (selected[:, 1] - xy_min) / (xy_max - xy_min),
-            (selected[:, 2] - z_min) / (z_max - z_min),
-        ),
-        dim=1,
-    ).clamp(0.0, 1.0)
-    output_boxes[:count, 3:6] = (selected[:, 3:6] / size_scale).clamp(0.0, 1.0)
-    output_boxes[:count, 6] = torch.sin(selected[:, 6])
-    output_boxes[:count, 7] = torch.cos(selected[:, 6])
-    output_velocity[:count, :2] = selected[:, 7:9] / float(velocity_norm)
-    return {
-        "labels": output_labels,
-        "boxes": output_boxes,
-        "velocity": output_velocity,
-    }
 
 
 def maptr_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:

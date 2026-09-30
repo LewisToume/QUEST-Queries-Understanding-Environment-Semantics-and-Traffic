@@ -9,6 +9,8 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from .teacher_adapters import validate_canonical_agent
+
 OPENSCENE_CAMERA_NAMES = (
     "CAM_F0",
     "CAM_L0",
@@ -187,8 +189,18 @@ class OpenSceneMetadataDataset(Dataset):
         self, info: Mapping[str, Any]
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         labels = torch.full((self.max_agent_instances,), -1, dtype=torch.long)
-        boxes = torch.zeros((self.max_agent_instances, 8), dtype=torch.float32)
+        boxes = torch.zeros((self.max_agent_instances, 7), dtype=torch.float32)
         velocity = torch.zeros((self.max_agent_instances, 3), dtype=torch.float32)
+        scores = torch.zeros((self.max_agent_instances,), dtype=torch.float32)
+        valid_mask = torch.zeros((self.max_agent_instances,), dtype=torch.bool)
+        empty = {
+            "labels": labels,
+            "boxes_metric": boxes,
+            "velocity_mps": velocity,
+            "scores": scores,
+            "class_support_mask": torch.ones(4, dtype=torch.bool),
+            "valid_mask": valid_mask,
+        }
         raw_boxes = np.asarray(info.get("gt_boxes", []), dtype=np.float32)
         raw_names = np.asarray(info.get("gt_names", []))
         raw_velocity = np.asarray(
@@ -196,7 +208,7 @@ class OpenSceneMetadataDataset(Dataset):
             dtype=np.float32,
         )
         if raw_boxes.size == 0 or raw_names.size == 0:
-            return {"labels": labels, "boxes": boxes, "velocity": velocity}, torch.tensor(False)
+            return empty, torch.tensor(False)
         if raw_velocity.size == 0:
             raw_velocity = np.zeros((len(raw_boxes), 3), dtype=np.float32)
 
@@ -214,22 +226,10 @@ class OpenSceneMetadataDataset(Dataset):
                 and z_min <= z <= z_max
             ):
                 continue
-            center = torch.tensor(
-                [
-                    (x - xy_min) / (xy_max - xy_min),
-                    (y - xy_min) / (xy_max - xy_min),
-                    (z - z_min) / (z_max - z_min),
-                ]
+            item_box = torch.tensor(
+                [x, y, z, dx, dy, dz, yaw], dtype=torch.float32
             )
-            size = (
-                torch.tensor([dx, dy, dz], dtype=torch.float32) / self.size_norm
-            ).clamp(0.0, 1.0)
-            yaw_vector = torch.tensor([np.sin(yaw), np.cos(yaw)], dtype=torch.float32)
-            item_box = torch.cat([center.float().clamp(0.0, 1.0), size, yaw_vector])
-            item_velocity = (
-                torch.as_tensor(item_velocity[:3], dtype=torch.float32)
-                / self.velocity_norm
-            )
+            item_velocity = torch.as_tensor(item_velocity[:3], dtype=torch.float32)
             candidates.append(
                 (x * x + y * y, OPENSCENE_AGENT_CLASS_TO_ID[name], item_box, item_velocity)
             )
@@ -240,8 +240,19 @@ class OpenSceneMetadataDataset(Dataset):
             labels[index] = class_id
             boxes[index] = box
             velocity[index] = item_velocity
+            scores[index] = 1.0
+            valid_mask[index] = True
         valid = torch.tensor(bool(candidates))
-        return {"labels": labels, "boxes": boxes, "velocity": velocity}, valid
+        target = {
+            "labels": labels,
+            "boxes_metric": boxes,
+            "velocity_mps": velocity,
+            "scores": scores,
+            "class_support_mask": torch.ones(4, dtype=torch.bool),
+            "valid_mask": valid_mask,
+        }
+        validate_canonical_agent(target, self.max_agent_instances)
+        return target, valid
 
     def _load_soft_labels(self, token: str) -> dict[str, Any]:
         if self.soft_labels_root is None:
@@ -264,21 +275,10 @@ class OpenSceneMetadataDataset(Dataset):
             agent = labels["agent"]
             if not isinstance(agent, Mapping):
                 raise ValueError(f"agent soft label must contain a mapping: {path}")
-            required = {"labels", "boxes", "velocity"}
-            if not required.issubset(agent):
-                raise ValueError(f"agent soft label requires {sorted(required)}: {path}")
-            expected = self.max_agent_instances
-            shapes = {
-                "labels": (expected,),
-                "boxes": (expected, 8),
-                "velocity": (expected, 3),
-            }
-            for key, shape in shapes.items():
-                if not torch.is_tensor(agent[key]) or tuple(agent[key].shape) != shape:
-                    raise ValueError(
-                        f"agent soft-label {key} must be {shape}, got "
-                        f"{getattr(agent[key], 'shape', None)}: {path}"
-                    )
+            try:
+                validate_canonical_agent(agent, self.max_agent_instances)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"invalid canonical Agent soft label: {path}: {error}") from error
         return labels
 
     def __getitem__(self, index: int) -> dict[str, Any]:

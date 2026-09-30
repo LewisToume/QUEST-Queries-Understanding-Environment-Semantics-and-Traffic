@@ -37,13 +37,24 @@ loss:
     loss_type: smooth_l1
     eps: 1.0e-3
   agent:
-    cls_cost_weight: 2.0
-    bbox_cost_weight: 0.25
-    cls_gamma: 2.0
-    cls_alpha: 0.25
-    lambda_box: 0.25
-    lambda_velocity: 0.2
-    box_loss_type: l1
+    xy_range: [-50.0, 50.0]
+    z_range: [-5.0, 5.0]
+    size_norm: [20.0, 10.0, 8.0]
+    bev_h: 32
+    bev_w: 32
+    match_cls_weight: 1.0
+    match_center_weight: 5.0
+    match_size_weight: 2.0
+    match_yaw_weight: 1.0
+    background_weight: 0.1
+    lambda_cls: 1.0
+    lambda_center: 5.0
+    lambda_size: 2.0
+    lambda_yaw: 1.0
+    lambda_velocity: 0.5
+    lambda_proposal_objectness: 2.0
+    lambda_proposal_offset: 1.0
+    aux_layer_weights: [0.25, 0.5, 0.75, 1.0]
   map:
     cls_cost_weight: 2.0
     pts_cost_weight: 5.0

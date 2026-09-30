@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _decoder_layer(
@@ -21,7 +20,7 @@ def _decoder_layer(
 
 
 class AgentDecoder(nn.Module):
-    """Decode spatial Agent queries independently from the shared BEV memory."""
+    """Decode image-conditioned Agent proposals without learned query identities."""
 
     def __init__(
         self,
@@ -33,42 +32,60 @@ class AgentDecoder(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        grid_size = math.isqrt(num_queries)
-        if grid_size * grid_size != num_queries:
-            raise ValueError("Agent queries must form a square XY grid")
-        coordinates = torch.linspace(
-            0.5 / grid_size, 1.0 - 0.5 / grid_size, grid_size
-        )
-        try:
-            grid_y, grid_x = torch.meshgrid(coordinates, coordinates, indexing="ij")
-        except TypeError:  # PyTorch 1.9
-            grid_y, grid_x = torch.meshgrid(coordinates, coordinates)
-        references = torch.stack(
-            (grid_x.flatten(), grid_y.flatten(), torch.full((num_queries,), 0.5)),
-            dim=-1,
-        )
-        self.query_embedding = nn.Parameter(torch.randn(num_queries, hidden_dim) * 0.02)
-        self.reference_xyz = nn.Parameter(references)
+        self.num_queries = int(num_queries)
         self.reference_mlp = nn.Sequential(
             nn.Linear(3, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
-        self.decoder = nn.TransformerDecoder(
-            _decoder_layer(hidden_dim, num_heads, ffn_dim, dropout),
-            num_layers=num_layers,
+        self.query_norm = nn.LayerNorm(hidden_dim)
+        self.layers = nn.ModuleList(
+            [
+                _decoder_layer(hidden_dim, num_heads, ffn_dim, dropout)
+                for _ in range(num_layers)
+            ]
         )
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.output_norms = nn.ModuleList(
+            [nn.LayerNorm(hidden_dim) for _ in range(num_layers)]
+        )
 
-    def forward(self, bev_tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = bev_tokens.shape[0]
-        references = self.reference_xyz.clamp(1e-4, 1.0 - 1e-4)
-        queries = self.query_embedding + self.reference_mlp(references)
-        decoded = self.decoder(
-            tgt=queries.unsqueeze(0).expand(batch_size, -1, -1),
-            memory=bev_tokens,
+    @staticmethod
+    def sample_local_bev(
+        bev_features: torch.Tensor, reference_xyz: torch.Tensor
+    ) -> torch.Tensor:
+        if bev_features.ndim != 4:
+            raise ValueError("bev_features must be [B,C,H,W]")
+        if reference_xyz.ndim != 3 or reference_xyz.shape[-1] != 3:
+            raise ValueError("reference_xyz must be [B,Q,3]")
+        if reference_xyz.shape[0] != bev_features.shape[0]:
+            raise ValueError("reference_xyz batch does not match BEV features")
+        grid = reference_xyz[..., :2].mul(2.0).sub(1.0).unsqueeze(2)
+        sampled = F.grid_sample(
+            bev_features,
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
         )
-        return self.norm(decoded), references.unsqueeze(0).expand(batch_size, -1, -1)
+        return sampled.squeeze(-1).transpose(1, 2)
+
+    def forward(
+        self,
+        bev_tokens: torch.Tensor,
+        bev_features: torch.Tensor,
+        reference_xyz: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        if reference_xyz.shape[1] != self.num_queries:
+            raise ValueError(
+                f"expected {self.num_queries} Agent proposals, got {reference_xyz.shape[1]}"
+            )
+        local_bev = self.sample_local_bev(bev_features, reference_xyz)
+        decoded = self.query_norm(local_bev + self.reference_mlp(reference_xyz))
+        intermediates: list[torch.Tensor] = []
+        for layer, norm in zip(self.layers, self.output_norms):
+            decoded = layer(tgt=decoded, memory=bev_tokens)
+            intermediates.append(norm(decoded))
+        return intermediates
 
 
 class MapDecoder(nn.Module):

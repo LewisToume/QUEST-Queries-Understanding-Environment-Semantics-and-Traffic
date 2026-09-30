@@ -112,7 +112,7 @@ def test_student_configs_use_eight_cameras_and_16_by_9_input():
     dataset_config = load_yaml_config(root / "configs/stage1.yaml")["dataset"]
 
     assert tuple(model_config["camera_names"]) == EXPECTED_CAMERAS
-    assert model_config["architecture_version"] == 2
+    assert model_config["architecture_version"] == 3
     assert model_config["hidden_dim"] == 384
     assert model_config["bev_layers"] == 4
     assert model_config["agent_decoder_layers"] == 4

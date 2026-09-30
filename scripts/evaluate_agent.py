@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.dataset import collate_fn
 from quest.losses import compute_agent_loss
-from quest.model import QUESTModel, load_quest_v2_checkpoint
+from quest.model import QUESTModel, load_quest_v3_checkpoint
 from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.utils import load_yaml_config
 
@@ -62,7 +62,7 @@ def load_model_checkpoint(
         raise ValueError(
             f"checkpoint must contain checkpoint['model_state_dict']: {checkpoint_path}"
         )
-    load_quest_v2_checkpoint(model, checkpoint)
+    load_quest_v3_checkpoint(model, checkpoint)
     return int(checkpoint.get("epoch", 0))
 
 
@@ -298,11 +298,9 @@ def main() -> int:
                 outputs["agent_boxes"][0],
                 args.confidence_threshold,
             )
-            valid_gt = batch["agent_gt"]["labels"][0] >= 0
+            valid_gt = batch["agent_gt"]["valid_mask"][0].bool()
             gt_labels = batch["agent_gt"]["labels"][0][valid_gt].to(device)
-            gt_centers = normalized_center_to_metric(
-                batch["agent_gt"]["boxes"][0][valid_gt, :3].to(device)
-            )
+            gt_centers = batch["agent_gt"]["boxes_metric"][0][valid_gt, :3].to(device)
             matches = match_agents(
                 predictions["centers_m"],
                 predictions["labels"],
@@ -314,9 +312,7 @@ def main() -> int:
                 key: value.to(device) for key, value in batch["agent_gt"].items()
             }
             agent_loss = compute_agent_loss(
-                outputs["agent_cls_logits"],
-                outputs["agent_boxes"],
-                outputs["agent_velocity"],
+                outputs,
                 hard_gt,
                 agent_loss_config,
             )["agent_loss"]

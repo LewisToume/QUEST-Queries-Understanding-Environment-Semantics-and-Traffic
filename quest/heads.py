@@ -96,7 +96,7 @@ class AgentHead(nn.Module):
     def __init__(self, hidden_dim: int, C_agent: int = 10, D_box: int = 8) -> None:
         super().__init__()
         if D_box != 8:
-            raise ValueError("QUEST V2 Agent boxes require D_box=8")
+            raise ValueError("QUEST V3 Agent boxes require D_box=8")
         self.D_box = D_box
         self.cls_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -145,6 +145,30 @@ class AgentHead(nn.Module):
         yaw = torch.where(yaw_norm > 1e-6, yaw, default_yaw)
         boxes = torch.cat([center, size, yaw], dim=-1)
         return cls_logits, boxes, velocity
+
+
+class AgentProposalHead(nn.Module):
+    """Predict objectness and bounded XY offsets for every metric BEV cell."""
+
+    def __init__(self, hidden_dim: int) -> None:
+        super().__init__()
+        self.objectness = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.xy_offset = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 2),
+        )
+
+    def forward(self, bev_tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if bev_tokens.ndim != 3:
+            raise ValueError("bev_tokens must be [B,H*W,C]")
+        return self.objectness(bev_tokens).squeeze(-1), 0.5 * torch.tanh(
+            self.xy_offset(bev_tokens)
+        )
 
 
 class MapHead(nn.Module):

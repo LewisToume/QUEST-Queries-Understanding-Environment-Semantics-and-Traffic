@@ -149,7 +149,8 @@ class GeometryAwareBEVLift(nn.Module):
         extrinsics: torch.Tensor,
         ego_state: torch.Tensor,
         image_size: tuple[int, int],
-    ) -> torch.Tensor:
+        return_diagnostics: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if camera_features.ndim != 5:
             raise ValueError(
                 "camera_features must be [B,N,C,H,W], got "
@@ -207,9 +208,16 @@ class GeometryAwareBEVLift(nn.Module):
         lifted = (candidates * weights.unsqueeze(-1)).sum(dim=(2, 3))
 
         ego = self.ego_mlp(ego_state.to(device=lifted.device, dtype=lifted.dtype))
-        return (
+        output = (
             lifted
             + self.bev_embedding.to(dtype=lifted.dtype).unsqueeze(0)
             + self.metric_position.to(dtype=lifted.dtype).unsqueeze(0)
             + ego.unsqueeze(1)
         )
+        if not return_diagnostics:
+            return output
+        diagnostics = {
+            "bev_visible_ratio": candidate_mask.flatten(2).any(dim=2).float().mean(dim=1),
+            "camera_visible_ratio": visible.any(dim=-1).float().mean(dim=-1),
+        }
+        return output, diagnostics

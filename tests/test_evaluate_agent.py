@@ -27,7 +27,7 @@ class EvaluateAgentTest(unittest.TestCase):
             path = Path(directory) / "checkpoint.pt"
             torch.save(
                 {
-                    "architecture_version": 2,
+                    "architecture_version": 3,
                     "model_state_dict": source.state_dict(),
                     "epoch": 5,
                 },

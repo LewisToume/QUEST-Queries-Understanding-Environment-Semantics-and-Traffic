@@ -57,7 +57,14 @@ def parse_args():
 
 
 def build_payload(
-    token, boxes, scores, labels, score_threshold=0.25, max_distance=50.0
+    token,
+    boxes,
+    scores,
+    labels,
+    lidar2img,
+    image_shapes,
+    score_threshold=0.25,
+    max_distance=50.0,
 ):
     return {
         "token": str(token),
@@ -69,6 +76,8 @@ def build_payload(
             },
             score_threshold=score_threshold,
             max_distance_m=max_distance,
+            lidar2img=torch.as_tensor(lidar2img),
+            image_shapes=image_shapes,
         ),
     }
 
@@ -145,6 +154,8 @@ def main():
             boxes,
             scores,
             labels,
+            processed["lidar2img"],
+            processed["img_shape"],
             score_threshold=args.score_threshold,
             max_distance=args.max_distance,
         )

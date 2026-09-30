@@ -1,5 +1,5 @@
 model:
-  architecture_version: 2
+  architecture_version: 3
   backbone_name: facebook/dinov2-small
   local_backbone_dir: weights/dinov2-small
   hidden_dim: 384

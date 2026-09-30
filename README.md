@@ -1,6 +1,6 @@
 # QUEST
 
-QUEST V2 is an 8-camera geometry-aware perception model with shared BEV latent and four
+QUEST V3 is an 8-camera geometry-aware perception model with shared BEV latent and four
 outputs: Semantic Segmentation, Depth, Agent, Vector Map.
 
 ## Model
@@ -10,7 +10,8 @@ outputs: Semantic Segmentation, Depth, Agent, Vector Map.
   -> shared frozen DINOv2
   -> calibrated GeometryAwareBEVLift
   -> 32x32 metric BEV Transformer
-  -> separate Agent and Vector Map query decoders
+  -> image-conditioned Agent proposals and decoder
+  -> independent Vector Map query decoder
 
 per-camera DINO patch features
   -> Semantic Segmentation head
@@ -31,8 +32,8 @@ Stage2 is offline-only. Teacher inference and label export run separately, and
 student training reads token-aligned Navformer Agent labels from
 `data/soft_labels_navformer`.
 
-QUEST V1 checkpoints are architecture-incompatible and are explicitly rejected
-by V2 checkpoint loading.
+QUEST V1/V2 checkpoints are architecture-incompatible and are explicitly rejected
+by V3 checkpoint loading.
 
 ## Checks
 

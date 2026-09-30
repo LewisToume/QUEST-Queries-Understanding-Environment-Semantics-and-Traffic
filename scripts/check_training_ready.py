@@ -30,6 +30,11 @@ EXPECTED_OUTPUTS = {
     "agent_cls_logits": (1, 100, 5),
     "agent_boxes": (1, 100, 8),
     "agent_velocity": (1, 100, 3),
+    "proposal_objectness_logits": (1, 1024),
+    "proposal_xy_offsets": (1, 1024, 2),
+    "agent_cls_logits_layers": (4, 1, 100, 5),
+    "agent_boxes_layers": (4, 1, 100, 8),
+    "agent_velocity_layers": (4, 1, 100, 3),
     "map_cls_logits": (1, 50, 5),
     "map_points": (1, 50, 20, 2),
     "bev_features": (1, 384, 32, 32),
@@ -70,8 +75,8 @@ def main() -> int:
         batch["extrinsics"].to(device),
         batch["ego_state"].to(device),
     )
-    if set(predictions) != set(EXPECTED_OUTPUTS):
-        blockers.append(f"output keys: {sorted(predictions)}")
+    if not set(EXPECTED_OUTPUTS).issubset(predictions):
+        blockers.append(f"missing output keys: {sorted(set(EXPECTED_OUTPUTS) - set(predictions))}")
     for key, expected in EXPECTED_OUTPUTS.items():
         tensor = predictions[key]
         if tuple(tensor.shape) != expected:
@@ -115,7 +120,7 @@ def main() -> int:
     print("blockers", blockers if blockers else "NONE")
     summary = model.parameter_summary()
     print("parameters", summary)
-    print(f"QUEST_8VIEW_V2_TRAINING_READY = {'NO' if blockers else 'YES'}")
+    print(f"QUEST_8VIEW_V3_TRAINING_READY = {'NO' if blockers else 'YES'}")
     return 1 if blockers else 0
 
 

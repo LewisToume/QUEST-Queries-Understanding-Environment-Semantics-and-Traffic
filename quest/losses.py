@@ -112,77 +112,278 @@ def compute_depth_loss(
     return {"depth_loss": loss}
 
 
-def compute_agent_loss(
+def _decode_agent_boxes(
+    boxes: torch.Tensor, settings: Mapping[str, Any]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    xy_min, xy_max = (float(value) for value in settings["xy_range"])
+    z_min, z_max = (float(value) for value in settings["z_range"])
+    center = torch.stack(
+        (
+            xy_min + boxes[..., 0] * (xy_max - xy_min),
+            xy_min + boxes[..., 1] * (xy_max - xy_min),
+            z_min + boxes[..., 2] * (z_max - z_min),
+        ),
+        dim=-1,
+    )
+    size_scale = boxes.new_tensor(settings["size_norm"])
+    size = boxes[..., 3:6] * size_scale
+    yaw = F.normalize(boxes[..., 6:8], dim=-1)
+    return center, size, yaw
+
+
+def _supported_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    class_support_mask: torch.Tensor,
+    background_weight: float,
+) -> torch.Tensor:
+    foreground = torch.nonzero(class_support_mask.bool(), as_tuple=False).flatten()
+    background = logits.shape[-1] - 1
+    columns = torch.cat((foreground, foreground.new_tensor([background])))
+    reduced_logits = logits[:, columns]
+    remapped = torch.full_like(targets, foreground.numel())
+    for reduced_index, class_index in enumerate(foreground.tolist()):
+        remapped[targets == class_index] = reduced_index
+    invalid = (targets != background) & (remapped == foreground.numel())
+    if bool(invalid.any()):
+        raise ValueError("Agent target uses a class unsupported by its teacher")
+    weights = logits.new_ones(foreground.numel() + 1)
+    weights[-1] = float(background_weight)
+    return F.cross_entropy(reduced_logits, remapped, weight=weights)
+
+
+def _match_agent_layer(
     cls_logits: torch.Tensor,
     boxes: torch.Tensor,
     velocity: torch.Tensor,
-    agent_gt: Mapping[str, torch.Tensor],
-    config: Mapping[str, Any] | None = None,
+    target: Mapping[str, torch.Tensor],
+    settings: Mapping[str, Any],
 ) -> dict[str, torch.Tensor]:
-    settings = {
-        "cls_cost_weight": 2.0,
-        "bbox_cost_weight": 0.25,
-        "cls_gamma": 2.0,
-        "cls_alpha": 0.25,
-        "lambda_box": 0.25,
-        "lambda_velocity": 0.2,
-        "box_loss_type": "l1",
-    }
-    settings.update(config or {})
+    center_scale = boxes.new_tensor((10.0, 10.0, 2.0))
+    size_scale = boxes.new_tensor(settings["size_norm"])
     background = cls_logits.shape[-1] - 1
-    cls_losses: list[torch.Tensor] = []
-    box_losses: list[torch.Tensor] = []
-    velocity_losses: list[torch.Tensor] = []
+    component_losses: dict[str, list[torch.Tensor]] = {
+        "cls": [], "center": [], "size": [], "yaw": [], "velocity": []
+    }
     for batch_index in range(cls_logits.shape[0]):
         pred_cls = cls_logits[batch_index]
-        pred_boxes = boxes[batch_index]
+        pred_center, pred_size, pred_yaw = _decode_agent_boxes(
+            boxes[batch_index], settings
+        )
         pred_velocity = velocity[batch_index]
-        valid = agent_gt["labels"][batch_index] >= 0
-        gt_labels = agent_gt["labels"][batch_index][valid].long()
-        gt_boxes = agent_gt["boxes"][batch_index][valid]
-        gt_velocity = agent_gt["velocity"][batch_index][valid]
-        targets = torch.full(
+        valid = target["valid_mask"][batch_index].bool()
+        gt_labels = target["labels"][batch_index][valid].long()
+        gt_boxes = target["boxes_metric"][batch_index][valid].to(boxes.dtype)
+        gt_velocity = target["velocity_mps"][batch_index][valid].to(velocity.dtype)
+        support = target["class_support_mask"][batch_index].bool()
+        cls_targets = torch.full(
             (pred_cls.shape[0],), background, dtype=torch.long, device=pred_cls.device
         )
         if gt_labels.numel():
-            class_cost = -F.log_softmax(pred_cls, dim=-1)[:, gt_labels]
-            box_cost = torch.cdist(pred_boxes, gt_boxes, p=1) / pred_boxes.shape[-1]
-            pred_indices, gt_indices = _hungarian(
-                float(settings["cls_cost_weight"]) * class_cost
-                + float(settings["bbox_cost_weight"]) * box_cost
+            if not bool(support[gt_labels].all()):
+                raise ValueError("valid Agent targets include unsupported classes")
+            supported = torch.nonzero(support, as_tuple=False).flatten()
+            columns = torch.cat((supported, supported.new_tensor([background])))
+            class_log_probs = F.log_softmax(pred_cls[:, columns], dim=-1)
+            class_lookup = torch.full(
+                (background,), -1, dtype=torch.long, device=pred_cls.device
             )
-            targets[pred_indices] = gt_labels[gt_indices]
-            regression = F.smooth_l1_loss if settings["box_loss_type"] == "smooth_l1" else F.l1_loss
-            box_loss = regression(pred_boxes[pred_indices], gt_boxes[gt_indices])
-            velocity_loss = F.smooth_l1_loss(
-                pred_velocity[pred_indices], gt_velocity[gt_indices]
+            class_lookup[supported] = torch.arange(
+                supported.numel(), device=pred_cls.device
+            )
+            class_cost = -class_log_probs[:, class_lookup[gt_labels]]
+            gt_center = gt_boxes[:, :3]
+            gt_size = gt_boxes[:, 3:6]
+            gt_yaw = torch.stack(
+                (torch.sin(gt_boxes[:, 6]), torch.cos(gt_boxes[:, 6])), dim=-1
+            )
+            center_cost = torch.cdist(
+                pred_center / center_scale, gt_center / center_scale, p=1
+            )
+            size_cost = torch.cdist(
+                pred_size / size_scale, gt_size / size_scale, p=1
+            )
+            yaw_cost = 1.0 - pred_yaw @ gt_yaw.transpose(0, 1)
+            pred_indices, gt_indices = _hungarian(
+                float(settings["match_cls_weight"]) * class_cost
+                + float(settings["match_center_weight"]) * center_cost
+                + float(settings["match_size_weight"]) * size_cost
+                + float(settings["match_yaw_weight"]) * yaw_cost
+            )
+            cls_targets[pred_indices] = gt_labels[gt_indices]
+            component_losses["center"].append(
+                F.smooth_l1_loss(
+                    pred_center[pred_indices] / center_scale,
+                    gt_center[gt_indices] / center_scale,
+                )
+            )
+            component_losses["size"].append(
+                F.smooth_l1_loss(
+                    pred_size[pred_indices] / size_scale,
+                    gt_size[gt_indices] / size_scale,
+                )
+            )
+            component_losses["yaw"].append(
+                (1.0 - (pred_yaw[pred_indices] * gt_yaw[gt_indices]).sum(-1)).mean()
+            )
+            component_losses["velocity"].append(
+                F.smooth_l1_loss(
+                    pred_velocity[pred_indices], gt_velocity[gt_indices]
+                )
             )
         else:
-            box_loss = _zero(pred_boxes)
-            velocity_loss = _zero(pred_velocity)
-        cls_losses.append(
-            _focal_classification_loss(
+            for key in ("center", "size", "yaw", "velocity"):
+                component_losses[key].append(_zero(boxes[batch_index]))
+        component_losses["cls"].append(
+            _supported_cross_entropy(
                 pred_cls,
-                targets,
-                float(settings["cls_gamma"]),
-                float(settings["cls_alpha"]),
+                cls_targets,
+                support,
+                float(settings["background_weight"]),
             )
         )
-        box_losses.append(box_loss)
-        velocity_losses.append(velocity_loss)
-    cls_loss = torch.stack(cls_losses).mean()
-    box_loss = torch.stack(box_losses).mean()
-    velocity_loss = torch.stack(velocity_losses).mean()
-    total = (
-        cls_loss
-        + float(settings["lambda_box"]) * box_loss
-        + float(settings["lambda_velocity"]) * velocity_loss
+    return {
+        key: torch.stack(values).mean() for key, values in component_losses.items()
+    }
+
+
+def _proposal_targets(
+    objectness: torch.Tensor,
+    offsets: torch.Tensor,
+    target: Mapping[str, torch.Tensor],
+    settings: Mapping[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size, cell_count = objectness.shape
+    bev_h, bev_w = int(settings["bev_h"]), int(settings["bev_w"])
+    if cell_count != bev_h * bev_w:
+        raise ValueError("proposal objectness does not match configured BEV grid")
+    xy_min, xy_max = (float(value) for value in settings["xy_range"])
+    object_target = torch.zeros_like(objectness)
+    offset_target = torch.zeros_like(offsets)
+    positive_mask = torch.zeros_like(objectness, dtype=torch.bool)
+    positive_weight = torch.zeros_like(objectness)
+    for batch_index in range(batch_size):
+        valid = target["valid_mask"][batch_index].bool()
+        centers = target["boxes_metric"][batch_index, valid, :2].to(objectness.dtype)
+        scores = target["scores"][batch_index, valid].to(objectness.dtype).clamp(0.0, 1.0)
+        if not centers.numel():
+            continue
+        normalized = ((centers - xy_min) / (xy_max - xy_min)).clamp(0, 1 - 1e-6)
+        cell_x = torch.floor(normalized[:, 0] * bev_w).long()
+        cell_y = torch.floor(normalized[:, 1] * bev_h).long()
+        flat = cell_y * bev_w + cell_x
+        desired = torch.stack(
+            (
+                normalized[:, 0] * bev_w - (cell_x.to(objectness.dtype) + 0.5),
+                normalized[:, 1] * bev_h - (cell_y.to(objectness.dtype) + 0.5),
+            ),
+            dim=-1,
+        ).clamp(-0.5, 0.5)
+        for item_index, flat_index in enumerate(flat.tolist()):
+            if not positive_mask[batch_index, flat_index] or scores[item_index] > positive_weight[batch_index, flat_index]:
+                positive_mask[batch_index, flat_index] = True
+                positive_weight[batch_index, flat_index] = scores[item_index]
+                object_target[batch_index, flat_index] = scores[item_index]
+                offset_target[batch_index, flat_index] = desired[item_index]
+    object_loss = F.binary_cross_entropy_with_logits(objectness, object_target)
+    if positive_mask.any():
+        raw_offset = F.smooth_l1_loss(
+            offsets[positive_mask], offset_target[positive_mask], reduction="none"
+        ).mean(dim=-1)
+        offset_loss = (
+            raw_offset * positive_weight[positive_mask].clamp_min(1e-3)
+        ).sum() / positive_weight[positive_mask].clamp_min(1e-3).sum()
+    else:
+        offset_loss = _zero(offsets)
+    return object_loss, offset_loss
+
+
+def compute_agent_loss(
+    predictions: Mapping[str, torch.Tensor],
+    agent_gt: Mapping[str, torch.Tensor],
+    config: Mapping[str, Any] | None = None,
+    decoder_enabled: bool = True,
+) -> dict[str, torch.Tensor]:
+    settings: dict[str, Any] = {
+        "xy_range": (-50.0, 50.0),
+        "z_range": (-5.0, 5.0),
+        "size_norm": (20.0, 10.0, 8.0),
+        "bev_h": 32,
+        "bev_w": 32,
+        "match_cls_weight": 1.0,
+        "match_center_weight": 5.0,
+        "match_size_weight": 2.0,
+        "match_yaw_weight": 1.0,
+        "background_weight": 0.1,
+        "lambda_cls": 1.0,
+        "lambda_center": 5.0,
+        "lambda_size": 2.0,
+        "lambda_yaw": 1.0,
+        "lambda_velocity": 0.5,
+        "lambda_proposal_objectness": 2.0,
+        "lambda_proposal_offset": 1.0,
+        "aux_layer_weights": (0.25, 0.5, 0.75, 1.0),
+    }
+    settings.update(config or {})
+    objectness_loss, offset_loss = _proposal_targets(
+        predictions["proposal_objectness_logits"],
+        predictions["proposal_xy_offsets"],
+        agent_gt,
+        settings,
+    )
+    proposal_loss = (
+        float(settings["lambda_proposal_objectness"]) * objectness_loss
+        + float(settings["lambda_proposal_offset"]) * offset_loss
+    )
+    cls_layers = predictions.get(
+        "agent_cls_logits_layers", predictions["agent_cls_logits"].unsqueeze(0)
+    )
+    box_layers = predictions.get(
+        "agent_boxes_layers", predictions["agent_boxes"].unsqueeze(0)
+    )
+    velocity_layers = predictions.get(
+        "agent_velocity_layers", predictions["agent_velocity"].unsqueeze(0)
+    )
+    weights = tuple(float(value) for value in settings["aux_layer_weights"])
+    if len(weights) != cls_layers.shape[0]:
+        if cls_layers.shape[0] == 1:
+            weights = (1.0,)
+        else:
+            raise ValueError("aux_layer_weights must match Agent decoder layers")
+    accumulated = {
+        key: _zero(cls_layers) for key in ("cls", "center", "size", "yaw", "velocity")
+    }
+    normalizer = max(sum(weights), 1e-6)
+    if decoder_enabled:
+        for layer_index, layer_weight in enumerate(weights):
+            layer_losses = _match_agent_layer(
+                cls_layers[layer_index],
+                box_layers[layer_index],
+                velocity_layers[layer_index],
+                agent_gt,
+                settings,
+            )
+            for key in accumulated:
+                accumulated[key] = accumulated[key] + layer_weight * layer_losses[key]
+        accumulated = {key: value / normalizer for key, value in accumulated.items()}
+    decoder_loss = (
+        float(settings["lambda_cls"]) * accumulated["cls"]
+        + float(settings["lambda_center"]) * accumulated["center"]
+        + float(settings["lambda_size"]) * accumulated["size"]
+        + float(settings["lambda_yaw"]) * accumulated["yaw"]
+        + float(settings["lambda_velocity"]) * accumulated["velocity"]
     )
     return {
-        "agent_cls_loss": cls_loss,
-        "agent_box_loss": box_loss,
-        "agent_velocity_loss": velocity_loss,
-        "agent_loss": total,
+        "proposal_objectness_loss": objectness_loss,
+        "proposal_offset_loss": offset_loss,
+        "proposal_loss": proposal_loss,
+        "agent_cls_loss": accumulated["cls"],
+        "agent_center_loss": accumulated["center"],
+        "agent_size_loss": accumulated["size"],
+        "agent_yaw_loss": accumulated["yaw"],
+        "agent_velocity_loss": accumulated["velocity"],
+        "decoder_agent_loss": decoder_loss,
+        "agent_loss": proposal_loss + decoder_loss,
     }
 
 
@@ -268,6 +469,7 @@ def compute_total_loss(
     preds: Mapping[str, torch.Tensor],
     gts: Mapping[str, Any],
     config: Mapping[str, Any] | None = None,
+    agent_decoder_enabled: bool = True,
 ) -> dict[str, torch.Tensor]:
     settings: dict[str, Any] = {
         "tasks": {"seg": False, "depth": False, "agent": True, "map": False},
@@ -313,17 +515,26 @@ def compute_total_loss(
     agent_available = _available_mask(gts.get("agent_valid"), batch_size, device)
     if tasks.get("agent") and agent_available.any() and "agent_gt" in gts:
         agent_losses = compute_agent_loss(
-            preds["agent_cls_logits"][agent_available],
-            preds["agent_boxes"][agent_available],
-            preds["agent_velocity"][agent_available],
+            {
+                key: value[:, agent_available] if key.endswith("_layers") else value[agent_available]
+                for key, value in preds.items()
+                if key.startswith("agent_") or key.startswith("proposal_")
+            },
             _select_batch(gts["agent_gt"], agent_available),
             settings["agent"],
+            decoder_enabled=agent_decoder_enabled,
         )
     else:
         agent_losses = {
+            "proposal_objectness_loss": _zero(preds["proposal_objectness_logits"]),
+            "proposal_offset_loss": _zero(preds["proposal_xy_offsets"]),
+            "proposal_loss": _zero(preds["proposal_objectness_logits"]),
             "agent_cls_loss": _zero(preds["agent_cls_logits"]),
-            "agent_box_loss": _zero(preds["agent_boxes"]),
+            "agent_center_loss": _zero(preds["agent_boxes"]),
+            "agent_size_loss": _zero(preds["agent_boxes"]),
+            "agent_yaw_loss": _zero(preds["agent_boxes"]),
             "agent_velocity_loss": _zero(preds["agent_velocity"]),
+            "decoder_agent_loss": _zero(preds["agent_cls_logits"]),
             "agent_loss": _zero(preds["agent_cls_logits"]),
         }
 
