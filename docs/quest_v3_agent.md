@@ -33,3 +33,9 @@ Epoch one is proposal warmup by default. Later epochs optimize proposal
 objectness/offset plus auxiliary Agent classification, center, size, yaw, and
 velocity losses. Checkpoints must contain `architecture_version: 3`; V1, V2, and
 unversioned checkpoints are rejected.
+
+Every Stage2 checkpoint also stores `trained_class_support_mask`. Evaluation
+masks unsupported foreground logits before softmax, so classes not supervised by
+the selected source cannot become predictions. Navformer teacher-only training
+stores `[true, true, false, false]`; hard-GT and hybrid training support all four
+canonical classes.

@@ -62,7 +62,13 @@ def load_model_checkpoint(
         raise ValueError(
             f"checkpoint must contain checkpoint['model_state_dict']: {checkpoint_path}"
         )
+    support = checkpoint.get("trained_class_support_mask")
+    if not torch.is_tensor(support) or tuple(support.shape) != (len(CLASS_NAMES),):
+        raise ValueError(
+            "QUEST V3 checkpoint must contain trained_class_support_mask with shape [4]"
+        )
     load_quest_v3_checkpoint(model, checkpoint)
+    model.trained_class_support_mask = support.detach().cpu().bool()
     return int(checkpoint.get("epoch", 0))
 
 
@@ -79,12 +85,26 @@ def filter_predictions(
     cls_logits: torch.Tensor,
     boxes: torch.Tensor,
     confidence_threshold: float,
+    trained_class_support_mask: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     if cls_logits.ndim != 2 or cls_logits.shape[-1] != 5:
         raise ValueError(f"agent_cls_logits must be [N,5], got {tuple(cls_logits.shape)}")
     if boxes.ndim != 2 or boxes.shape != (cls_logits.shape[0], 8):
         raise ValueError(f"agent_boxes must be [N,8], got {tuple(boxes.shape)}")
-    probabilities = cls_logits.softmax(dim=-1)
+    if trained_class_support_mask is None:
+        trained_class_support_mask = torch.ones(
+            len(CLASS_NAMES), dtype=torch.bool, device=cls_logits.device
+        )
+    support = torch.as_tensor(
+        trained_class_support_mask, dtype=torch.bool, device=cls_logits.device
+    )
+    if tuple(support.shape) != (len(CLASS_NAMES),):
+        raise ValueError("trained_class_support_mask must have shape [4]")
+    inference_logits = cls_logits.clone()
+    inference_logits[:, : len(CLASS_NAMES)] = inference_logits[
+        :, : len(CLASS_NAMES)
+    ].masked_fill(~support.unsqueeze(0), float("-inf"))
+    probabilities = inference_logits.softmax(dim=-1)
     confidence, labels = probabilities.max(dim=-1)
     keep = (labels != BACKGROUND_CLASS) & (
         confidence >= float(confidence_threshold)
@@ -271,11 +291,13 @@ def main() -> int:
     model = QUESTModel(**model_config).to(device)
     checkpoint_path = _resolve_path(args.checkpoint)
     epoch = load_model_checkpoint(model, checkpoint_path, device)
+    trained_class_support_mask = model.trained_class_support_mask.to(device)
     model.eval()
     print(
         f"checkpoint={checkpoint_path} epoch={epoch} device={device} "
         f"complete_frames=[{args.start},{args.start + args.count})"
     )
+    print(f"trained_class_support_mask={trained_class_support_mask.cpu().tolist()}")
 
     metrics = AgentMetrics()
     agent_loss_config = stage1["loss"]["agent"]
@@ -297,6 +319,7 @@ def main() -> int:
                 outputs["agent_cls_logits"][0],
                 outputs["agent_boxes"][0],
                 args.confidence_threshold,
+                trained_class_support_mask,
             )
             valid_gt = batch["agent_gt"]["valid_mask"][0].bool()
             gt_labels = batch["agent_gt"]["labels"][0][valid_gt].to(device)

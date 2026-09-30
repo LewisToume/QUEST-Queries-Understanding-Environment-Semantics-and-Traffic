@@ -15,7 +15,11 @@ from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel, QUEST_ARCHITECTURE_VERSION, load_quest_v3_checkpoint
 from quest.openscene_dataset import OpenSceneMetadataDataset
-from quest.teacher_adapters import merge_canonical_agent_targets, validate_canonical_agent
+from quest.teacher_adapters import (
+    NAVFORMER_CLASS_SUPPORT,
+    merge_canonical_agent_targets,
+    validate_canonical_agent,
+)
 from quest.utils import load_yaml_config
 
 
@@ -33,6 +37,14 @@ def _to_device(value: Any, device: torch.device) -> Any:
     if isinstance(value, Mapping):
         return {key: _to_device(item, device) for key, item in value.items()}
     return value
+
+
+def initial_trained_class_support_mask(supervision_source: str) -> torch.Tensor:
+    if supervision_source == "teacher_only":
+        return NAVFORMER_CLASS_SUPPORT.clone()
+    if supervision_source in {"hard_gt_only", "hybrid"}:
+        return torch.ones(4, dtype=torch.bool)
+    raise ValueError(f"unknown supervision_source: {supervision_source}")
 
 
 def build_targets(
@@ -116,6 +128,7 @@ def train_one_epoch(
     proposal_warmup_epochs: int,
     epoch: int,
     epochs: int,
+    trained_class_support_mask: torch.Tensor | None = None,
 ) -> tuple[float, float]:
     model.train()
     total_loss_sum = 0.0
@@ -139,6 +152,11 @@ def train_one_epoch(
     skipped_steps = 0
     for step, batch in enumerate(loader, start=1):
         targets = build_targets(batch, device, supervision_source=supervision_source)
+        if trained_class_support_mask is not None and "agent_gt" in targets:
+            available = targets["agent_valid"].bool()
+            if available.any():
+                observed_support = targets["agent_gt"]["class_support_mask"][available]
+                trained_class_support_mask |= observed_support.any(dim=0).detach().cpu()
         optimizer.zero_grad(set_to_none=True)
         predictions = model(
             batch["images"].to(device),
@@ -233,6 +251,7 @@ def save_training_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
+    trained_class_support_mask: torch.Tensor,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
@@ -242,6 +261,7 @@ def save_training_checkpoint(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": int(epoch),
+            "trained_class_support_mask": trained_class_support_mask.detach().cpu().bool(),
         },
         temporary_path,
     )
@@ -310,6 +330,9 @@ def main() -> int:
     }
     supervision_source = str(stage2.get("supervision_source", "teacher_only"))
     proposal_warmup_epochs = int(stage2["distill"].get("proposal_warmup_epochs", 1))
+    trained_class_support_mask = initial_trained_class_support_mask(
+        supervision_source
+    )
     for epoch in range(1, epochs + 1):
         train_one_epoch(
             model,
@@ -321,12 +344,19 @@ def main() -> int:
             proposal_warmup_epochs,
             epoch,
             epochs,
+            trained_class_support_mask,
         )
 
     checkpoint_path = args.checkpoint_path or Path(stage2["paths"]["checkpoint_path"])
     if not checkpoint_path.is_absolute():
         checkpoint_path = PROJECT_ROOT / checkpoint_path
-    save_training_checkpoint(checkpoint_path, model, optimizer, epochs)
+    save_training_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epochs,
+        trained_class_support_mask,
+    )
     print(f"checkpoint saved: {checkpoint_path}")
     return 0
 

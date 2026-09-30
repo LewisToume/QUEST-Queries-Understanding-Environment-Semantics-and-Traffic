@@ -87,6 +87,14 @@ class Stage2TrainingTest(unittest.TestCase):
         self.assertEqual(config["distill"]["epochs"], 5)
         self.assertEqual(config["supervision_source"], "teacher_only")
         self.assertEqual(config["distill"]["proposal_warmup_epochs"], 1)
+        self.assertEqual(
+            stage2.initial_trained_class_support_mask("teacher_only").tolist(),
+            [True, True, False, False],
+        )
+        self.assertTrue(
+            stage2.initial_trained_class_support_mask("hard_gt_only").all()
+        )
+        self.assertTrue(stage2.initial_trained_class_support_mask("hybrid").all())
 
     def test_epoch_traverses_loader_and_updates_model(self):
         model = TinyAgentModel()
@@ -117,12 +125,22 @@ class Stage2TrainingTest(unittest.TestCase):
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested/quest_stage2_agent.pt"
-            stage2.save_training_checkpoint(path, model, optimizer, epoch=5)
+            stage2.save_training_checkpoint(
+                path,
+                model,
+                optimizer,
+                epoch=5,
+                trained_class_support_mask=torch.tensor([True, True, False, False]),
+            )
             checkpoint = torch.load(path, map_location="cpu", weights_only=True)
             self.assertEqual(checkpoint["epoch"], 5)
             self.assertEqual(checkpoint["architecture_version"], 3)
             self.assertIn("model_state_dict", checkpoint)
             self.assertIn("optimizer_state_dict", checkpoint)
+            self.assertEqual(
+                checkpoint["trained_class_support_mask"].tolist(),
+                [True, True, False, False],
+            )
 
 
 if __name__ == "__main__":

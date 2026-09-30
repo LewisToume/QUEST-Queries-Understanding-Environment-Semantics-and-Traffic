@@ -29,6 +29,10 @@ inside the task loss where required.
 Normalized V2 soft-label files are not compatible with this schema and must be
 regenerated before V3 Stage2 training.
 
+The resulting checkpoint records the union of supported Agent classes. Inference
+must apply this mask before classification softmax; the four-class taxonomy itself
+does not change.
+
 ```bash
 python scripts/export_navformer_pseudo.py --sample-index 0 --num-frames 100
 python scripts/train_stage2_distill.py

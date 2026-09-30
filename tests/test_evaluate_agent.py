@@ -30,6 +30,9 @@ class EvaluateAgentTest(unittest.TestCase):
                     "architecture_version": 3,
                     "model_state_dict": source.state_dict(),
                     "epoch": 5,
+                    "trained_class_support_mask": torch.tensor(
+                        [True, True, False, False]
+                    ),
                 },
                 path,
             )
@@ -39,6 +42,10 @@ class EvaluateAgentTest(unittest.TestCase):
         self.assertEqual(epoch, 5)
         self.assertTrue(torch.equal(target.weight, source.weight))
         self.assertTrue(torch.equal(target.bias, source.bias))
+        self.assertEqual(
+            target.trained_class_support_mask.tolist(),
+            [True, True, False, False],
+        )
 
     def test_normalized_center_to_metric_center(self):
         centers = torch.tensor([[0.0, 0.5, 1.0], [1.0, 0.0, 0.5]])
@@ -62,6 +69,16 @@ class EvaluateAgentTest(unittest.TestCase):
         filtered = evaluation.filter_predictions(logits, boxes, 0.25)
         self.assertEqual(filtered["labels"].tolist(), [0])
         self.assertEqual(tuple(filtered["centers_m"].shape), (1, 3))
+
+    def test_unsupported_class_cannot_be_prediction_even_with_highest_logit(self):
+        logits = torch.tensor([[1.0, 0.0, 100.0, 99.0, -1.0]])
+        filtered = evaluation.filter_predictions(
+            logits,
+            torch.zeros(1, 8),
+            confidence_threshold=0.25,
+            trained_class_support_mask=torch.tensor([True, True, False, False]),
+        )
+        self.assertEqual(filtered["labels"].tolist(), [0])
 
     def test_hungarian_matches_within_each_class(self):
         prediction_centers = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
