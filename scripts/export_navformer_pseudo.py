@@ -46,6 +46,8 @@ def parse_args():
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--num-frames", type=int, default=100)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--score-threshold", type=float, default=0.25)
+    parser.add_argument("--max-distance", type=float, default=50.0)
     parser.add_argument("--navformer-root", type=Path, default=NAVFORMER_ROOT)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
@@ -54,7 +56,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_payload(token, boxes, scores, labels):
+def build_payload(
+    token, boxes, scores, labels, score_threshold=0.25, max_distance=50.0
+):
     return {
         "token": str(token),
         "agent": navformer_output_to_quest(
@@ -62,7 +66,9 @@ def build_payload(token, boxes, scores, labels):
                 "boxes_3d": boxes,
                 "scores_3d": scores,
                 "labels_3d": labels,
-            }
+            },
+            score_threshold=score_threshold,
+            max_distance_m=max_distance,
         ),
     }
 
@@ -108,8 +114,16 @@ def main():
     model = build_model_and_load_checkpoint(cfg, checkpoint_path, build_model)
     model.to(device).eval()
 
+    if args.score_threshold < 0:
+        raise ValueError("score-threshold must be non-negative")
+    if args.max_distance <= 0:
+        raise ValueError("max-distance must be positive")
+
     previous_scene = None
     saved = 0
+    total_labels = 0
+    total_vehicle = 0
+    total_pedestrian = 0
     for offset, info in enumerate(infos, start=1):
         token = str(info["token"])
         scene_token = str(info.get("scene_token"))
@@ -125,14 +139,28 @@ def main():
         continuous = prepare_temporal_metadata(model, model_inputs)
         with torch.no_grad():
             track = run_track_only(model, model_inputs)
-        boxes, scores, labels, track_ids = track_output_tensors(track)
-        payload = build_payload(token, boxes, scores, labels)
+        boxes, scores, labels, _track_ids = track_output_tensors(track)
+        payload = build_payload(
+            token,
+            boxes,
+            scores,
+            labels,
+            score_threshold=args.score_threshold,
+            max_distance=args.max_distance,
+        )
         output_path = save_payload(payload, output_dir)
-        valid_count = int((payload["agent"]["labels"] >= 0).sum())
+        output_labels = payload["agent"]["labels"]
+        valid_count = int((output_labels >= 0).sum())
+        vehicle_count = int((output_labels == 0).sum())
+        pedestrian_count = int((output_labels == 1).sum())
+        total_labels += valid_count
+        total_vehicle += vehicle_count
+        total_pedestrian += pedestrian_count
         saved += 1
         print(
             "progress={}/{} frame_idx={} token={} scene={} new_scene={} "
-            "continuous={} tracks={} labels={} saved_agents={} output={}".format(
+            "continuous={} tracks={} valid_total={} vehicle_count={} "
+            "pedestrian_count={} output={}".format(
                 offset,
                 len(infos),
                 info["frame_idx"],
@@ -141,8 +169,9 @@ def main():
                 new_scene,
                 continuous,
                 int(scores.numel()),
-                labels.tolist(),
                 valid_count,
+                vehicle_count,
+                pedestrian_count,
                 output_path,
             )
         )
@@ -150,6 +179,14 @@ def main():
 
     print("attempted: {}".format(len(infos)))
     print("saved: {}".format(saved))
+    print("total labels: {}".format(total_labels))
+    print("vehicle labels: {}".format(total_vehicle))
+    print("pedestrian labels: {}".format(total_pedestrian))
+    print(
+        "mean labels/frame: {:.6f}".format(
+            float(total_labels) / saved if saved else 0.0
+        )
+    )
     print("output_dir: {}".format(output_dir))
     print("NAVFORMER_PSEUDO_EXPORT = PASS")
     return 0

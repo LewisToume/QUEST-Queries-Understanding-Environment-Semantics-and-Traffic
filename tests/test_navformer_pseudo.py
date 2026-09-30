@@ -8,7 +8,7 @@ from quest.utils import load_yaml_config
 from scripts.export_navformer_pseudo import build_payload, save_payload
 
 
-def test_navformer_class_mapping_and_box_conversion():
+def test_navformer_keeps_only_verified_classes_and_converts_boxes():
     boxes = torch.tensor(
         [
             [0.0, 0.0, 0.0, 10.0, 5.0, 4.0, 0.0, 2.0, -4.0],
@@ -23,18 +23,37 @@ def test_navformer_class_mapping_and_box_conversion():
     result = navformer_output_to_quest(
         {
             "boxes_3d": boxes,
-            "scores_3d": torch.arange(7, dtype=torch.float32),
+            "scores_3d": torch.tensor([0.8, 0.7, 0.9, 0.9, 0.9, 0.9, 0.9]),
             "labels_3d": torch.arange(7),
         }
     )
 
-    assert result["labels"][:7].tolist() == [3, 3, 3, 2, 1, 0, 0]
-    torch.testing.assert_close(result["boxes"][6, :6], torch.tensor([0.5] * 6))
-    torch.testing.assert_close(result["boxes"][6, 6:], torch.tensor([0.0, 1.0]))
-    torch.testing.assert_close(result["velocity"][6], torch.tensor([0.1, -0.2, 0.0]))
-    assert result["labels"][7:].eq(-1).all()
-    assert result["boxes"][7:].eq(0).all()
-    assert result["velocity"][7:].eq(0).all()
+    assert result["labels"][:2].tolist() == [1, 0]
+    torch.testing.assert_close(result["boxes"][1, :6], torch.tensor([0.5] * 6))
+    torch.testing.assert_close(result["boxes"][1, 6:], torch.tensor([0.0, 1.0]))
+    torch.testing.assert_close(result["velocity"][1], torch.tensor([0.1, -0.2, 0.0]))
+    assert result["labels"][2:].eq(-1).all()
+    assert result["boxes"][2:].eq(0).all()
+    assert result["velocity"][2:].eq(0).all()
+
+
+def test_navformer_filters_low_score_distance_and_z():
+    boxes = torch.zeros(6, 9)
+    boxes[:, 3:6] = 1.0
+    boxes[2, :2] = torch.tensor([30.0, 40.0])
+    boxes[3, :2] = torch.tensor([30.0, 40.1])
+    boxes[4, 2] = 5.0
+    boxes[5, 2] = 5.1
+    result = navformer_output_to_quest(
+        {
+            "boxes_3d": boxes,
+            "scores_3d": torch.tensor([0.24, 0.25, 0.9, 0.9, 0.9, 0.9]),
+            "labels_3d": torch.tensor([0, 0, 2, 2, 0, 2]),
+        }
+    )
+
+    assert int((result["labels"] >= 0).sum()) == 3
+    assert sorted(result["labels"][:3].tolist()) == [0, 0, 1]
 
 
 def test_navformer_conversion_filters_range_and_keeps_top_64():

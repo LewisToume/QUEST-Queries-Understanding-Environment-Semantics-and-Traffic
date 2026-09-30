@@ -20,12 +20,7 @@ TEACHER_CAMERA_ALIASES: dict[str, dict[str, str]] = {}
 
 NAVFORMER_AGENT_CLASS_TO_QUEST = {
     0: 0,  # vehicle
-    1: 0,  # bicycle
     2: 1,  # pedestrian
-    3: 2,  # traffic_cone
-    4: 3,  # barrier
-    5: 3,  # czone_sign
-    6: 3,  # generic_object
 }
 
 OPENSCENE_MAP_CLASS_NOTE = (
@@ -209,6 +204,9 @@ def openscene_images_to_teacher(
 def navformer_output_to_quest(
     raw_output: Mapping[str, Any],
     max_instances: int = 64,
+    score_threshold: float = 0.25,
+    max_distance_m: float = 50.0,
+    allowed_teacher_classes: Sequence[int] = (0, 2),
     xy_range: tuple[float, float] = (-50.0, 50.0),
     z_range: tuple[float, float] = (-5.0, 5.0),
     size_norm: tuple[float, float, float] = (20.0, 10.0, 8.0),
@@ -233,8 +231,16 @@ def navformer_output_to_quest(
         raise ValueError("Navformer boxes, scores, and labels must have equal length")
     if max_instances <= 0:
         raise ValueError("max_instances must be positive")
+    if score_threshold < 0:
+        raise ValueError("score_threshold must be non-negative")
+    if max_distance_m <= 0:
+        raise ValueError("max_distance_m must be positive")
     if velocity_norm <= 0:
         raise ValueError("velocity_norm must be positive")
+    allowed_classes = {int(class_id) for class_id in allowed_teacher_classes}
+    unsupported = allowed_classes.difference(NAVFORMER_AGENT_CLASS_TO_QUEST)
+    if unsupported:
+        raise ValueError(f"unsupported Navformer Agent classes: {sorted(unsupported)}")
 
     output_labels = torch.full((max_instances,), -1, dtype=torch.long)
     output_boxes = torch.zeros((max_instances, 8), dtype=torch.float32)
@@ -255,19 +261,20 @@ def navformer_output_to_quest(
         raise ValueError("size_norm must contain three positive values")
 
     finite = torch.isfinite(boxes[:, :9]).all(dim=1) & torch.isfinite(scores)
+    bev_distance = torch.linalg.vector_norm(boxes[:, :2], dim=1)
     in_range = (
-        (boxes[:, 0] >= xy_min)
-        & (boxes[:, 0] <= xy_max)
-        & (boxes[:, 1] >= xy_min)
-        & (boxes[:, 1] <= xy_max)
+        (bev_distance <= float(max_distance_m))
         & (boxes[:, 2] >= z_min)
         & (boxes[:, 2] <= z_max)
     )
-    mapped = torch.tensor(
-        [int(label) in NAVFORMER_AGENT_CLASS_TO_QUEST for label in labels],
+    allowed = torch.tensor(
+        [int(label) in allowed_classes for label in labels],
         dtype=torch.bool,
     )
-    indices = torch.nonzero(finite & in_range & mapped, as_tuple=False).flatten()
+    indices = torch.nonzero(
+        finite & in_range & allowed & (scores >= float(score_threshold)),
+        as_tuple=False,
+    ).flatten()
     if indices.numel() == 0:
         return {
             "labels": output_labels,
