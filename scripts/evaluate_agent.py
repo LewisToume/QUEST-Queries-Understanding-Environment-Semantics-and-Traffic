@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.dataset import collate_fn
 from quest.losses import compute_agent_loss
-from quest.model import QUESTModel
+from quest.model import QUESTModel, load_quest_v2_checkpoint
 from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.utils import load_yaml_config
 
@@ -62,7 +62,7 @@ def load_model_checkpoint(
         raise ValueError(
             f"checkpoint must contain checkpoint['model_state_dict']: {checkpoint_path}"
         )
-    model.load_state_dict(checkpoint["model_state_dict"])
+    load_quest_v2_checkpoint(model, checkpoint)
     return int(checkpoint.get("epoch", 0))
 
 

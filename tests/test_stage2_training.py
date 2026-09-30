@@ -124,6 +124,7 @@ class Stage2TrainingTest(unittest.TestCase):
             stage2.save_training_checkpoint(path, model, optimizer, epoch=5)
             checkpoint = torch.load(path, map_location="cpu", weights_only=True)
             self.assertEqual(checkpoint["epoch"], 5)
+            self.assertEqual(checkpoint["architecture_version"], 2)
             self.assertIn("model_state_dict", checkpoint)
             self.assertIn("optimizer_state_dict", checkpoint)
             self.assertFalse(path.with_suffix(".pt.tmp").exists())

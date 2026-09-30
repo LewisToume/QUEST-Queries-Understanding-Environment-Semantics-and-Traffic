@@ -32,7 +32,7 @@ EXPECTED_OUTPUTS = {
     "agent_velocity": (1, 100, 3),
     "map_cls_logits": (1, 50, 5),
     "map_points": (1, 50, 20, 2),
-    "bev_features": (1, 256, 32, 32),
+    "bev_features": (1, 384, 32, 32),
 }
 
 
@@ -113,7 +113,9 @@ def main() -> int:
     print("output shapes", {key: tuple(value.shape) for key, value in predictions.items()})
     print(f"Stage1 loss {total.item():.6f}")
     print("blockers", blockers if blockers else "NONE")
-    print(f"QUEST_6VIEW_TRAINING_READY = {'NO' if blockers else 'YES'}")
+    summary = model.parameter_summary()
+    print("parameters", summary)
+    print(f"QUEST_8VIEW_V2_TRAINING_READY = {'NO' if blockers else 'YES'}")
     return 1 if blockers else 0
 
 

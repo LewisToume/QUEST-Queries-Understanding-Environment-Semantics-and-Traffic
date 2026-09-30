@@ -13,7 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.dataset import collate_fn
 from quest.losses import compute_total_loss
-from quest.model import QUESTModel
+from quest.model import QUESTModel, QUEST_ARCHITECTURE_VERSION, load_quest_v2_checkpoint
 from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.utils import load_yaml_config
 
@@ -154,6 +154,7 @@ def save_training_checkpoint(
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     torch.save(
         {
+            "architecture_version": QUEST_ARCHITECTURE_VERSION,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": int(epoch),
@@ -212,7 +213,8 @@ def main() -> int:
         checkpoint_path = Path(model_path)
         if not checkpoint_path.is_absolute():
             checkpoint_path = PROJECT_ROOT / checkpoint_path
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        load_quest_v2_checkpoint(model, checkpoint)
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=float(stage2["distill"]["lr"]),

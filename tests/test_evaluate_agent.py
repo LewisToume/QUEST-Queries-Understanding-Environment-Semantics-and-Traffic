@@ -26,7 +26,11 @@ class EvaluateAgentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "checkpoint.pt"
             torch.save(
-                {"model_state_dict": source.state_dict(), "epoch": 5},
+                {
+                    "architecture_version": 2,
+                    "model_state_dict": source.state_dict(),
+                    "epoch": 5,
+                },
                 path,
             )
             epoch = evaluation.load_model_checkpoint(

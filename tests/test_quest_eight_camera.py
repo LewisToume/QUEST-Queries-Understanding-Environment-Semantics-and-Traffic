@@ -24,7 +24,7 @@ EXPECTED_CAMERAS = (
 
 
 class PatchTokenBackbone(torch.nn.Module):
-    hidden_dim = 16
+    hidden_dim = 32
     patch_size = 14
 
     def forward(self, images):
@@ -112,6 +112,11 @@ def test_student_configs_use_eight_cameras_and_16_by_9_input():
     dataset_config = load_yaml_config(root / "configs/stage1.yaml")["dataset"]
 
     assert tuple(model_config["camera_names"]) == EXPECTED_CAMERAS
+    assert model_config["architecture_version"] == 2
+    assert model_config["hidden_dim"] == 384
+    assert model_config["bev_layers"] == 4
+    assert model_config["agent_decoder_layers"] == 4
+    assert model_config["map_decoder_layers"] == 2
     assert tuple(dataset_config["camera_names"]) == EXPECTED_CAMERAS
     assert dataset_config["image_size"] == [252, 448]
 
@@ -121,15 +126,20 @@ def test_quest_forward_uses_eight_cameras_and_18_by_32_patch_grid():
         "quest.model.FrozenDINOv2Backbone", return_value=PatchTokenBackbone()
     ):
         model = QUESTModel(
-            hidden_dim=16,
-            fusion_layers=1,
-            fusion_attention_heads=1,
+            hidden_dim=32,
             bev_h=4,
             bev_w=4,
+            x_range=(-2.0, 2.0),
+            y_range=(-2.0, 2.0),
+            z_anchors=(1.0,),
             bev_layers=1,
-            bev_attention_heads=1,
-            decoder_layers=1,
-            decoder_attention_heads=1,
+            bev_attention_heads=4,
+            bev_ffn_dim=64,
+            agent_decoder_layers=1,
+            map_decoder_layers=1,
+            decoder_attention_heads=4,
+            decoder_ffn_dim=64,
+            dropout=0.0,
             N_agent=4,
             N_map=3,
             seg_size=(8, 12),
@@ -140,7 +150,10 @@ def test_quest_forward_uses_eight_cameras_and_18_by_32_patch_grid():
         ).eval()
 
     images = torch.zeros(1, 8, 3, 252, 448)
-    intrinsics = torch.eye(3).reshape(1, 1, 3, 3).expand(1, 8, 3, 3)
+    intrinsic = torch.tensor(
+        [[20.0, 0.0, 224.0], [0.0, 20.0, 126.0], [0.0, 0.0, 1.0]]
+    )
+    intrinsics = intrinsic.reshape(1, 1, 3, 3).expand(1, 8, 3, 3)
     extrinsics = torch.eye(4).reshape(1, 1, 4, 4).expand(1, 8, 4, 4)
     ego_state = torch.zeros(1, 9)
     with torch.no_grad():
@@ -149,10 +162,13 @@ def test_quest_forward_uses_eight_cameras_and_18_by_32_patch_grid():
 
     assert DEFAULT_CAMERA_NAMES == EXPECTED_CAMERAS
     assert model.num_cameras == 8
-    assert model.fusion.camera_embed.num_embeddings == 8
+    assert not hasattr(model, "fusion")
+    assert model.agent_decoder is not model.map_decoder
     assert encoded["patch_grid_size"] == (18, 32)
     assert tuple(reversed(encoded["patch_grid_size"])) == (32, 18)
-    assert tuple(encoded["backbone_patch_tokens"].shape) == (1, 8, 576, 16)
+    assert tuple(encoded["backbone_patch_tokens"].shape) == (1, 8, 576, 32)
+    assert tuple(encoded["backbone_feature_maps"].shape) == (1, 8, 32, 18, 32)
+    assert tuple(encoded["lifted_bev_tokens"].shape) == (1, 16, 32)
     assert tuple(outputs["seg_logits"].shape) == (1, 8, 6, 8, 12)
     assert tuple(outputs["depth"].shape) == (1, 8, 1, 8, 12)
     assert tuple(outputs["agent_cls_logits"].shape) == (1, 4, 5)

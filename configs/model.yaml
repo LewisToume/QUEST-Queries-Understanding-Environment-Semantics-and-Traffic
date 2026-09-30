@@ -1,7 +1,8 @@
 model:
+  architecture_version: 2
   backbone_name: facebook/dinov2-small
   local_backbone_dir: weights/dinov2-small
-  hidden_dim: 256
+  hidden_dim: 384
   camera_names:
     - CAM_F0
     - CAM_L0
@@ -11,14 +12,19 @@ model:
     - CAM_L2
     - CAM_R2
     - CAM_B0
-  fusion_layers: 1
-  fusion_attention_heads: 8
   bev_h: 32
   bev_w: 32
-  bev_layers: 2
+  x_range: [-50.0, 50.0]
+  y_range: [-50.0, 50.0]
+  z_anchors: [-1.0, 0.0, 1.0]
+  bev_layers: 4
   bev_attention_heads: 8
-  decoder_layers: 2
+  bev_ffn_dim: 1536
+  agent_decoder_layers: 4
+  map_decoder_layers: 2
   decoder_attention_heads: 8
+  decoder_ffn_dim: 1536
+  dropout: 0.1
   N_agent: 100
   N_map: 50
   C_seg: 6

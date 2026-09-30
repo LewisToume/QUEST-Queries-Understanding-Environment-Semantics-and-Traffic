@@ -95,28 +95,55 @@ class AgentHead(nn.Module):
 
     def __init__(self, hidden_dim: int, C_agent: int = 10, D_box: int = 8) -> None:
         super().__init__()
-        if D_box < 8:
-            raise ValueError("D_box must be at least 8")
+        if D_box != 8:
+            raise ValueError("QUEST V2 Agent boxes require D_box=8")
         self.D_box = D_box
         self.cls_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, C_agent + 1),
         )
         self.box_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, D_box)
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, D_box),
         )
         self.velocity_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, 3)
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 3),
         )
 
-    def forward(self, queries: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def inverse_sigmoid(value: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+        value = value.clamp(eps, 1.0 - eps)
+        return torch.log(value / (1.0 - value))
+
+    def forward(
+        self, queries: torch.Tensor, reference_xyz: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if reference_xyz.shape != (*queries.shape[:2], 3):
+            raise ValueError("reference_xyz must match Agent query batch and count")
         cls_logits = self.cls_head(queries)
         raw_boxes = self.box_head(queries)
         velocity = self.velocity_head(queries)
-        yaw = F.normalize(raw_boxes[..., 6:8], dim=-1, eps=1e-6)
-        boxes = torch.cat([raw_boxes[..., :6].sigmoid(), yaw, raw_boxes[..., 8:]], dim=-1)
+        center = torch.sigmoid(
+            self.inverse_sigmoid(reference_xyz) + raw_boxes[..., :3]
+        )
+        size = raw_boxes[..., 3:6].sigmoid()
+        raw_yaw = raw_boxes[..., 6:8]
+        yaw_norm = torch.linalg.vector_norm(raw_yaw, dim=-1, keepdim=True)
+        yaw = raw_yaw / yaw_norm.clamp_min(1e-6)
+        default_yaw = torch.zeros_like(yaw)
+        default_yaw[..., 1] = 1.0
+        yaw = torch.where(yaw_norm > 1e-6, yaw, default_yaw)
+        boxes = torch.cat([center, size, yaw], dim=-1)
         return cls_logits, boxes, velocity
 
 
