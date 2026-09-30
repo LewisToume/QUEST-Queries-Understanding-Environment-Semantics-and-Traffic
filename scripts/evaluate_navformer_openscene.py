@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import math
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,13 +18,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from diagnose_streampetr_coordinates import load_metric_agent_gt  # noqa: E402
-from evaluate_streampetr_six_camera import (  # noqa: E402
-    MAX_DISTANCE_METERS,
-    SCORE_THRESHOLD,
-    SixCameraMetrics,
-)
-from evaluate_streampetr_thresholds import strict_class_aware_hungarian  # noqa: E402
+from quest.openscene_dataset import OPENSCENE_AGENT_CLASS_TO_ID  # noqa: E402
 from run_navformer_openscene_teacher import (  # noqa: E402
     DEFAULT_CHECKPOINT,
     DEFAULT_CONFIG,
@@ -45,6 +43,158 @@ from run_navformer_openscene_teacher import (  # noqa: E402
 
 NAVFORMER_TO_EVALUATION = {0: 0, 2: 1}
 CLASS_NAMES = ("vehicle", "pedestrian")
+SCORE_THRESHOLD = 0.25
+MAX_DISTANCE_METERS = 50.0
+PEDESTRIAN_DISTANCE_BINS = (
+    (0.0, 10.0),
+    (10.0, 20.0),
+    (20.0, 30.0),
+    (30.0, 40.0),
+    (40.0, 50.0),
+)
+
+
+def load_metric_agent_gt(info: dict[str, Any]) -> dict[str, torch.Tensor]:
+    raw_boxes = np.asarray(info.get("gt_boxes", []), dtype=np.float32)
+    raw_names = np.asarray(info.get("gt_names", []))
+    boxes = []
+    labels = []
+    for box, raw_name in zip(raw_boxes, raw_names):
+        name = str(raw_name)
+        if name not in OPENSCENE_AGENT_CLASS_TO_ID or len(box) < 7:
+            continue
+        values = np.asarray(box[:7], dtype=np.float32)
+        if not np.isfinite(values).all():
+            continue
+        boxes.append(torch.from_numpy(values.copy()))
+        labels.append(OPENSCENE_AGENT_CLASS_TO_ID[name])
+    return {
+        "boxes": torch.stack(boxes) if boxes else torch.empty(0, 7),
+        "labels": torch.tensor(labels, dtype=torch.long),
+    }
+
+
+def strict_class_aware_hungarian(
+    prediction_centers: torch.Tensor,
+    prediction_labels: torch.Tensor,
+    gt_centers: torch.Tensor,
+    gt_labels: torch.Tensor,
+    distance_threshold: float,
+) -> list[tuple[int, int, float]]:
+    matches = []
+    invalid_cost = 1e6
+    for class_id in range(len(CLASS_NAMES)):
+        prediction_indices = torch.nonzero(
+            prediction_labels == class_id, as_tuple=False
+        ).flatten()
+        gt_indices = torch.nonzero(gt_labels == class_id, as_tuple=False).flatten()
+        if not prediction_indices.numel() or not gt_indices.numel():
+            continue
+        distances = torch.cdist(
+            prediction_centers[prediction_indices, :2].float(),
+            gt_centers[gt_indices, :2].float(),
+            p=2,
+        )
+        cost = distances.clone()
+        cost[distances > float(distance_threshold)] = invalid_cost
+        rows, columns = linear_sum_assignment(cost.cpu().numpy())
+        for row, column in zip(rows, columns):
+            distance = float(distances[row, column])
+            prediction_index = int(prediction_indices[row])
+            gt_index = int(gt_indices[column])
+            if distance <= float(distance_threshold):
+                matches.append((prediction_index, gt_index, distance))
+    matches.sort(key=lambda item: item[0])
+    return matches
+
+
+def pedestrian_distance_bin(distance: float) -> int | None:
+    for index, (lower, upper) in enumerate(PEDESTRIAN_DISTANCE_BINS):
+        if lower <= distance < upper or (
+            index == len(PEDESTRIAN_DISTANCE_BINS) - 1
+            and math.isclose(distance, upper)
+        ):
+            return index
+    return None
+
+
+@dataclass
+class AgentMetrics:
+    samples: int = 0
+    class_gt: list[int] = field(default_factory=lambda: [0, 0])
+    class_predictions: list[int] = field(default_factory=lambda: [0, 0])
+    class_matched: list[int] = field(default_factory=lambda: [0, 0])
+    pedestrian_bin_gt: list[int] = field(
+        default_factory=lambda: [0] * len(PEDESTRIAN_DISTANCE_BINS)
+    )
+    pedestrian_bin_matched: list[int] = field(
+        default_factory=lambda: [0] * len(PEDESTRIAN_DISTANCE_BINS)
+    )
+
+    def update(
+        self,
+        prediction_labels: torch.Tensor,
+        gt_centers: torch.Tensor,
+        gt_labels: torch.Tensor,
+        matches: list[tuple[int, int, float]],
+    ) -> None:
+        self.samples += 1
+        for class_id in range(len(CLASS_NAMES)):
+            self.class_gt[class_id] += int((gt_labels == class_id).sum())
+            self.class_predictions[class_id] += int(
+                (prediction_labels == class_id).sum()
+            )
+        pedestrian_distances = torch.linalg.vector_norm(gt_centers[:, :2], dim=1)
+        for gt_index in torch.nonzero(gt_labels == 1, as_tuple=False).flatten():
+            bin_index = pedestrian_distance_bin(float(pedestrian_distances[gt_index]))
+            if bin_index is not None:
+                self.pedestrian_bin_gt[bin_index] += 1
+        for prediction_index, gt_index, _ in matches:
+            class_id = int(gt_labels[gt_index])
+            if int(prediction_labels[prediction_index]) != class_id:
+                continue
+            self.class_matched[class_id] += 1
+            if class_id == 1:
+                bin_index = pedestrian_distance_bin(float(pedestrian_distances[gt_index]))
+                if bin_index is not None:
+                    self.pedestrian_bin_matched[bin_index] += 1
+
+    @staticmethod
+    def ratio(numerator: int, denominator: int) -> float:
+        return numerator / denominator if denominator else 0.0
+
+    def summary(self) -> dict[str, Any]:
+        per_class = {}
+        for class_id, class_name in enumerate(CLASS_NAMES):
+            per_class[class_name] = {
+                "gt": self.class_gt[class_id],
+                "predictions": self.class_predictions[class_id],
+                "matched": self.class_matched[class_id],
+                "precision": self.ratio(
+                    self.class_matched[class_id], self.class_predictions[class_id]
+                ),
+                "recall": self.ratio(
+                    self.class_matched[class_id], self.class_gt[class_id]
+                ),
+            }
+        pedestrian_bins = []
+        for index, (lower, upper) in enumerate(PEDESTRIAN_DISTANCE_BINS):
+            pedestrian_bins.append(
+                {
+                    "range": "{}-{}m".format(int(lower), int(upper)),
+                    "gt": self.pedestrian_bin_gt[index],
+                    "matched": self.pedestrian_bin_matched[index],
+                    "recall": self.ratio(
+                        self.pedestrian_bin_matched[index],
+                        self.pedestrian_bin_gt[index],
+                    ),
+                }
+            )
+        return {
+            "samples": self.samples,
+            "per_class": per_class,
+            "pedestrian_distance_recall": pedestrian_bins,
+        }
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,7 +255,7 @@ def filter_agent_gt(info: dict[str, Any]) -> dict[str, torch.Tensor]:
     }
 
 
-def print_summary(metrics: SixCameraMetrics, distance_threshold: float) -> None:
+def print_summary(metrics: AgentMetrics, distance_threshold: float) -> None:
     summary = metrics.summary()
     print("\nCUSTOM_METRIC = class-aware Hungarian center matching (not official mAP)")
     print("samples: {}".format(summary["samples"]))
@@ -167,7 +317,7 @@ def main() -> int:
     model.to(device).eval()
     reset_tracking_state(model)
 
-    metrics = SixCameraMetrics()
+    metrics = AgentMetrics()
     previous_scene = None
     for offset, info in enumerate(infos, start=1):
         scene_token = str(info.get("scene_token"))

@@ -16,13 +16,13 @@ from quest.teachers import (
     TeacherUnavailableError,
     build_enabled_teachers,
     maptr_output_to_quest,
-    stream_petr_output_to_quest,
+    navformer_output_to_quest,
 )
 from quest.utils import load_yaml_config
 
 
 CONVERTERS = {
-    "agent": stream_petr_output_to_quest,
+    "agent": navformer_output_to_quest,
     "map": maptr_output_to_quest,
 }
 

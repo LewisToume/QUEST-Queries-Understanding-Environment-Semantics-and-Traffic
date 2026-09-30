@@ -19,11 +19,11 @@ paths:
   checkpoint_path: checkpoints/quest_stage2_agent.pt
 teachers:
   agent:
-    name: StreamPETR
+    name: Navformer
     enabled: true
-    repo_path: third_party/StreamPETR
-    config_path: third_party/StreamPETR/projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_90e.py
-    checkpoint_path: third_party/StreamPETR-main/ckpts/stream_petr_r50_flash_704_bs2_seq_90e.pth
+    repo_path: /home/user/DataDisk/QUEST_WORK/Navformer
+    config_path: /home/user/DataDisk/QUEST_WORK/Navformer/configs/navformer/track_map_nuplan_r50_navtrain.py
+    checkpoint_path: /home/user/DataDisk/QUEST_WORK/Navformer/data/alg_engine/ckpts/track_map_nuplan_r50_navtrain_100pct_bs1x8.pth
   map:
     name: MapTRv2
     enabled: true

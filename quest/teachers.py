@@ -13,34 +13,10 @@ from .utils import project_root
 
 
 TEACHER_CAMERA_ORDERS: dict[str, tuple[str, ...]] = {
-    "StreamPETR": ("CAM_F0", "CAM_R0", "CAM_R2", "CAM_B0", "CAM_L2", "CAM_L0"),
-    "MapTRv2": ("CAM_F0", "CAM_R0", "CAM_R2", "CAM_B0", "CAM_L2", "CAM_L0"),
+    "Navformer": OPENSCENE_CAMERA_NAMES,
 }
 
-TEACHER_CAMERA_ALIASES: dict[str, dict[str, str]] = {
-    "StreamPETR": {
-        "CAM_F0": "FRONT",
-        "CAM_R0": "FRONT_RIGHT",
-        "CAM_R2": "BACK_RIGHT",
-        "CAM_B0": "BACK",
-        "CAM_L2": "BACK_LEFT",
-        "CAM_L0": "FRONT_LEFT",
-    },
-    "MapTRv2": {
-        "CAM_F0": "FRONT",
-        "CAM_R0": "FRONT_RIGHT",
-        "CAM_R2": "BACK_RIGHT",
-        "CAM_B0": "BACK",
-        "CAM_L2": "BACK_LEFT",
-        "CAM_L0": "FRONT_LEFT",
-    },
-}
-
-OPENSCENE_AGENT_CLASS_TO_STREAM_PETR = {
-    "vehicle": "vehicle",
-    "pedestrian": "pedestrian",
-    "traffic_cone": "traffic_cone",
-}
+TEACHER_CAMERA_ALIASES: dict[str, dict[str, str]] = {}
 
 OPENSCENE_MAP_CLASS_NOTE = (
     "MapTR/MapTRv2 defaults are nuScenes vector-map classes. OpenScene/nuPlan "
@@ -48,8 +24,8 @@ OPENSCENE_MAP_CLASS_NOTE = (
 )
 
 COORDINATE_CONVENTION = (
-    "OpenScene sample uses camera sensor2lidar extrinsics. StreamPETR/MapTRv2 "
-    "consume selected 6-view nuScenes-style camera aliases at the same timestamp."
+    "OpenScene samples use camera sensor2lidar extrinsics. Navformer consumes the "
+    "native 8-view camera set. Other offline teachers own their native preprocessing."
 )
 
 
@@ -220,10 +196,12 @@ def openscene_images_to_teacher(
     return reorder_openscene_cameras(images, source_order, target_order)
 
 
-def stream_petr_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
-    """Convert StreamPETR lidar-coordinate detections to QUEST agent teacher fields after class mapping is verified."""
+def navformer_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert verified offline Navformer tracking output to QUEST Agent fields."""
 
-    raise TeacherUnavailableError("StreamPETR output conversion needs a real model output object; no inference output available.")
+    raise TeacherUnavailableError(
+        "Navformer conversion requires exported track boxes, labels, scores, and ids."
+    )
 
 
 def maptr_output_to_quest(raw_output: Mapping[str, Any]) -> dict[str, Any]:
@@ -342,8 +320,8 @@ class ExternalTeacher(nn.Module):
         )
 
 
-class StreamPETRTeacher(ExternalTeacher):
-    checkpoint_patterns = ("stream_petr", "streampetr")
+class NavformerTeacher(ExternalTeacher):
+    checkpoint_patterns = ("navformer", "track_map_nuplan")
     output_keys = ("cls_logits", "boxes_3d", "velocity", "scores", "valid_mask")
 
 
@@ -353,7 +331,7 @@ class MapTRv2Teacher(ExternalTeacher):
 
 
 TEACHER_CLASSES = {
-    "StreamPETR": StreamPETRTeacher,
+    "Navformer": NavformerTeacher,
     "MapTRv2": MapTRv2Teacher,
 }
 

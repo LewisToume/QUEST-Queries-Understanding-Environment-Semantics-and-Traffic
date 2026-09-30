@@ -2,8 +2,8 @@
 
 | Teacher | Task | Camera count | Stage2 execution |
 | --- | --- | ---: | --- |
-| StreamPETR | Agent | 6 | separate offline export |
-| MapTRv2 | Vector Map | 6 | separate offline export |
+| Navformer | Agent | 8 | separate offline export |
+| MapTRv2 | Vector Map | configured externally | separate offline export |
 | external_offline | Semantic Segmentation | unspecified | placeholder only |
 | external_offline | Depth | unspecified | placeholder only |
 

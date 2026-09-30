@@ -1,7 +1,7 @@
 # Teacher Environment
 
-StreamPETR and MapTRv2 remain external Agent and Vector Map teachers. Their
-legacy OpenMMLab runtime is isolated from the QUEST `.venv`.
+Navformer and MapTRv2 remain external Agent and Vector Map teachers. Their
+OpenMMLab runtime is isolated from the QUEST `.venv`.
 
 The attempted Windows legacy environment currently has Python 3.8.20, but the
 requested CUDA-enabled PyTorch wheel and compiled OpenMMLab dependencies did not

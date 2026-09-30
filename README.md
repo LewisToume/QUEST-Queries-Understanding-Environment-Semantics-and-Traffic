@@ -23,9 +23,6 @@ The fixed OpenScene camera order is:
 CAM_F0, CAM_L0, CAM_R0, CAM_L1, CAM_R1, CAM_L2, CAM_R2, CAM_B0
 ```
 
-Six-camera QUEST checkpoints are not compatible with the eight-entry camera
-embedding and must not be loaded into this model.
-
 Stage1 reads the official OpenScene metadata pickle directly. It currently uses
 real Agent annotations; Semantic Segmentation, Depth, and Vector Map losses stay
 disabled until real labels are available.
