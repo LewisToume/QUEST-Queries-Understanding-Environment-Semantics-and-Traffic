@@ -4,11 +4,13 @@ model:
   hidden_dim: 256
   camera_names:
     - CAM_F0
-    - CAM_B0
     - CAM_L0
-    - CAM_L2
     - CAM_R0
+    - CAM_L1
+    - CAM_R1
+    - CAM_L2
     - CAM_R2
+    - CAM_B0
   fusion_layers: 1
   fusion_attention_heads: 8
   bev_h: 32

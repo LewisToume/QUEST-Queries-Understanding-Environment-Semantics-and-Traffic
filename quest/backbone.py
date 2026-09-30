@@ -90,14 +90,15 @@ def test_dinov2_forward() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_dinov2_backbone().to(device)
 
-    input_tensor = torch.randn(1, 3, 224, 224, device=device)
+    input_tensor = torch.randn(1, 3, 252, 448, device=device)
     print(f"input shape         : {tuple(input_tensor.shape)}")
 
     with torch.no_grad():
         outputs = model(pixel_values=input_tensor)
 
     last_hidden_state = outputs.last_hidden_state
-    expected_seq_len = (224 // 14) * (224 // 14) + 1
+    patch_size = int(model.config.patch_size)
+    expected_seq_len = (252 // patch_size) * (448 // patch_size) + 1
     expected_hidden_dim = model.config.hidden_size
     expected_shape = (1, expected_seq_len, expected_hidden_dim)
 

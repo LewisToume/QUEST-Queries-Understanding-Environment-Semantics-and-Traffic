@@ -11,11 +11,13 @@ from torch.utils.data import Dataset
 
 OPENSCENE_CAMERA_NAMES = (
     "CAM_F0",
-    "CAM_B0",
     "CAM_L0",
-    "CAM_L2",
     "CAM_R0",
+    "CAM_L1",
+    "CAM_R1",
+    "CAM_L2",
     "CAM_R2",
+    "CAM_B0",
 )
 
 OPENSCENE_AGENT_CLASS_TO_ID = {
@@ -50,14 +52,14 @@ def resolve_openscene_camera_path(raw_path: str, camera_root: str | Path) -> Pat
 
 
 class OpenSceneMetadataDataset(Dataset):
-    """OpenScene 6-camera frames loaded directly from the official metadata."""
+    """OpenScene 8-camera frames loaded directly from the official metadata."""
 
     def __init__(
         self,
         metadata_path: str | Path,
         camera_root: str | Path,
         max_samples: int = 0,
-        image_size: tuple[int, int] = (224, 224),
+        image_size: tuple[int, int] = (252, 448),
         max_agent_instances: int = 64,
         camera_names: Sequence[str] = OPENSCENE_CAMERA_NAMES,
         xy_range: tuple[float, float] = (-50.0, 50.0),
@@ -92,7 +94,7 @@ class OpenSceneMetadataDataset(Dataset):
                 if max_samples > 0 and len(self.infos) >= max_samples:
                     break
         if not self.infos:
-            raise RuntimeError(f"no complete 6-camera frames found in {self.metadata_path}")
+            raise RuntimeError(f"no complete 8-camera frames found in {self.metadata_path}")
         if max_samples > 0 and len(self.infos) < max_samples:
             raise RuntimeError(
                 f"requested {max_samples} complete frames, found {len(self.infos)}"

@@ -19,14 +19,14 @@ from quest.utils import load_yaml_config
 
 
 EXPECTED_INPUTS = {
-    "images": (1, 6, 3, 224, 224),
-    "intrinsics": (1, 6, 3, 3),
-    "extrinsics": (1, 6, 4, 4),
+    "images": (1, 8, 3, 252, 448),
+    "intrinsics": (1, 8, 3, 3),
+    "extrinsics": (1, 8, 4, 4),
     "ego_state": (1, 9),
 }
 EXPECTED_OUTPUTS = {
-    "seg_logits": (1, 6, 6, 64, 64),
-    "depth": (1, 6, 1, 64, 64),
+    "seg_logits": (1, 8, 6, 64, 64),
+    "depth": (1, 8, 1, 64, 64),
     "agent_cls_logits": (1, 100, 5),
     "agent_boxes": (1, 100, 8),
     "agent_velocity": (1, 100, 3),

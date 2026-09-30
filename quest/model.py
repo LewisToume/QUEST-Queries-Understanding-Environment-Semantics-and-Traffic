@@ -13,11 +13,13 @@ from .utils import load_yaml_config, project_root
 
 DEFAULT_CAMERA_NAMES = (
     "CAM_F0",
-    "CAM_B0",
     "CAM_L0",
-    "CAM_L2",
     "CAM_R0",
+    "CAM_L1",
+    "CAM_R1",
+    "CAM_L2",
     "CAM_R2",
+    "CAM_B0",
 )
 
 
@@ -28,7 +30,7 @@ class MultiViewFusion(nn.Module):
         self,
         backbone_dim: int,
         hidden_dim: int,
-        num_cameras: int = 6,
+        num_cameras: int,
         num_layers: int = 1,
         num_attention_heads: int = 8,
         geometry_dim: int = 34,
@@ -145,7 +147,7 @@ class MultiViewFusion(nn.Module):
 
 
 class QUESTModel(nn.Module):
-    """6-camera multi-task perception model with shared BEV latent and four outputs:
+    """8-camera multi-task perception model with shared BEV latent and four outputs:
     Semantic Segmentation, Depth, Agent, Vector Map.
     """
 
@@ -215,25 +217,42 @@ class QUESTModel(nn.Module):
         intrinsics: torch.Tensor | None = None,
         extrinsics: torch.Tensor | None = None,
         ego_state: torch.Tensor | None = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, torch.Tensor | tuple[int, int]]:
         if images.ndim != 5:
-            raise ValueError(f"images must be [B, 6, 3, H, W], got {tuple(images.shape)}")
+            raise ValueError(
+                f"images must be [B, N_camera, 3, H, W], got {tuple(images.shape)}"
+            )
         batch_size, num_cameras, channels, height, width = images.shape
         if num_cameras != self.num_cameras:
             raise ValueError(f"expected {self.num_cameras} cameras, got {num_cameras}")
         if channels != 3:
             raise ValueError(f"expected RGB images, got {channels} channels")
+        if height % self.backbone.patch_size or width % self.backbone.patch_size:
+            raise ValueError(
+                f"image size {(height, width)} must be divisible by DINO patch size "
+                f"{self.backbone.patch_size}"
+            )
         flat_images = images.reshape(batch_size * num_cameras, channels, height, width)
         backbone_output = self.backbone(flat_images)
         patch_tokens = backbone_output[:, 1:, :].reshape(
             batch_size, num_cameras, -1, self.backbone.hidden_dim
         )
+        patch_grid_size = (
+            height // self.backbone.patch_size,
+            width // self.backbone.patch_size,
+        )
+        if patch_tokens.shape[2] != patch_grid_size[0] * patch_grid_size[1]:
+            raise ValueError(
+                "DINO patch tokens do not match input grid: "
+                f"tokens={patch_tokens.shape[2]} grid={patch_grid_size}"
+            )
         fused_tokens = self.fusion(
             patch_tokens, intrinsics=intrinsics, extrinsics=extrinsics, ego_state=ego_state
         )
         bev_tokens, bev_features = self.bev_encoder(fused_tokens)
         return {
             "backbone_patch_tokens": patch_tokens,
+            "patch_grid_size": patch_grid_size,
             "fused_tokens": fused_tokens,
             "bev_tokens": bev_tokens,
             "bev_features": bev_features,
@@ -253,8 +272,12 @@ class QUESTModel(nn.Module):
         )
         map_cls, map_points = self.map_head(decoded["map_queries"])
         return {
-            "seg_logits": self.seg_head(encoded["backbone_patch_tokens"]),
-            "depth": self.depth_head(encoded["backbone_patch_tokens"]),
+            "seg_logits": self.seg_head(
+                encoded["backbone_patch_tokens"], encoded["patch_grid_size"]
+            ),
+            "depth": self.depth_head(
+                encoded["backbone_patch_tokens"], encoded["patch_grid_size"]
+            ),
             "agent_cls_logits": agent_cls,
             "agent_boxes": agent_boxes,
             "agent_velocity": agent_velocity,
@@ -271,9 +294,9 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = QUESTModel.from_yaml().to(device).eval()
-    images = torch.randn(1, 6, 3, 224, 224, device=device)
-    intrinsics = torch.eye(3, device=device).reshape(1, 1, 3, 3).expand(1, 6, 3, 3)
-    extrinsics = torch.eye(4, device=device).reshape(1, 1, 4, 4).expand(1, 6, 4, 4)
+    images = torch.randn(1, 8, 3, 252, 448, device=device)
+    intrinsics = torch.eye(3, device=device).reshape(1, 1, 3, 3).expand(1, 8, 3, 3)
+    extrinsics = torch.eye(4, device=device).reshape(1, 1, 4, 4).expand(1, 8, 4, 4)
     ego_state = torch.zeros(1, 9, device=device)
     with torch.no_grad():
         outputs = model(images, intrinsics, extrinsics, ego_state)

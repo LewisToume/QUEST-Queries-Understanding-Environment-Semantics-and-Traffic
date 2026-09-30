@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Tuple
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,18 +30,26 @@ class _PerCameraDenseDecoder(nn.Module):
             nn.Conv2d(base_channels // 2, output_channels, 1),
         )
 
-    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        patch_tokens: torch.Tensor,
+        patch_grid_size: Tuple[int, int] | None = None,
+    ) -> torch.Tensor:
         if patch_tokens.ndim != 4:
             raise ValueError(
                 f"patch_tokens must be [B, N_cam, N_patch, C], got {tuple(patch_tokens.shape)}"
             )
         batch_size, num_cameras, num_patches, _ = patch_tokens.shape
-        side = math.isqrt(num_patches)
-        if side * side != num_patches:
-            raise ValueError(f"DINO patch count must form a square grid, got {num_patches}")
+        if patch_grid_size is None:
+            raise ValueError("patch_grid_size is required for dense decoding")
+        patch_h, patch_w = patch_grid_size
+        if patch_h * patch_w != num_patches:
+            raise ValueError(
+                f"DINO patch grid {patch_grid_size} does not match {num_patches} tokens"
+            )
         features = self.project(patch_tokens)
         features = features.permute(0, 1, 3, 2).reshape(
-            batch_size * num_cameras, -1, side, side
+            batch_size * num_cameras, -1, patch_h, patch_w
         )
         dense = self.decode(features)
         dense = F.interpolate(
@@ -75,8 +82,12 @@ class DepthHead(_PerCameraDenseDecoder):
         super().__init__(input_dim, 1, depth_size)
         self.min_depth = min_depth
 
-    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
-        return F.softplus(super().forward(patch_tokens)) + self.min_depth
+    def forward(
+        self,
+        patch_tokens: torch.Tensor,
+        patch_grid_size: Tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        return F.softplus(super().forward(patch_tokens, patch_grid_size)) + self.min_depth
 
 
 class AgentHead(nn.Module):

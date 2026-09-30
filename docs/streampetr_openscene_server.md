@@ -3,7 +3,7 @@
 This runner uses the original six OpenScene JPEGs in the order
 `CAM_F0 CAM_R0 CAM_R2 CAM_B0 CAM_L2 CAM_L0`. It passes the local
 StreamPETR checkpoint and the repository's original test pipeline to the
-native `Petr3D` model. It does not use QUEST's 224x224 Student tensors or
+native `Petr3D` model. It does not use QUEST's 252x448 Student tensors or
 perform QUEST class mapping.
 
 Target server runtime (provided, not verified locally):
