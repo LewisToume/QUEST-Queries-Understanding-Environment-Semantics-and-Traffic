@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.dataset import collate_fn
+from quest.bev_pretraining import load_bev_pretrain_checkpoint
 from quest.losses import compute_total_loss
 from quest.model import QUESTModel, QUEST_ARCHITECTURE_VERSION, load_quest_v3_checkpoint
 from quest.openscene_dataset import OpenSceneMetadataDataset
@@ -28,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-samples", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--checkpoint-path", type=Path, default=None)
+    parser.add_argument("--bev-pretrain-checkpoint", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -37,6 +39,13 @@ def _to_device(value: Any, device: torch.device) -> Any:
     if isinstance(value, Mapping):
         return {key: _to_device(item, device) for key, item in value.items()}
     return value
+
+
+def _torch_load(path: Path, device: torch.device) -> Any:
+    try:
+        return torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=device)
 
 
 def initial_trained_class_support_mask(supervision_source: str) -> torch.Tensor:
@@ -312,12 +321,29 @@ def main() -> int:
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = QUESTModel(**model_config).to(device).train()
+    bev_pretrain_path = args.bev_pretrain_checkpoint or stage2["distill"].get(
+        "bev_pretrain_path"
+    )
     model_path = stage2["distill"].get("model_path")
+    if bev_pretrain_path and model_path:
+        raise ValueError(
+            "configure either bev_pretrain_path for a new Stage2 run or model_path "
+            "for a full Stage2 resume, not both"
+        )
+    if bev_pretrain_path:
+        bev_pretrain_path = Path(bev_pretrain_path)
+        if not bev_pretrain_path.is_absolute():
+            bev_pretrain_path = PROJECT_ROOT / bev_pretrain_path
+        bev_checkpoint = _torch_load(bev_pretrain_path, device)
+        bev_epoch = load_bev_pretrain_checkpoint(model, bev_checkpoint)
+        print(
+            f"loaded BEV pretraining checkpoint: {bev_pretrain_path} epoch={bev_epoch}"
+        )
     if model_path:
         checkpoint_path = Path(model_path)
         if not checkpoint_path.is_absolute():
             checkpoint_path = PROJECT_ROOT / checkpoint_path
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        checkpoint = _torch_load(checkpoint_path, device)
         load_quest_v3_checkpoint(model, checkpoint)
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],

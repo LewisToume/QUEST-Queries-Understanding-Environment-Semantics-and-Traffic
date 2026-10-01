@@ -15,6 +15,7 @@ distill:
   lr: 5.0e-5
   device: auto
   model_path:
+  bev_pretrain_path:
 paths:
   soft_labels_dir: data/soft_labels_navformer
   checkpoint_path: checkpoints/quest_stage2_agent.pt

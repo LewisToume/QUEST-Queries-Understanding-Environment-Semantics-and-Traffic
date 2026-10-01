@@ -32,6 +32,16 @@ Stage2 is offline-only. Teacher inference and label export run separately, and
 student training reads token-aligned Navformer Agent labels from
 `data/soft_labels_navformer`.
 
+Stage 1 BEV pretraining can first supervise the Geometry lift and BEV encoder
+directly from rasterized Navformer vehicle/pedestrian centers:
+
+```bash
+python scripts/train_stage1_bev.py --num-samples 500 --epochs 5
+python scripts/evaluate_stage1_bev.py --start 500 --count 100
+python scripts/train_stage2_distill.py \
+  --bev-pretrain-checkpoint checkpoints/quest_stage1_bev.pt
+```
+
 QUEST V1/V2 checkpoints are architecture-incompatible and are explicitly rejected
 by V3 checkpoint loading.
 

@@ -1,0 +1,20 @@
+stage: bev_pretrain
+train:
+  start_index: 0
+  num_samples: 500
+  epochs: 5
+  batch_size: 1
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  lambda_class: 1.0
+eval:
+  start_index: 500
+  num_samples: 100
+  foreground_threshold: 0.5
+  top_k: [50, 100]
+  tolerance_cells: 1
+paths:
+  soft_labels_dir: data/soft_labels_navformer
+  checkpoint_path: checkpoints/quest_stage1_bev.pt
+auxiliary_head:
+  intermediate_dim: 128
