@@ -63,6 +63,9 @@ def configure_bev_pretraining(
         parameter.requires_grad = False
     for module in (model.geometry_lift, model.bev_encoder, auxiliary_head):
         module.requires_grad_(True)
+    ego_mlp = getattr(model.geometry_lift, "ego_mlp", None)
+    if ego_mlp is not None:
+        ego_mlp.requires_grad_(False)
     model.backbone.requires_grad_(False)
     trainable = [
         parameter

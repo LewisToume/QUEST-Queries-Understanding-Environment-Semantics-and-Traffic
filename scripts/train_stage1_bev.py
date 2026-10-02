@@ -117,6 +117,7 @@ def train_one_epoch(
             batch["intrinsics"].to(device),
             batch["extrinsics"].to(device),
             batch["ego_state"].to(device),
+            use_ego_state=False,
         )
         predictions = auxiliary_head(encoded["bev_features"])
         targets = rasterize_agent_centers(

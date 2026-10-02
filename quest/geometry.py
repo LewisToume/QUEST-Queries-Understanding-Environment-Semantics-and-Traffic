@@ -150,6 +150,7 @@ class GeometryAwareBEVLift(nn.Module):
         ego_state: torch.Tensor,
         image_size: tuple[int, int],
         return_diagnostics: bool = False,
+        use_ego_state: bool = True,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if camera_features.ndim != 5:
             raise ValueError(
@@ -207,13 +208,16 @@ class GeometryAwareBEVLift(nn.Module):
         weights = weights / weights.sum(dim=(2, 3), keepdim=True).clamp_min(1e-6)
         lifted = (candidates * weights.unsqueeze(-1)).sum(dim=(2, 3))
 
-        ego = self.ego_mlp(ego_state.to(device=lifted.device, dtype=lifted.dtype))
         output = (
             lifted
             + self.bev_embedding.to(dtype=lifted.dtype).unsqueeze(0)
             + self.metric_position.to(dtype=lifted.dtype).unsqueeze(0)
-            + ego.unsqueeze(1)
         )
+        if use_ego_state:
+            ego = self.ego_mlp(
+                ego_state.to(device=lifted.device, dtype=lifted.dtype)
+            )
+            output = output + ego.unsqueeze(1)
         if not return_diagnostics:
             return output
         diagnostics = {

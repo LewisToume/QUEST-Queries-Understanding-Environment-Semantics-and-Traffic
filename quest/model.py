@@ -193,6 +193,7 @@ class QUESTModel(nn.Module):
         intrinsics: torch.Tensor | None = None,
         extrinsics: torch.Tensor | None = None,
         ego_state: torch.Tensor | None = None,
+        use_ego_state: bool = True,
     ) -> Dict[str, torch.Tensor | tuple[int, int]]:
         if images.ndim != 5:
             raise ValueError(
@@ -247,6 +248,7 @@ class QUESTModel(nn.Module):
             ego_state,
             image_size=(height, width),
             return_diagnostics=True,
+            use_ego_state=use_ego_state,
         )
         bev_tokens, bev_features = self.bev_encoder(lifted_tokens)
         return {

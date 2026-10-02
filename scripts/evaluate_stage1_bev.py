@@ -92,6 +92,7 @@ def predict_from_backbone_features(
         extrinsics,
         ego_state,
         image_size=image_size,
+        use_ego_state=False,
     )
     _, bev_features = model.bev_encoder(lifted_tokens)
     return auxiliary_head(bev_features)
@@ -154,6 +155,7 @@ def main() -> int:
                 batch["intrinsics"].to(device),
                 batch["extrinsics"].to(device),
                 batch["ego_state"].to(device),
+                use_ego_state=False,
             )
             predictions = auxiliary_head(encoded["bev_features"])
             camera_features = encoded["backbone_feature_maps"]
