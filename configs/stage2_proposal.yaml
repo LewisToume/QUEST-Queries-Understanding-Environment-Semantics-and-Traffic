@@ -1,0 +1,23 @@
+stage: proposal_pretrain
+train:
+  start_index: 0
+  num_samples: 500
+  epochs: 5
+  batch_size: 1
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  negative_loss_weight: 3.0
+  lambda_objectness: 2.0
+  lambda_offset: 1.0
+eval:
+  start_index: 500
+  num_samples: 100
+  batch_size: 1
+  top_k: [50, 100]
+  tolerance_cells: 1
+  objectness_thresholds: [0.3, 0.5, 0.7]
+  center_distance_thresholds_m: [1.5, 3.0]
+paths:
+  soft_labels_dir: data/soft_labels_navformer
+  bev_pretrain_checkpoint: checkpoints/quest_stage1_bev.pt
+  checkpoint_path: checkpoints/quest_stage2_proposal.pt
