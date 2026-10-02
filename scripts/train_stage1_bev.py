@@ -72,6 +72,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     lambda_class: float,
+    negative_loss_weight: float,
     epoch: int,
     epochs: int,
 ) -> dict[str, float]:
@@ -128,7 +129,10 @@ def train_one_epoch(
             model.geometry_lift.bev_w,
         )
         losses = compute_bev_pretraining_loss(
-            predictions, targets, lambda_class=lambda_class
+            predictions,
+            targets,
+            lambda_class=lambda_class,
+            negative_loss_weight=negative_loss_weight,
         )
         if not torch.isfinite(losses["total_loss"]):
             raise RuntimeError(
@@ -174,6 +178,7 @@ def train_one_epoch(
     )
     print(
         f"epoch={epoch}/{epochs} trained={trained_steps} skipped={skipped_steps} "
+        f"negative_loss_weight={negative_loss_weight:.6f} "
         + " ".join(f"avg_{name}={value:.6f}" for name, value in averages.items())
         + f" vehicle_target_count={int(totals['vehicle_target_count'])}"
         + f" pedestrian_target_count={int(totals['pedestrian_target_count'])}"
@@ -246,6 +251,7 @@ def main() -> int:
             optimizer,
             device,
             float(train_config["lambda_class"]),
+            float(train_config["negative_loss_weight"]),
             epoch,
             epochs,
         )

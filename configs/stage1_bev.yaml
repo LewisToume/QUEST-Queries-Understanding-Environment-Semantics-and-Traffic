@@ -7,10 +7,12 @@ train:
   lr: 1.0e-4
   weight_decay: 1.0e-4
   lambda_class: 1.0
+  negative_loss_weight: 3.0
 eval:
   start_index: 500
   num_samples: 100
   foreground_threshold: 0.5
+  foreground_thresholds: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
   top_k: [50, 100]
   tolerance_cells: 1
 paths:

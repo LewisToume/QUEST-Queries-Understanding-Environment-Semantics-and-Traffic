@@ -163,7 +163,10 @@ def compute_bev_pretraining_loss(
     predictions: Mapping[str, torch.Tensor],
     targets: Mapping[str, torch.Tensor],
     lambda_class: float = 1.0,
+    negative_loss_weight: float = 3.0,
 ) -> dict[str, torch.Tensor]:
+    if not math.isfinite(negative_loss_weight) or negative_loss_weight < 0:
+        raise ValueError("negative_loss_weight must be finite and non-negative")
     foreground_logits = predictions["foreground_logits"]
     class_logits = predictions["class_logits"]
     foreground_target = targets["foreground_target"].to(foreground_logits.dtype)
@@ -206,7 +209,7 @@ def compute_bev_pretraining_loss(
         )
     positive_loss = torch.stack(positive_losses).mean()
     negative_loss = torch.stack(negative_losses).mean()
-    foreground_loss = positive_loss + negative_loss
+    foreground_loss = positive_loss + negative_loss_weight * negative_loss
     if positive_mask.any():
         class_loss = F.cross_entropy(
             class_logits[positive_mask], targets["class_target"][positive_mask]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -131,11 +132,26 @@ def main() -> int:
     checkpoint = load_checkpoint(checkpoint_path, device)
     epoch = load_bev_pretrain_checkpoint(model, checkpoint, auxiliary_head)
     threshold = float(eval_config["foreground_threshold"])
+    sweep_thresholds = tuple(sorted(
+        {threshold} | {
+            float(value) for value in eval_config["foreground_thresholds"]
+        }
+    ))
+    if any(
+        not math.isfinite(value) or value < 0 or value > 1
+        for value in sweep_thresholds
+    ):
+        raise ValueError("foreground thresholds must be finite and within [0, 1]")
     tolerance = int(eval_config["tolerance_cells"])
     top_ks = [int(value) for value in eval_config["top_k"]]
-    counts = {"true_positive": 0, "false_positive": 0, "false_negative": 0}
+    sweep_counts = {
+        value: {"true_positive": 0, "false_positive": 0, "false_negative": 0}
+        for value in sweep_thresholds
+    }
     topk_hits = {value: 0 for value in top_ks}
     topk_targets = {value: 0 for value in top_ks}
+    exact_topk_hits = {value: 0 for value in top_ks}
+    exact_topk_targets = {value: 0 for value in top_ks}
     class_correct = torch.zeros(2, dtype=torch.long)
     class_total = torch.zeros(2, dtype=torch.long)
     dependency_change_sums = {"zero": 0.0, "shuffled": 0.0}
@@ -209,13 +225,14 @@ def main() -> int:
                 model.geometry_lift.bev_h,
                 model.geometry_lift.bev_w,
             )
-            item_counts = foreground_counts(
-                predictions["foreground_logits"],
-                targets["positive_mask"],
-                threshold,
-            )
-            for key, value in item_counts.items():
-                counts[key] += value
+            for sweep_threshold in sweep_thresholds:
+                item_counts = foreground_counts(
+                    predictions["foreground_logits"],
+                    targets["positive_mask"],
+                    sweep_threshold,
+                )
+                for key, value in item_counts.items():
+                    sweep_counts[sweep_threshold][key] += value
             correct, total = class_accuracy_counts(predictions, targets, threshold)
             class_correct += correct.cpu()
             class_total += total.cpu()
@@ -228,7 +245,16 @@ def main() -> int:
                 )
                 topk_hits[top_k] += hits
                 topk_targets[top_k] += target_count
+                exact_hits, exact_target_count = topk_center_hits(
+                    predictions["foreground_logits"],
+                    targets["positive_mask"],
+                    top_k,
+                    0,
+                )
+                exact_topk_hits[top_k] += exact_hits
+                exact_topk_targets[top_k] += exact_target_count
             evaluated += int(camera_features.shape[0])
+    counts = sweep_counts[threshold]
     precision = ratio(
         counts["true_positive"], counts["true_positive"] + counts["false_positive"]
     )
@@ -251,6 +277,30 @@ def main() -> int:
     print(f"foreground_precision={precision:.6f}")
     print(f"foreground_recall={recall:.6f}")
     print(f"foreground_f1={f1:.6f}")
+    for sweep_threshold in sweep_thresholds:
+        sweep = sweep_counts[sweep_threshold]
+        sweep_precision = ratio(
+            sweep["true_positive"],
+            sweep["true_positive"] + sweep["false_positive"],
+        )
+        sweep_recall = ratio(
+            sweep["true_positive"],
+            sweep["true_positive"] + sweep["false_negative"],
+        )
+        sweep_f1 = (
+            2.0 * sweep_precision * sweep_recall / (sweep_precision + sweep_recall)
+            if sweep_precision + sweep_recall else 0.0
+        )
+        predicted_cells_per_frame = ratio(
+            sweep["true_positive"] + sweep["false_positive"], evaluated
+        )
+        print(
+            f"threshold={sweep_threshold:.2f} "
+            f"precision={sweep_precision:.6f} "
+            f"recall={sweep_recall:.6f} "
+            f"f1={sweep_f1:.6f} "
+            f"predicted_foreground_cells_per_frame={predicted_cells_per_frame:.6f}"
+        )
     print(
         "real_vs_zero_foreground_logit_change="
         f"{dependency_change_sums['zero'] / dependency_logit_count:.6f}"
@@ -263,6 +313,10 @@ def main() -> int:
         print(
             f"top_{top_k}_bev_center_recall="
             f"{ratio(topk_hits[top_k], topk_targets[top_k]):.6f}"
+        )
+        print(
+            f"top_{top_k}_exact_bev_center_recall="
+            f"{ratio(exact_topk_hits[top_k], exact_topk_targets[top_k]):.6f}"
         )
     for class_id, name in enumerate(("vehicle", "pedestrian")):
         print(

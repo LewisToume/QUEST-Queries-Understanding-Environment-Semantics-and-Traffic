@@ -65,6 +65,19 @@ class BEVPretrainingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(losses["total_loss"]))
         self.assertAlmostEqual(float(losses["positive_loss"]), 0.693147, places=5)
         self.assertAlmostEqual(float(losses["negative_loss"]), 0.693147, places=5)
+        self.assertAlmostEqual(
+            float(losses["foreground_loss"]),
+            float(losses["positive_loss"] + 3.0 * losses["negative_loss"]),
+            places=5,
+        )
+        unweighted = compute_bev_pretraining_loss(
+            predictions, target, negative_loss_weight=1.0
+        )
+        self.assertAlmostEqual(
+            float(unweighted["foreground_loss"]),
+            float(unweighted["positive_loss"] + unweighted["negative_loss"]),
+            places=5,
+        )
         empty = dict(target)
         empty["foreground_target"] = torch.zeros(1, 2, 2)
         empty["class_target"] = torch.full((1, 2, 2), -1)
