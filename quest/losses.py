@@ -175,6 +175,7 @@ def _match_agent_layer(
         gt_labels = target["labels"][batch_index][valid].long()
         gt_boxes = target["boxes_metric"][batch_index][valid].to(boxes.dtype)
         gt_velocity = target["velocity_mps"][batch_index][valid].to(velocity.dtype)
+        gt_scores = target["scores"][batch_index][valid].to(boxes.dtype)
         support = target["class_support_mask"][batch_index].bool()
         cls_targets = torch.full(
             (pred_cls.shape[0],), background, dtype=torch.long, device=pred_cls.device
@@ -211,25 +212,38 @@ def _match_agent_layer(
                 + float(settings["match_yaw_weight"]) * yaw_cost
             )
             cls_targets[pred_indices] = gt_labels[gt_indices]
+            matched_scores = gt_scores[gt_indices].clamp(0.0, 1.0).clamp_min(1e-3)
+
+            def reduce_regression(per_match: torch.Tensor) -> torch.Tensor:
+                if settings.get("teacher_confidence_weighting", False):
+                    return (per_match * matched_scores).sum() / matched_scores.sum()
+                return per_match.mean()
+
             component_losses["center"].append(
-                F.smooth_l1_loss(
+                reduce_regression(F.smooth_l1_loss(
                     pred_center[pred_indices] / center_scale,
                     gt_center[gt_indices] / center_scale,
-                )
+                    reduction="none",
+                ).mean(dim=-1))
             )
             component_losses["size"].append(
-                F.smooth_l1_loss(
+                reduce_regression(F.smooth_l1_loss(
                     pred_size[pred_indices] / size_scale,
                     gt_size[gt_indices] / size_scale,
-                )
+                    reduction="none",
+                ).mean(dim=-1))
             )
             component_losses["yaw"].append(
-                (1.0 - (pred_yaw[pred_indices] * gt_yaw[gt_indices]).sum(-1)).mean()
+                reduce_regression(
+                    1.0 - (pred_yaw[pred_indices] * gt_yaw[gt_indices]).sum(-1)
+                )
             )
             component_losses["velocity"].append(
-                F.smooth_l1_loss(
-                    pred_velocity[pred_indices], gt_velocity[gt_indices]
-                )
+                reduce_regression(F.smooth_l1_loss(
+                    pred_velocity[pred_indices],
+                    gt_velocity[gt_indices],
+                    reduction="none",
+                ).mean(dim=-1))
             )
         else:
             for key in ("center", "size", "yaw", "velocity"):
@@ -384,6 +398,54 @@ def compute_agent_loss(
         "agent_velocity_loss": accumulated["velocity"],
         "decoder_agent_loss": decoder_loss,
         "agent_loss": proposal_loss + decoder_loss,
+    }
+
+
+def compute_agent_decoder_loss(
+    predictions: Mapping[str, torch.Tensor],
+    agent_gt: Mapping[str, torch.Tensor],
+    settings: Mapping[str, Any],
+) -> dict[str, torch.Tensor]:
+    """Match and supervise every Agent decoder layer without proposal BCE."""
+
+    cls_layers = predictions["agent_cls_logits_layers"]
+    box_layers = predictions["agent_boxes_layers"]
+    velocity_layers = predictions["agent_velocity_layers"]
+    weights = tuple(float(value) for value in settings["aux_layer_weights"])
+    if len(weights) != cls_layers.shape[0] or sum(weights) <= 0:
+        raise ValueError("positive aux_layer_weights must match Agent decoder layers")
+    if box_layers.shape[:2] != cls_layers.shape[:2] or velocity_layers.shape[:2] != cls_layers.shape[:2]:
+        raise ValueError("Agent decoder layer shapes do not match")
+
+    accumulated = {
+        key: cls_layers.sum() * 0.0
+        for key in ("cls", "center", "size", "yaw", "velocity")
+    }
+    for layer_index, layer_weight in enumerate(weights):
+        layer_losses = _match_agent_layer(
+            cls_layers[layer_index],
+            box_layers[layer_index],
+            velocity_layers[layer_index],
+            agent_gt,
+            settings,
+        )
+        for key in accumulated:
+            accumulated[key] = accumulated[key] + layer_weight * layer_losses[key]
+    accumulated = {key: value / sum(weights) for key, value in accumulated.items()}
+    total = (
+        float(settings["lambda_cls"]) * accumulated["cls"]
+        + float(settings["lambda_center"]) * accumulated["center"]
+        + float(settings["lambda_size"]) * accumulated["size"]
+        + float(settings["lambda_yaw"]) * accumulated["yaw"]
+        + float(settings["lambda_velocity"]) * accumulated["velocity"]
+    )
+    return {
+        "agent_cls_loss": accumulated["cls"],
+        "agent_center_loss": accumulated["center"],
+        "agent_size_loss": accumulated["size"],
+        "agent_yaw_loss": accumulated["yaw"],
+        "agent_velocity_loss": accumulated["velocity"],
+        "decoder_agent_loss": total,
     }
 
 

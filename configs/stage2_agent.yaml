@@ -1,0 +1,43 @@
+stage: agent_end_to_end
+train:
+  start_index: 0
+  num_samples: 500
+  epochs: 5
+  batch_size: 1
+  bev_lr: 2.0e-5
+  agent_lr: 1.0e-4
+  weight_decay: 1.0e-4
+  gradient_clip_norm: 1.0
+  negative_loss_weight: 3.0
+  background_weight: 0.5
+  lambda_proposal_objectness: 2.0
+  lambda_proposal_offset: 1.0
+agent_loss:
+  xy_range: [-50.0, 50.0]
+  z_range: [-5.0, 5.0]
+  size_norm: [20.0, 10.0, 8.0]
+  match_cls_weight: 1.0
+  match_center_weight: 5.0
+  match_size_weight: 2.0
+  match_yaw_weight: 1.0
+  lambda_cls: 1.0
+  lambda_center: 5.0
+  lambda_size: 2.0
+  lambda_yaw: 1.0
+  lambda_velocity: 0.5
+  aux_layer_weights: [0.25, 0.5, 0.75, 1.0]
+  teacher_confidence_weighting: true
+eval:
+  start_index: 500
+  num_samples: 100
+  batch_size: 1
+  top_k: [50, 100]
+  tolerance_cells: 1
+  proposal_center_distances_m: [1.5, 3.0]
+  confidence_threshold: 0.25
+  match_distance_m: 2.0
+  center_distances_m: [1.5, 3.0]
+paths:
+  soft_labels_dir: data/soft_labels_navformer
+  bev_pretrain_checkpoint: checkpoints/quest_stage1_bev.pt
+  checkpoint_path: checkpoints/quest_stage2_agent.pt
