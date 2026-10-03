@@ -69,6 +69,7 @@ class OpenSceneMetadataDataset(Dataset):
         size_norm: tuple[float, float, float] = (20.0, 10.0, 8.0),
         velocity_norm: float = 20.0,
         soft_labels_root: str | Path | None = None,
+        source_indices: Sequence[int] | None = None,
     ) -> None:
         self.metadata_path = Path(metadata_path)
         self.camera_root = Path(camera_root)
@@ -90,14 +91,23 @@ class OpenSceneMetadataDataset(Dataset):
             raise ValueError(f"OpenScene metadata has no infos list: {self.metadata_path}")
 
         self.infos: list[dict[str, Any]] = []
-        for info in infos:
-            if self._is_complete_frame(info):
+        if source_indices is not None:
+            for source_index in source_indices:
+                if source_index < 0 or source_index >= len(infos):
+                    raise IndexError(f"OpenScene metadata index out of range: {source_index}")
+                info = infos[source_index]
+                if not self._is_complete_frame(info):
+                    raise ValueError(f"incomplete OpenScene metadata frame at index {source_index}")
                 self.infos.append(info)
-                if max_samples > 0 and len(self.infos) >= max_samples:
-                    break
+        else:
+            for info in infos:
+                if self._is_complete_frame(info):
+                    self.infos.append(info)
+                    if max_samples > 0 and len(self.infos) >= max_samples:
+                        break
         if not self.infos:
             raise RuntimeError(f"no complete 8-camera frames found in {self.metadata_path}")
-        if max_samples > 0 and len(self.infos) < max_samples:
+        if source_indices is None and max_samples > 0 and len(self.infos) < max_samples:
             raise RuntimeError(
                 f"requested {max_samples} complete frames, found {len(self.infos)}"
             )

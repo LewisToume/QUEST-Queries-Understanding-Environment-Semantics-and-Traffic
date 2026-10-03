@@ -1,0 +1,39 @@
+stage: map_hybrid_distillation
+train:
+  start_index: 0
+  num_samples: 500
+  epochs: 5
+  batch_size: 1
+  bev_lr: 1.0e-5
+  map_lr: 1.0e-4
+  agent_lr: 3.0e-5
+  weight_decay: 1.0e-4
+  gradient_clip_norm: 1.0
+  missing_teacher: error
+map:
+  class_names: [centerline, ped_crossing, road_boundary]
+  map_query_count: 50
+  num_points: 20
+  map_cls_cost_weight: 2.0
+  map_point_cost_weight: 5.0
+  map_cls_loss_weight: 2.0
+  map_point_loss_weight: 5.0
+  map_direction_loss_weight: 0.005
+  background_weight: 0.5
+loss_weights:
+  lambda_map_gt: 1.0
+  lambda_map_kd: 1.0
+  lambda_agent: 0.5
+eval:
+  start_index: 500
+  num_samples: 100
+  batch_size: 1
+  confidence_threshold: 0.25
+  point_error_thresholds_m: [0.5, 1.0, 1.5]
+paths:
+  stage2_checkpoint: checkpoints/quest_stage2_agent_5000_e5.pt
+  checkpoint_path: checkpoints/quest_stage3_map.pt
+  agent_soft_labels_dir: data/soft_labels_navformer
+  vector_gt_dir: data/vector_map_gt
+  map_teacher_dir: data/navformer_map_soft
+  teacher_audit_path: data/navformer_map_audit.json
