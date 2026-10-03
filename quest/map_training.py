@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,9 @@ from scipy.optimize import linear_sum_assignment
 from .agent_training import compute_stage2_agent_loss, load_agent_stage2_checkpoint
 from .map_teacher import TEACHER_MAP_SCHEMA_VERSION, MapRasterDistillHead, soft_map_distillation_loss
 from .model import QUEST_ARCHITECTURE_VERSION
-from .vector_map_labels import COORDINATE_FRAME, MAP_CLASS_NAMES, VECTOR_GT_SCHEMA_VERSION
+from .vector_map_labels import (
+    COORDINATE_FRAME, MAP_CLASS_NAMES, VECTOR_GT_SCHEMA_VERSION, VECTOR_SEMANTICS_VERSION,
+)
 
 
 STAGE3_NAME = "map_hybrid_distillation"
@@ -23,9 +26,25 @@ STAGE3_MODULES = (
 
 
 def validate_vector_record(record: Mapping[str, Any], token: str, sample_index: int,
-                           xy_range: tuple[float, float, float, float]) -> None:
+                           xy_range: tuple[float, float, float, float], *,
+                           expected_min_length_m: float | None = None,
+                           expected_map_version: str | None = None) -> None:
     if record.get("schema_version") != VECTOR_GT_SCHEMA_VERSION:
-        raise ValueError("nuPlan vector GT schema mismatch")
+        raise ValueError("nuPlan vector GT schema mismatch; regenerate old vector labels")
+    if record.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION:
+        raise ValueError("nuPlan vector GT geometry semantics mismatch; regenerate vector labels")
+    if record.get("num_points") != 20:
+        raise ValueError("nuPlan vector GT num_points must be 20")
+    minimum = record.get("min_length_m")
+    if not isinstance(minimum, (float, int)) or not math.isfinite(minimum) or minimum < 0:
+        raise ValueError("nuPlan vector GT min_length_m is invalid")
+    version = record.get("map_version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("nuPlan vector GT map_version is missing")
+    if expected_min_length_m is not None and minimum != expected_min_length_m:
+        raise ValueError("nuPlan vector GT min_length_m differs from this export")
+    if expected_map_version is not None and version != expected_map_version:
+        raise ValueError("nuPlan vector GT map_version differs from this export")
     if str(record.get("token")) != token or record.get("sample_index") != sample_index:
         raise ValueError(f"nuPlan vector GT index/token mismatch for {token}")
     if record.get("coordinate_frame") != COORDINATE_FRAME:
@@ -247,7 +266,8 @@ def mixed_stage3_loss(model: nn.Module, predictions: Mapping[str, torch.Tensor],
 
 def save_stage3_checkpoint(path: str | Path, model: nn.Module, raster_head: MapRasterDistillHead,
                            optimizer: torch.optim.Optimizer, epoch: int, config: Mapping[str, Any],
-                           teacher_metadata: Mapping[str, Any]) -> None:
+                           teacher_metadata: Mapping[str, Any],
+                           vector_metadata: Mapping[str, Any]) -> None:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -258,6 +278,7 @@ def save_stage3_checkpoint(path: str | Path, model: nn.Module, raster_head: MapR
         "teacher_channel_metadata": dict(teacher_metadata),
         "teacher_channel_support_mask": list(teacher_metadata["teacher_channel_support_mask"]),
         "vector_gt_schema_version": VECTOR_GT_SCHEMA_VERSION,
+        "vector_gt_provenance": dict(vector_metadata),
         "teacher_schema_version": teacher_metadata["teacher_schema_version"],
         "optimizer_state_dict": optimizer.state_dict(),
         "map_raster_distill_head_state_dict": raster_head.state_dict(),
@@ -284,6 +305,12 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead,
         raise ValueError("Stage 3 checkpoint map taxonomy mismatch")
     if checkpoint.get("vector_gt_schema_version") != VECTOR_GT_SCHEMA_VERSION:
         raise ValueError("Stage 3 checkpoint vector GT schema mismatch")
+    provenance = checkpoint.get("vector_gt_provenance")
+    if not isinstance(provenance, Mapping) or provenance.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION:
+        raise ValueError("Stage 3 checkpoint vector GT semantics mismatch")
+    if (provenance.get("num_points") != 20 or not provenance.get("map_version")
+            or not isinstance(provenance.get("min_length_m"), (float, int))):
+        raise ValueError("Stage 3 checkpoint vector GT provenance is incomplete")
     if checkpoint.get("teacher_schema_version") != TEACHER_MAP_SCHEMA_VERSION:
         raise ValueError("Stage 3 checkpoint teacher schema mismatch")
     support = checkpoint.get("trained_class_support_mask")

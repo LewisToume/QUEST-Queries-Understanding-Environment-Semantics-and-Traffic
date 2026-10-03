@@ -21,7 +21,7 @@ from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3, load_teacher_audit
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES
-from scripts.train_stage3_map import build_dataset, resolve
+from scripts.train_stage3_map import build_dataset, preflight_vectors, resolve
 
 
 def ratio(numerator: float, denominator: float) -> float:
@@ -43,11 +43,14 @@ def main() -> None:
     start = args.start if args.start is not None else int(config["eval"]["start_index"])
     count = args.count if args.count is not None else int(config["eval"]["num_samples"])
     dataset = build_dataset(model, config, stage1, audit, start, count)
+    vector_provenance = preflight_vectors(dataset, int(config["map"]["map_query_count"]))
     loader = DataLoader(dataset, batch_size=int(config["eval"]["batch_size"]),
                         shuffle=False, num_workers=0, collate_fn=collate_stage3)
     raster_head = MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
     checkpoint_path = resolve(args.checkpoint or config["paths"]["checkpoint_path"])
     checkpoint = load_checkpoint_cpu(checkpoint_path)
+    if checkpoint.get("vector_gt_provenance") != vector_provenance:
+        raise ValueError("evaluation vector GT export provenance differs from Stage 3 checkpoint")
     if tuple(checkpoint.get("map_class_names", ())) != MAP_CLASS_NAMES:
         raise ValueError("checkpoint map taxonomy differs from direct GT")
     if checkpoint.get("teacher_channel_metadata", {}).get("teacher_checkpoint") != audit["teacher_checkpoint"]:

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from typing import Any
 
 import numpy as np
 import torch
 
 
-VECTOR_GT_SCHEMA_VERSION = 1
+VECTOR_GT_SCHEMA_VERSION = 2
+VECTOR_SEMANTICS_VERSION = "polygon_boundary_before_roi_road_union_v2"
 MAP_CLASS_NAMES = ("centerline", "ped_crossing", "road_boundary")
 COORDINATE_FRAME = "openscene_lidar_xy"
 
@@ -42,10 +44,6 @@ def _line_parts(geometry: Any):
         return
     if geometry.geom_type in ("LineString", "LinearRing"):
         yield geometry
-    elif geometry.geom_type == "Polygon":
-        yield geometry.exterior
-        for interior in geometry.interiors:
-            yield interior
     elif hasattr(geometry, "geoms"):
         for part in geometry.geoms:
             yield from _line_parts(part)
@@ -84,7 +82,8 @@ def process_geometry(
     if geometry is None or geometry.is_empty or not geometry.is_valid:
         return []
     local = global_to_local_geometry(geometry, lidar2global)
-    clipped = local.intersection(box(*xy_range))
+    boundary_or_line = local.boundary if local.geom_type in ("Polygon", "MultiPolygon") else local
+    clipped = boundary_or_line.intersection(box(*xy_range))
     if clipped.is_empty or not clipped.is_valid:
         return []
     results = []
@@ -97,6 +96,23 @@ def process_geometry(
         closed = bool(line.is_ring)
         results.append((resample_polyline(coords, num_points, closed), closed, float(line.length)))
     return results
+
+
+def process_road_area_polygons(
+    polygons: list[Any], lidar2global: np.ndarray,
+    xy_range: tuple[float, float, float, float], num_points: int,
+    min_length_m: float,
+) -> list[tuple[np.ndarray, bool, float]]:
+    from shapely.ops import unary_union
+
+    if not polygons:
+        return []
+    if any(polygon is None or polygon.is_empty or not polygon.is_valid
+           or polygon.geom_type not in ("Polygon", "MultiPolygon") for polygon in polygons):
+        raise ValueError("road-area map object has no valid polygon")
+    return process_geometry(
+        unary_union(polygons), lidar2global, xy_range, num_points, min_length_m
+    )
 
 
 def _baseline_geometry(map_object: Any) -> Any:
@@ -117,44 +133,72 @@ def _baseline_geometry(map_object: Any) -> Any:
 def extract_vector_map(
     info: Mapping[str, Any], map_api: Any, sample_index: int,
     xy_range: tuple[float, float, float, float], num_points: int = 20,
-    min_length_m: float = 1.0,
+    min_length_m: float = 1.0, *, map_version: str,
 ) -> dict[str, Any]:
     from nuplan.common.maps.maps_datatypes import SemanticMapLayer
     from nuplan.common.actor_state.state_representation import Point2D
 
     if num_points != 20:
         raise ValueError("QUEST MapHead requires exactly 20 points")
+    if not map_version or not math.isfinite(min_length_m) or min_length_m < 0:
+        raise ValueError("map_version is required and min_length_m must be nonnegative")
     matrix = require_lidar2global(info)
     layer_names = {
         0: ("LANE", "LANE_CONNECTOR"),
         1: ("CROSSWALK",),
         2: ("ROADBLOCK", "INTERSECTION", "CARPARK_AREA"),
     }
-    layers = []
+    available_layers = {}
     for names in layer_names.values():
         for name in names:
             layer = getattr(SemanticMapLayer, name, None)
             if layer is None:
+                if name == "CARPARK_AREA":
+                    continue
                 raise RuntimeError(f"nuPlan SemanticMapLayer.{name} is unavailable")
-            layers.append(layer)
+            available_layers[name] = layer
     x0, y0, x1, y1 = xy_range
     radius = max(abs(x0), abs(x1), abs(y0), abs(y1)) * 2**0.5 + 10.0
     origin = matrix[:2, 3]
-    objects = map_api.get_proximal_map_objects(Point2D(float(origin[0]), float(origin[1])), radius, layers)
+    objects = map_api.get_proximal_map_objects(
+        Point2D(float(origin[0]), float(origin[1])), radius, list(available_layers.values())
+    )
     classes, points, closed_flags, lengths = [], [], [], []
-    for class_id, names in layer_names.items():
-        for name in names:
-            for map_object in objects.get(getattr(SemanticMapLayer, name), []):
-                geometry = _baseline_geometry(map_object) if class_id == 0 else getattr(map_object, "polygon", None)
+    def add_geometry(class_id: int, geometry: Any) -> None:
+        for sampled, closed, length in process_geometry(
+            geometry, matrix, xy_range, num_points, min_length_m
+        ):
+            classes.append(class_id)
+            points.append(sampled)
+            closed_flags.append(closed)
+            lengths.append(length)
+
+    for class_id in (0, 1):
+        for name in layer_names[class_id]:
+            for map_object in objects.get(available_layers[name], []):
+                geometry = (_baseline_geometry(map_object) if class_id == 0
+                            else getattr(map_object, "polygon", None))
                 if geometry is None:
                     raise ValueError(f"nuPlan {name} object has no usable geometry")
-                for sampled, closed, length in process_geometry(
-                    geometry, matrix, xy_range, num_points, min_length_m
-                ):
-                    classes.append(class_id)
-                    points.append(sampled)
-                    closed_flags.append(closed)
-                    lengths.append(length)
+                if class_id == 1 and geometry.geom_type not in ("Polygon", "MultiPolygon"):
+                    raise ValueError(f"nuPlan {name} object is not a crosswalk polygon")
+                add_geometry(class_id, geometry)
+    road_polygons = []
+    for name in layer_names[2]:
+        if name not in available_layers:
+            continue
+        for map_object in objects.get(available_layers[name], []):
+            polygon = getattr(map_object, "polygon", None)
+            if polygon is None:
+                raise ValueError(f"nuPlan {name} object has no valid polygon")
+            road_polygons.append(polygon)
+    for sampled, closed, length in process_road_area_polygons(
+        road_polygons, matrix, xy_range, num_points, min_length_m
+    ):
+        classes.append(2)
+        points.append(sampled)
+        closed_flags.append(closed)
+        lengths.append(length)
     return {
         "sample_index": int(sample_index), "token": str(info["token"]),
         "class_ids": torch.tensor(classes, dtype=torch.int64),
@@ -163,5 +207,8 @@ def extract_vector_map(
         "length_m": torch.tensor(lengths, dtype=torch.float32),
         "xy_range_m": tuple(float(v) for v in xy_range),
         "coordinate_frame": COORDINATE_FRAME,
+        "num_points": int(num_points), "min_length_m": float(min_length_m),
+        "map_version": str(map_version),
+        "vector_semantics_version": VECTOR_SEMANTICS_VERSION,
         "schema_version": VECTOR_GT_SCHEMA_VERSION,
     }

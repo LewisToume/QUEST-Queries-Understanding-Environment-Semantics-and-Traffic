@@ -5,7 +5,9 @@ import torch
 
 from quest.map_teacher import align_teacher_map_to_quest_bev, soft_map_distillation_loss
 from quest.map_training import equivalent_point_orders, match_vector_queries, validate_vector_record
-from quest.vector_map_labels import COORDINATE_FRAME, resample_polyline
+from quest.vector_map_labels import (
+    COORDINATE_FRAME, VECTOR_GT_SCHEMA_VERSION, VECTOR_SEMANTICS_VERSION, resample_polyline,
+)
 
 
 class Stage3MapTest(unittest.TestCase):
@@ -54,14 +56,29 @@ class Stage3MapTest(unittest.TestCase):
         torch.testing.assert_close(loss, torch.tensor(0.69314718), atol=1e-6, rtol=0)
 
     def test_vector_token_index_validation(self):
-        record = {"schema_version": 1, "sample_index": 4, "token": "token-4",
+        record = {"schema_version": VECTOR_GT_SCHEMA_VERSION, "sample_index": 4, "token": "token-4",
                   "coordinate_frame": COORDINATE_FRAME, "xy_range_m": (-50, -50, 50, 50),
+                  "num_points": 20, "min_length_m": 1.0, "map_version": "test-map",
+                  "vector_semantics_version": VECTOR_SEMANTICS_VERSION,
                   "class_ids": torch.empty(0, dtype=torch.long),
                   "points_xy_m": torch.empty(0, 20, 2),
                   "is_closed": torch.empty(0, dtype=torch.bool), "length_m": torch.empty(0)}
         validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50))
         with self.assertRaisesRegex(ValueError, "index/token mismatch"):
             validate_vector_record(record, "token-4", 5, (-50, -50, 50, 50))
+        with self.assertRaisesRegex(ValueError, "map_version differs"):
+            validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50),
+                                   expected_map_version="another-map")
+        with self.assertRaisesRegex(ValueError, "min_length_m differs"):
+            validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50),
+                                   expected_min_length_m=2.0)
+        record["vector_semantics_version"] = "old_polygon_crop"
+        with self.assertRaisesRegex(ValueError, "geometry semantics mismatch"):
+            validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50))
+        record["vector_semantics_version"] = VECTOR_SEMANTICS_VERSION
+        record["schema_version"] = 1
+        with self.assertRaisesRegex(ValueError, "regenerate old vector labels"):
+            validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50))
 
 
 if __name__ == "__main__":

@@ -44,15 +44,22 @@ map with `origin=lower`, ego at `(0,0)` and labeled +X/+Y axes.
 
 Vector GT, one `<token>.pt` per original metadata frame:
 
-- `sample_index`, `token`, `schema_version=1`, `coordinate_frame=openscene_lidar_xy`
+- `sample_index`, `token`, `schema_version=2`, `coordinate_frame=openscene_lidar_xy`
 - `class_ids: int64[N]`, `points_xy_m: float32[N,20,2]`
 - `is_closed: bool[N]`, `length_m: float32[N]`, `xy_range_m`
+- `num_points`, `min_length_m`, `map_version`, `vector_semantics_version`
 
 Class 0 is LANE/LANE_CONNECTOR baseline centerline; class 1 is CROSSWALK
 contour; class 2 is ROADBLOCK/INTERSECTION/CARPARK_AREA boundary. Every
 geometry is transformed to local meters, clipped to the ROI, split into
 connected pieces, filtered for invalid/short geometry, and resampled by arc
-length. Open lines include both ends. Closed rings use 20 unique points.
+length. For polygons, the **physical boundary is extracted before line
+clipping**, so ROI edges are never created as GT. ROADBLOCK, INTERSECTION and
+available CARPARK_AREA polygons are combined with `unary_union` before boundary
+extraction, removing internal seams. Crosswalk polygons stay separate; clipped
+fragments are open polylines, while complete uncut rings stay closed. Centerline
+baseline paths retain direct line clipping. Open lines include both ends.
+Closed rings use 20 unique points.
 
 Teacher raster, also one `<token>.pt` per original frame:
 
@@ -84,8 +91,8 @@ when overriding `--metadata`, point both exporters and the audit to that same
 file. An older Agent export made from a different metadata ordering will fail
 the token join instead of training against the wrong frame.
 
-Exports are resumable. An existing vector file is schema/index/token/ROI
-validated and skipped if valid; an invalid file is an error unless
+Exports are resumable. An existing vector file is schema/index/token/ROI and
+export-provenance validated and skipped if valid; an invalid file is an error unless
 `--overwrite` is explicit. Teacher export builds each target scene's timeline
 from its first frame. On a partial resume it **still runs inference** through
 warm-up and already-exported frames to preserve tracking/BEV memory, but only
@@ -94,13 +101,18 @@ index/token, score semantics, checkpoint/config identity and scene-history
 digest before use. Old schema files need explicit regeneration with
 `--overwrite`; starting mid-scene does not silently create a new temporal
 initialization.
+The changed polygon semantics require vector schema 2; old vector GT files
+must be regenerated. Training preflight rejects mixed export provenance and
+the Stage 3 checkpoint records it for held-out evaluation. Re-run the map
+teacher audit after regenerating GT; a verified audit made against the old
+geometry cannot authorize KD with the new vector records.
 
 ## Audit gate and known external dependencies
 
 The map teacher must have a real `seg_head` in its config **and** checkpoint.
 The exporter does not substitute an Agent-only checkpoint. Channel IDs such as
 `lane_score_0` are intentionally opaque. The audit reports bounded score
-activity, IoU and correlation against
+activity, exact and one-cell-dilated IoU, and correlation against
 temporary vector-GT masks. Its JSON starts with `verified=false`, all support
 flags false and no semantic mappings. Use
 `scripts/visualize_navformer_map_audit.py` **before training** to inspect GT

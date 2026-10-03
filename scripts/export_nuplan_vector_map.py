@@ -50,9 +50,13 @@ def main() -> None:
         if path.exists() and not args.overwrite:
             try:
                 existing = load_record(path)
-                validate_vector_record(existing, str(info["token"]), sample_index, quest_range)
-                if existing["points_xy_m"].shape[1] != args.num_points:
-                    raise ValueError("existing vector point count differs from --num-points")
+                validate_vector_record(
+                    existing, str(info["token"]), sample_index, quest_range,
+                    expected_min_length_m=args.min_length_m,
+                    expected_map_version=args.map_version,
+                )
+                if existing["num_points"] != args.num_points:
+                    raise ValueError("existing vector num_points differs from --num-points")
             except Exception as error:
                 raise ValueError(f"existing vector GT is invalid: {path}: {error}; use --overwrite to regenerate") from error
             print(f"index={sample_index} token={info['token']} skipped_existing=true")
@@ -64,7 +68,7 @@ def main() -> None:
             maps[location] = factory.build_map_from_name(location)
         record = extract_vector_map(
             info, maps[location], sample_index, quest_range,
-            args.num_points, args.min_length_m,
+            args.num_points, args.min_length_m, map_version=args.map_version,
         )
         temporary = path.with_suffix(".pt.tmp")
         torch.save(record, temporary)

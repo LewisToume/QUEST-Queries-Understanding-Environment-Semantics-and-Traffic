@@ -49,16 +49,27 @@ def build_dataset(model: QUESTModel, config: dict, stage1: dict, audit: dict,
     )
 
 
-def preflight_vectors(dataset: Stage3JoinedDataset, query_count: int) -> None:
+def preflight_vectors(dataset: Stage3JoinedDataset, query_count: int) -> dict:
+    provenance = None
     for index, info in zip(dataset.source_indices, dataset.images.infos):
         token = str(info["token"])
         record = load_record(dataset.vector_dir / f"{token}.pt")
         validate_vector_record(record, token, index, dataset.quest_range)
+        current = {key: record[key] for key in (
+            "num_points", "min_length_m", "map_version", "vector_semantics_version"
+        )}
+        if provenance is None:
+            provenance = current
+        elif current != provenance:
+            raise ValueError(f"mixed vector GT export provenance at index={index} token={token}")
         if len(record["class_ids"]) > query_count:
             raise ValueError(
                 f"map GT exceeds {query_count} queries at index={index} token={token}: "
                 f"instances={len(record['class_ids'])}; no GT truncation is allowed"
             )
+    if provenance is None:
+        raise ValueError("Stage 3 has no vector GT records")
+    return provenance
 
 
 def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead,
@@ -149,7 +160,7 @@ def main() -> None:
     if count <= 0 or epochs <= 0:
         raise ValueError("num-samples and epochs must be positive")
     dataset = build_dataset(model, config, stage1, audit, int(config["train"]["start_index"]), count)
-    preflight_vectors(dataset, int(config["map"]["map_query_count"]))
+    vector_provenance = preflight_vectors(dataset, int(config["map"]["map_query_count"]))
     loader = DataLoader(dataset, batch_size=int(config["train"]["batch_size"]),
                         shuffle=True, num_workers=0, collate_fn=collate_stage3)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -166,7 +177,9 @@ def main() -> None:
     for epoch in range(1, epochs + 1):
         train_one_epoch(model, raster_head, loader, optimizer, device, effective, audit, epoch)
         path = resolve(args.checkpoint or config["paths"]["checkpoint_path"])
-        save_stage3_checkpoint(path, model, raster_head, optimizer, epoch, effective, audit)
+        save_stage3_checkpoint(
+            path, model, raster_head, optimizer, epoch, effective, audit, vector_provenance
+        )
         print(f"checkpoint_saved={path}")
 
 

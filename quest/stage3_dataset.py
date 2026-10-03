@@ -11,7 +11,7 @@ from .map_teacher import align_teacher_map_to_quest_bev, validate_teacher_record
 from .map_teacher import TEACHER_SCORE_KIND
 from .map_training import validate_vector_record
 from .openscene_dataset import OpenSceneMetadataDataset
-from .vector_map_labels import MAP_CLASS_NAMES
+from .vector_map_labels import MAP_CLASS_NAMES, VECTOR_SEMANTICS_VERSION
 
 
 def load_record(path: Path) -> Mapping[str, Any]:
@@ -33,6 +33,13 @@ def load_teacher_audit(path: str | Path) -> dict[str, Any]:
         raise ValueError("teacher audit score semantics differ from Pansegformer mask scores")
     if audit.get("vector_map_classes") != list(MAP_CLASS_NAMES):
         raise ValueError("teacher audit was made for a different vector map taxonomy")
+    vector_provenance = audit.get("vector_gt_provenance")
+    if (not isinstance(vector_provenance, dict)
+            or vector_provenance.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION
+            or vector_provenance.get("num_points") != 20
+            or not vector_provenance.get("map_version")
+            or not isinstance(vector_provenance.get("min_length_m"), (float, int))):
+        raise ValueError("teacher audit was made for old or unknown vector GT geometry")
     names = audit.get("teacher_channel_names_or_ids", [])
     support = audit.get("teacher_channel_support_mask", [])
     weights = audit.get("teacher_channel_weights", [])
@@ -103,6 +110,9 @@ class Stage3JoinedDataset(Dataset):
             raise ValueError(f"Agent pseudo label index/token mismatch for {token}")
         vector = load_record(self.vector_dir / f"{token}.pt")
         validate_vector_record(vector, token, source_index, self.quest_range)
+        for key, expected in self.audit["vector_gt_provenance"].items():
+            if vector.get(key) != expected:
+                raise ValueError(f"vector GT {key} differs from audited labels for {token}")
         teacher = load_record(self.teacher_dir / f"{token}.pt")
         soft = validate_teacher_record(teacher, token, source_index)
         if list(teacher["teacher_channel_names_or_ids"]) != self.audit["teacher_channel_names_or_ids"]:
