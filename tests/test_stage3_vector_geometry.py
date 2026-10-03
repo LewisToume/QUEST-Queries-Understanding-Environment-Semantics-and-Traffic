@@ -1,7 +1,7 @@
 import unittest
 
 import numpy as np
-from shapely.geometry import box
+from shapely.geometry import Polygon, box
 
 from quest.vector_map_labels import process_geometry, process_road_area_polygons
 
@@ -36,6 +36,25 @@ class Stage3VectorGeometryTest(unittest.TestCase):
         seam = (np.isclose(ring[:-1, 0], 0) & np.isclose(ring[1:, 0], 0) &
                 (np.abs(np.diff(ring[:, 1])) > 1e-4))
         self.assertFalse(seam.any())
+
+    def test_overlapping_road_polygons_merge_and_bad_objects_are_counted(self):
+        malformed = Polygon([(-1, -1), (1, 1), (-1, 1), (1, -1)])
+        diagnostics = {}
+        result = process_road_area_polygons(
+            [box(-1, -0.5, 0.5, 0.5), box(0, -0.5, 1, 0.5),
+             malformed, Polygon(), None],
+            self.transform, (-2, -2, 2, 2), 20, 0.1, diagnostics,
+        )
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0][1])
+        self.assertEqual(diagnostics["used"], 2)
+        self.assertEqual(diagnostics["skipped_invalid"], 1)
+        self.assertEqual(diagnostics["skipped_empty"], 1)
+        self.assertEqual(diagnostics["skipped_missing"], 1)
+        empty_result = process_road_area_polygons(
+            [malformed, None], self.transform, self.roi, 20, 0.1,
+        )
+        self.assertEqual(empty_result, [])
 
     def test_clipped_crosswalk_boundary_is_open(self):
         result = process_geometry(box(-2, -0.5, 0.5, 0.5), self.transform, self.roi)

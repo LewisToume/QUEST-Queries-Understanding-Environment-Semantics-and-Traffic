@@ -13,8 +13,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from quest.map_teacher import (
-    TEACHER_MAP_SCHEMA_VERSION, TEACHER_RAW_SCORE_SEMANTICS,
-    TEACHER_SCORE_KIND, TEACHER_SCORE_TRANSFORM, validate_teacher_record,
+    TEACHER_ALIGNMENT_VERSION, TEACHER_COORDINATE_FRAME, TEACHER_MAP_SCHEMA_VERSION,
+    TEACHER_RAW_SCORE_SEMANTICS, TEACHER_SCORE_KIND, TEACHER_SCORE_TRANSFORM,
+    resolve_lidar2ego, validate_teacher_record,
 )
 from quest.stage3_dataset import load_record
 from run_navformer_openscene_teacher import (
@@ -98,7 +99,6 @@ def main() -> None:
     parser.add_argument("--image-root", type=Path, default=DEFAULT_IMAGE_ROOT)
     parser.add_argument("--teacher-pc-range", nargs=4, type=float, required=True,
                         metavar=("XMIN", "YMIN", "XMAX", "YMAX"))
-    parser.add_argument("--teacher-coordinate-frame", choices=["openscene_lidar_xy"], required=True)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     navformer_root = require_directory(args.navformer_root, "Navformer root")
@@ -137,11 +137,15 @@ def main() -> None:
         importlib.import_module(module_name)
     transforms, _ = build_preprocess_transforms(cfg, build_from_cfg, PIPELINES)
     plan = temporal_export_plan(load_infos(metadata_path), args.sample_index, args.num_frames)
+    for item in plan:
+        if item["target"]:
+            item["lidar2ego"] = resolve_lidar2ego(item["info"])
     config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
     checkpoint_stat = checkpoint_path.stat()
     expected = {
         "teacher_pc_range": tuple(args.teacher_pc_range),
-        "teacher_coordinate_frame": args.teacher_coordinate_frame,
+        "teacher_coordinate_frame": TEACHER_COORDINATE_FRAME,
+        "teacher_alignment_version": TEACHER_ALIGNMENT_VERSION,
         "teacher_checkpoint": str(checkpoint_path),
         "teacher_config": str(config_path),
         "teacher_config_sha256": config_hash,
@@ -163,6 +167,8 @@ def main() -> None:
             for key, value in expected.items():
                 if record.get(key) != value:
                     raise ValueError(f"{key} differs from this export configuration")
+            if not torch.allclose(record["teacher_lidar2ego"], item["lidar2ego"], atol=1e-4, rtol=1e-4):
+                raise ValueError("lidar2ego differs from current OpenScene metadata")
             if (record.get("temporal_history_sha256") != item["temporal_history_sha256"]
                     or record.get("temporal_scene_start_token") != item["scene_start_token"]):
                 raise ValueError("temporal history differs from this scene-start inference")
@@ -209,6 +215,7 @@ def main() -> None:
                     "sample_index": sample_index, "token": token,
                     "teacher_map_soft": soft.cpu(), "teacher_map_shape": tuple(soft.shape),
                     "teacher_channel_names_or_ids": names,
+                    "teacher_lidar2ego": item["lidar2ego"],
                     "teacher_score_kind": TEACHER_SCORE_KIND,
                     "teacher_raw_score_semantics": TEACHER_RAW_SCORE_SEMANTICS,
                     "teacher_score_transform": TEACHER_SCORE_TRANSFORM,

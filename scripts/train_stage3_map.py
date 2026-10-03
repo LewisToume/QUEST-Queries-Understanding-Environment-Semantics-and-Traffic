@@ -106,6 +106,7 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead,
         predictions = stage3_forward(model, raster_head, batch, device)
         losses = mixed_stage3_loss(
             model, predictions, vectors, batch["teacher_map_aligned"].to(device),
+            batch["teacher_map_valid"].to(device),
             support, weights, target, config,
         )
         if not bool(torch.isfinite(losses["total_loss"])):

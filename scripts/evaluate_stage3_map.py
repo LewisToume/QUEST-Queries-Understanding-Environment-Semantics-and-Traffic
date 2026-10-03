@@ -53,10 +53,17 @@ def main() -> None:
         raise ValueError("evaluation vector GT export provenance differs from Stage 3 checkpoint")
     if tuple(checkpoint.get("map_class_names", ())) != MAP_CLASS_NAMES:
         raise ValueError("checkpoint map taxonomy differs from direct GT")
-    if checkpoint.get("teacher_channel_metadata", {}).get("teacher_checkpoint") != audit["teacher_checkpoint"]:
+    teacher_metadata = checkpoint.get("teacher_channel_metadata")
+    if not isinstance(teacher_metadata, dict):
+        raise ValueError("Stage 3 checkpoint has no teacher channel metadata")
+    if teacher_metadata.get("teacher_checkpoint") != audit["teacher_checkpoint"]:
         raise ValueError("teacher audit/checkpoint identity differs from Stage 3 checkpoint")
     if list(checkpoint.get("teacher_channel_support_mask", [])) != audit["teacher_channel_support_mask"]:
         raise ValueError("teacher support mask differs from Stage 3 checkpoint")
+    for key in ("teacher_alignment_version", "teacher_coordinate_frame",
+                "row_axis", "row_direction", "col_direction", "teacher_pc_range"):
+        if teacher_metadata.get(key) != audit[key]:
+            raise ValueError(f"teacher {key} differs from Stage 3 checkpoint")
     epoch = load_stage3_checkpoint(model, raster_head, checkpoint)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
@@ -78,9 +85,10 @@ def main() -> None:
             predictions = stage3_forward(model, raster_head, batch, device)
             logits = predictions["student_map_raster_logits"]
             teacher = batch["teacher_map_aligned"].to(device)
-            kd_sum += float(soft_map_distillation_loss(logits, teacher, support, weights))
-            student_binary = logits.sigmoid()[:, support] >= 0.5
-            teacher_binary = teacher[:, support] >= 0.5
+            valid = batch["teacher_map_valid"].to(device)
+            kd_sum += float(soft_map_distillation_loss(logits, teacher, valid, support, weights))
+            student_binary = (logits.sigmoid()[:, support] >= 0.5) & valid[:, None]
+            teacher_binary = (teacher[:, support] >= 0.5) & valid[:, None]
             raster_intersection += int((student_binary & teacher_binary).sum())
             raster_union += int((student_binary | teacher_binary).sum())
             for batch_index, record in enumerate(batch["vector_targets"]):

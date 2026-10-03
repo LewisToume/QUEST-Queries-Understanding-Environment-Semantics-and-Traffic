@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from quest.map_teacher import (
+    TEACHER_ALIGNMENT_VERSION, TEACHER_COORDINATE_FRAME,
     TEACHER_MAP_SCHEMA_VERSION, TEACHER_RAW_SCORE_SEMANTICS,
     TEACHER_SCORE_KIND, TEACHER_SCORE_TRANSFORM, validate_teacher_record,
 )
@@ -49,7 +50,9 @@ class Stage3MapExportTest(unittest.TestCase):
             "teacher_map_shape": (4, 2, 2),
             "teacher_channel_names_or_ids": ["a", "b", "c", "drivable"],
             "teacher_pc_range": (-51.2, -51.2, 51.2, 51.2),
-            "teacher_coordinate_frame": "openscene_lidar_xy",
+            "teacher_coordinate_frame": TEACHER_COORDINATE_FRAME,
+            "teacher_alignment_version": TEACHER_ALIGNMENT_VERSION,
+            "teacher_lidar2ego": torch.eye(4, dtype=torch.float64),
             "teacher_config": "config.py", "teacher_config_sha256": "config-digest",
             "teacher_checkpoint": "teacher.pth", "teacher_checkpoint_size_bytes": 100,
             "teacher_checkpoint_mtime_ns": 12345,
@@ -63,6 +66,10 @@ class Stage3MapExportTest(unittest.TestCase):
         validate_teacher_record(record, "sample-7", 7)
         record["teacher_score_transform"] = "sigmoid"
         with self.assertRaisesRegex(ValueError, "score transform mismatch"):
+            validate_teacher_record(record, "sample-7", 7)
+        record["teacher_score_transform"] = TEACHER_SCORE_TRANSFORM
+        record["schema_version"] = 2
+        with self.assertRaisesRegex(ValueError, "regenerate old LiDAR-frame labels"):
             validate_teacher_record(record, "sample-7", 7)
 
 

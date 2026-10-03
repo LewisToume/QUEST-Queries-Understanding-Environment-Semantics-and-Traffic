@@ -32,13 +32,20 @@ directions of local +X and +Y are respectively columns 0 and 1 of
 verified from the local metadata and is deliberately not assumed. Tilted
 LiDAR poses fail closed until map height is handled in 3D.
 
-Navformer raster axes, sign, transpose and channel meanings are not inferred
-from tensor shapes. Export requires an explicitly confirmed teacher metric
-range and coordinate frame. Audit requires row axis and row/column direction.
-The alignment utility samples each QUEST cell's metric center in the teacher
-grid using bilinear interpolation, with `align_corners=False`; it does not
-resize the entire teacher image. The visual diagnostic displays the audited
-map with `origin=lower`, ego at `(0,0)` and labeled +X/+Y axes.
+Navformer Pansegformer raster scores live in OpenScene **Ego XY**, while QUEST
+BEV and vector GT live in **LiDAR XY**. Each QUEST cell center `[x,y,0,1]`
+is transformed by that frame's `lidar2ego` before sampling the teacher grid.
+The transform is read directly from metadata or derived as
+`inverse(ego2global) @ lidar2global`; when both are available they must agree.
+Axis direction and channel semantics still require human audit and cannot
+replace this physical frame transform. Export requires an explicit teacher
+Ego-frame metric range. The shared alignment utility uses bilinear sampling
+with `align_corners=False` and returns a per-cell valid mask; KD excludes
+cells outside the teacher range rather than treating padding as background.
+The exporter fixes `teacher_coordinate_frame=openscene_ego_xy`; the former
+`--teacher-coordinate-frame` argument is removed.
+The visual diagnostic displays aligned maps with `origin=lower`, LiDAR origin
+at `(0,0)`, and labeled local +X/+Y axes.
 
 ## Offline schemas
 
@@ -48,6 +55,7 @@ Vector GT, one `<token>.pt` per original metadata frame:
 - `class_ids: int64[N]`, `points_xy_m: float32[N,20,2]`
 - `is_closed: bool[N]`, `length_m: float32[N]`, `xy_range_m`
 - `num_points`, `min_length_m`, `map_version`, `vector_semantics_version`
+- `geometry_diagnostics.road_area` counts valid and skipped malformed polygons
 
 Class 0 is LANE/LANE_CONNECTOR baseline centerline; class 1 is CROSSWALK
 contour; class 2 is ROADBLOCK/INTERSECTION/CARPARK_AREA boundary. Every
@@ -60,13 +68,17 @@ extraction, removing internal seams. Crosswalk polygons stay separate; clipped
 fragments are open polylines, while complete uncut rings stay closed. Centerline
 baseline paths retain direct line clipping. Open lines include both ends.
 Closed rings use 20 unique points.
+Unusable road-area polygons are counted and omitted before union; no automatic
+geometry repair is attempted. An empty valid road-area set yields no road
+boundary. The exporter prints these counts per frame.
 
 Teacher raster, also one `<token>.pt` per original frame:
 
-- `sample_index`, `token`, `schema_version=2`
+- `sample_index`, `token`, `schema_version=3`
 - `teacher_map_soft: float32[K,H,W]` in `[0,1]`, `teacher_map_shape`
 - `teacher_pc_range`, opaque `teacher_channel_names_or_ids`
-- `teacher_checkpoint`, `teacher_config`, `teacher_coordinate_frame`
+- `teacher_checkpoint`, `teacher_config`, `teacher_coordinate_frame=openscene_ego_xy`
+- `teacher_alignment_version=quest_lidar_to_navformer_ego_v1`, `teacher_lidar2ego`
 - `teacher_score_kind=panseg_mask_score_clamped_0_1`, raw score semantics and transform
 - scene-start token and SHA-256 digest of the ordered token/timestamp history
 
@@ -100,7 +112,8 @@ writes missing targets. Existing teacher files are checked for schema,
 index/token, score semantics, checkpoint/config identity and scene-history
 digest before use. Old schema files need explicit regeneration with
 `--overwrite`; starting mid-scene does not silently create a new temporal
-initialization.
+initialization. Schema 2 Teacher labels asserted the wrong LiDAR frame and
+must be regenerated, then re-audited before training.
 The changed polygon semantics require vector schema 2; old vector GT files
 must be regenerated. Training preflight rejects mixed export provenance and
 the Stage 3 checkpoint records it for held-out evaluation. Re-run the map
@@ -140,7 +153,8 @@ open polylines compare forward/reverse point order, closed contours compare
 all cyclic and reverse-cyclic orders. Matched point loss uses the selected
 ordering; a small neighboring-segment direction loss includes the closing
 segment for closed contours. Raster KD is BCE-with-logits against **bounded
-soft mask scores**, restricted to audited channels
+soft mask scores**, restricted to audited channels and teacher-valid spatial
+cells,
 with configurable weights. Stage 2 Agent loss remains unchanged.
 
 AdamW groups: shared BEV `1e-5`, new Map decoder/head/raster head `1e-4`,

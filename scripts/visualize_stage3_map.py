@@ -21,7 +21,7 @@ from scripts.train_stage3_map import build_dataset, resolve
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize Stage 3 map orientation and vector outputs")
-    parser.add_argument("--sample-index", type=int, default=500)
+    parser.add_argument("--sample-index", type=int, default=5000)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data/stage3_map_diagnostic.png")
     args = parser.parse_args()
@@ -37,14 +37,17 @@ def main() -> None:
     model = QUESTModel(**model_config)
     audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]))
     raster_head = MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
-    load_stage3_checkpoint(model, raster_head, load_checkpoint_cpu(
-        resolve(args.checkpoint or config["paths"]["checkpoint_path"])
-    ))
+    checkpoint = load_checkpoint_cpu(resolve(args.checkpoint or config["paths"]["checkpoint_path"]))
+    load_stage3_checkpoint(model, raster_head, checkpoint)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
     raster_head.to(device).eval()
     dataset = build_dataset(model, config, stage1, audit, args.sample_index, 1)
     sample = dataset[0]
+    if checkpoint["vector_gt_provenance"] != {key: sample["vector_target"][key] for key in (
+        "num_points", "min_length_m", "map_version", "vector_semantics_version"
+    )}:
+        raise ValueError("visualization vector GT provenance differs from Stage 3 checkpoint")
     batch = collate_stage3([sample])
     with torch.no_grad():
         result = stage3_forward(model, raster_head, batch, device)
@@ -69,7 +72,8 @@ def main() -> None:
         axes[0, 1].plot(line[:, 0], line[:, 1], color=colors[int(class_id)], linewidth=1)
     channel_index = audit["teacher_channel_support_mask"].index(True)
     channel_name = audit["teacher_channel_names_or_ids"][channel_index]
-    teacher = batch["teacher_map_aligned"][0, channel_index].numpy()
+    teacher = np.where(batch["teacher_map_valid"][0].numpy(),
+                       batch["teacher_map_aligned"][0, channel_index].numpy(), np.nan)
     student = result["student_map_raster_logits"][0, channel_index].sigmoid().cpu().numpy()
     extent = [xy_range[0], xy_range[2], xy_range[1], xy_range[3]]
     axes[1, 0].imshow(teacher, origin="lower", extent=extent, vmin=0, vmax=1)

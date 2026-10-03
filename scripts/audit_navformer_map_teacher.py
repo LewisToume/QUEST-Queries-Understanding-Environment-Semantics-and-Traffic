@@ -12,7 +12,9 @@ import torch.nn.functional as F
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from quest.map_teacher import align_teacher_map_to_quest_bev, validate_teacher_record
+from quest.map_teacher import (
+    align_teacher_map_to_quest_bev, resolve_lidar2ego, validate_teacher_record,
+)
 from quest.map_training import validate_vector_record
 from quest.stage3_dataset import load_record
 from quest.vector_map_labels import MAP_CLASS_NAMES
@@ -47,7 +49,7 @@ def main() -> None:
     args = parser.parse_args()
     infos = select_infos(load_infos(args.metadata), args.sample_index, args.num_frames)
     quest_range = (-50.0, -50.0, 50.0, 50.0)
-    soft_scores, ground_truth = [], []
+    soft_scores, valid_masks, ground_truth = [], [], []
     reference = None
     vector_provenance = None
     for source_index, info in enumerate(infos, start=args.sample_index):
@@ -63,40 +65,52 @@ def main() -> None:
             raise ValueError(f"vector GT export provenance changed at {token}")
         teacher = load_record(args.teacher_dir / f"{token}.pt")
         soft = validate_teacher_record(teacher, token, source_index)
+        lidar2ego = resolve_lidar2ego(info)
+        if not torch.allclose(teacher["teacher_lidar2ego"], lidar2ego, atol=1e-4, rtol=1e-4):
+            raise ValueError(f"teacher lidar2ego differs from metadata at {token}")
         signature = (tuple(teacher["teacher_channel_names_or_ids"]),
                      tuple(teacher["teacher_pc_range"]), str(teacher["teacher_checkpoint"]),
                      teacher["teacher_score_kind"], teacher["teacher_config_sha256"],
-                     teacher["teacher_checkpoint_size_bytes"], teacher["teacher_checkpoint_mtime_ns"])
+                     teacher["teacher_checkpoint_size_bytes"], teacher["teacher_checkpoint_mtime_ns"],
+                     teacher["teacher_coordinate_frame"], teacher["teacher_alignment_version"])
         if reference is None:
             reference = signature
         elif signature != reference:
             raise ValueError(f"teacher channel/range/checkpoint changed at {token}")
-        soft_scores.append(align_teacher_map_to_quest_bev(
+        aligned, valid = align_teacher_map_to_quest_bev(
             soft, teacher["teacher_pc_range"], quest_range, 32, 32,
             args.row_axis, args.row_direction, args.col_direction,
-        ))
+            lidar2ego=lidar2ego,
+        )
+        if not bool(valid.any()):
+            raise ValueError(f"teacher Ego ROI has no QUEST BEV overlap at {token}")
+        soft_scores.append(aligned)
+        valid_masks.append(valid)
         ground_truth.append(rasterize_vectors(vector, quest_range, 32, 32))
     predictions = torch.stack(soft_scores)
+    valid = torch.stack(valid_masks)
+    if not bool(valid.any()):
+        raise ValueError("teacher metric ROI has no valid overlap with QUEST BEV")
     gt = torch.stack(ground_truth)
     channels = []
     for channel_index, name in enumerate(reference[0]):
         channel = predictions[:, channel_index]
-        thresholded = channel > 0.5
+        thresholded = (channel > 0.5) & valid
         comparisons = []
         for class_index, class_name in enumerate(MAP_CLASS_NAMES):
-            target = gt[:, class_index] > 0.5
+            target = (gt[:, class_index] > 0.5) & valid
             union = int((thresholded | target).sum())
             intersection = int((thresholded & target).sum())
             expanded_prediction = F.max_pool2d(
                 thresholded.float().unsqueeze(1), 3, stride=1, padding=1
-            ).squeeze(1).bool()
+            ).squeeze(1).bool() & valid
             expanded_target = F.max_pool2d(
                 target.float().unsqueeze(1), 3, stride=1, padding=1
-            ).squeeze(1).bool()
+            ).squeeze(1).bool() & valid
             tolerant_union = int((expanded_prediction | expanded_target).sum())
             tolerant_intersection = int((expanded_prediction & expanded_target).sum())
-            flat_channel = channel.flatten()
-            flat_target = target.float().flatten()
+            flat_channel = channel[valid]
+            flat_target = target[valid].float()
             centered_channel = flat_channel - flat_channel.mean()
             centered_target = flat_target - flat_target.mean()
             denominator = centered_channel.norm() * centered_target.norm()
@@ -108,12 +122,12 @@ def main() -> None:
                                 "soft_correlation": correlation})
         best = max(comparisons, key=lambda item: item["iou_at_0.5"])
         item = {
-            "channel": name, "mean_soft_score": float(channel.mean()),
-            "max_soft_score": float(channel.max()),
-            "fraction_gt_0.1": float((channel > 0.1).float().mean()),
-            "fraction_gt_0.3": float((channel > 0.3).float().mean()),
-            "fraction_gt_0.5": float(thresholded.float().mean()),
-            "effectively_empty": bool(float(channel.max()) <= 0.1),
+            "channel": name, "mean_soft_score": float(channel[valid].mean()),
+            "max_soft_score": float(channel[valid].max()),
+            "fraction_gt_0.1": float((channel[valid] > 0.1).float().mean()),
+            "fraction_gt_0.3": float((channel[valid] > 0.3).float().mean()),
+            "fraction_gt_0.5": float(thresholded[valid].float().mean()),
+            "effectively_empty": bool(float(channel[valid].max()) <= 0.1),
             "comparisons": comparisons, "best_matching_gt_class": best["gt_class"],
         }
         print(json.dumps(item, sort_keys=True))
@@ -132,7 +146,11 @@ def main() -> None:
         "teacher_config_sha256": reference[4],
         "teacher_checkpoint_size_bytes": reference[5],
         "teacher_checkpoint_mtime_ns": reference[6],
+        "teacher_coordinate_frame": reference[7],
+        "teacher_alignment_version": reference[8],
         "teacher_schema_version": teacher["schema_version"],
+        "valid_spatial_cells": int(valid.sum()),
+        "valid_spatial_fraction": float(valid.float().mean()),
         "row_axis": args.row_axis, "row_direction": args.row_direction,
         "col_direction": args.col_direction,
         "teacher_channel_mapping": [None] * len(reference[0]),

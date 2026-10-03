@@ -7,8 +7,11 @@ from typing import Any, Mapping
 import torch
 from torch.utils.data import Dataset
 
-from .map_teacher import align_teacher_map_to_quest_bev, validate_teacher_record
-from .map_teacher import TEACHER_SCORE_KIND
+from .map_teacher import (
+    TEACHER_ALIGNMENT_VERSION, TEACHER_COORDINATE_FRAME, TEACHER_MAP_SCHEMA_VERSION,
+    TEACHER_SCORE_KIND, align_teacher_map_to_quest_bev, resolve_lidar2ego,
+    validate_teacher_record,
+)
 from .map_training import validate_vector_record
 from .openscene_dataset import OpenSceneMetadataDataset
 from .vector_map_labels import MAP_CLASS_NAMES, VECTOR_SEMANTICS_VERSION
@@ -31,6 +34,10 @@ def load_teacher_audit(path: str | Path) -> dict[str, Any]:
         raise ValueError("teacher channel/orientation audit must be explicitly VERIFIED before KD")
     if audit.get("teacher_score_kind") != TEACHER_SCORE_KIND:
         raise ValueError("teacher audit score semantics differ from Pansegformer mask scores")
+    if (audit.get("teacher_coordinate_frame") != TEACHER_COORDINATE_FRAME
+            or audit.get("teacher_alignment_version") != TEACHER_ALIGNMENT_VERSION
+            or audit.get("teacher_schema_version") != TEACHER_MAP_SCHEMA_VERSION):
+        raise ValueError("teacher audit uses old LiDAR-frame alignment; re-export and re-audit")
     if audit.get("vector_map_classes") != list(MAP_CLASS_NAMES):
         raise ValueError("teacher audit was made for a different vector map taxonomy")
     vector_provenance = audit.get("vector_gt_provenance")
@@ -115,6 +122,9 @@ class Stage3JoinedDataset(Dataset):
                 raise ValueError(f"vector GT {key} differs from audited labels for {token}")
         teacher = load_record(self.teacher_dir / f"{token}.pt")
         soft = validate_teacher_record(teacher, token, source_index)
+        lidar2ego = resolve_lidar2ego(self.images.infos[position])
+        if not torch.allclose(teacher["teacher_lidar2ego"], lidar2ego, atol=1e-4, rtol=1e-4):
+            raise ValueError(f"teacher lidar2ego differs from OpenScene metadata for {token}")
         if list(teacher["teacher_channel_names_or_ids"]) != self.audit["teacher_channel_names_or_ids"]:
             raise ValueError(f"teacher channels differ from audit for {token}")
         if tuple(teacher["teacher_pc_range"]) != tuple(self.audit["teacher_pc_range"]):
@@ -123,16 +133,22 @@ class Stage3JoinedDataset(Dataset):
             raise ValueError(f"teacher checkpoint differs from audit for {token}")
         if teacher["teacher_score_kind"] != self.audit["teacher_score_kind"]:
             raise ValueError(f"teacher score semantics differ from audit for {token}")
+        for key in ("teacher_coordinate_frame", "teacher_alignment_version"):
+            if teacher[key] != self.audit[key]:
+                raise ValueError(f"teacher {key} differs from audit for {token}")
         for key in ("teacher_config_sha256", "teacher_checkpoint_size_bytes",
                     "teacher_checkpoint_mtime_ns"):
             if teacher[key] != self.audit[key]:
                 raise ValueError(f"teacher {key} differs from audit for {token}")
         sample["source_index"] = torch.tensor(source_index, dtype=torch.int64)
         sample["vector_target"] = vector
-        sample["teacher_map_aligned"] = align_teacher_map_to_quest_bev(
+        aligned, valid = align_teacher_map_to_quest_bev(
             soft, teacher["teacher_pc_range"], self.quest_range, self.bev_h, self.bev_w,
             self.audit["row_axis"], self.audit["row_direction"], self.audit["col_direction"],
+            lidar2ego=lidar2ego,
         )
+        sample["teacher_map_aligned"] = aligned
+        sample["teacher_map_valid"] = valid
         return sample
 
 

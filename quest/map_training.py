@@ -11,7 +11,10 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
 from .agent_training import compute_stage2_agent_loss, load_agent_stage2_checkpoint
-from .map_teacher import TEACHER_MAP_SCHEMA_VERSION, MapRasterDistillHead, soft_map_distillation_loss
+from .map_teacher import (
+    TEACHER_ALIGNMENT_VERSION, TEACHER_COORDINATE_FRAME, TEACHER_MAP_SCHEMA_VERSION,
+    MapRasterDistillHead, soft_map_distillation_loss,
+)
 from .model import QUEST_ARCHITECTURE_VERSION
 from .vector_map_labels import (
     COORDINATE_FRAME, MAP_CLASS_NAMES, VECTOR_GT_SCHEMA_VERSION, VECTOR_SEMANTICS_VERSION,
@@ -238,7 +241,8 @@ def stage3_forward(model: nn.Module, raster_head: MapRasterDistillHead,
 
 
 def mixed_stage3_loss(model: nn.Module, predictions: Mapping[str, torch.Tensor],
-                      vector_targets: list[Mapping[str, Any]], teacher_probabilities: torch.Tensor,
+                      vector_targets: list[Mapping[str, Any]], teacher_soft_scores: torch.Tensor,
+                      teacher_valid_spatial: torch.Tensor,
                       support_mask: torch.Tensor, channel_weights: torch.Tensor,
                       agent_target: Mapping[str, torch.Tensor], config: Mapping[str, Any]
                       ) -> dict[str, torch.Tensor]:
@@ -247,7 +251,8 @@ def mixed_stage3_loss(model: nn.Module, predictions: Mapping[str, torch.Tensor],
     vector = vector_map_loss(predictions["map_cls_logits"], predictions["map_points"],
                              vector_targets, config["map_loss"], xy_range)
     kd = soft_map_distillation_loss(predictions["student_map_raster_logits"],
-                                    teacher_probabilities, support_mask, channel_weights)
+                                    teacher_soft_scores, teacher_valid_spatial,
+                                    support_mask, channel_weights)
     agent = compute_stage2_agent_loss(model, predictions, agent_target,
                                       config["agent_train"], config["agent_loss"])
     weights = config["loss_weights"]
@@ -313,6 +318,11 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead,
         raise ValueError("Stage 3 checkpoint vector GT provenance is incomplete")
     if checkpoint.get("teacher_schema_version") != TEACHER_MAP_SCHEMA_VERSION:
         raise ValueError("Stage 3 checkpoint teacher schema mismatch")
+    teacher_metadata = checkpoint.get("teacher_channel_metadata")
+    if (not isinstance(teacher_metadata, Mapping)
+            or teacher_metadata.get("teacher_alignment_version") != TEACHER_ALIGNMENT_VERSION
+            or teacher_metadata.get("teacher_coordinate_frame") != TEACHER_COORDINATE_FRAME):
+        raise ValueError("Stage 3 checkpoint teacher coordinate alignment mismatch")
     support = checkpoint.get("trained_class_support_mask")
     if not torch.is_tensor(support) or not torch.equal(
         support.cpu().bool(), torch.tensor([True, True, False, False]),

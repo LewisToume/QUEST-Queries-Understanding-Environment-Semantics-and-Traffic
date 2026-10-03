@@ -45,6 +45,8 @@ def main() -> None:
     missing = empty = closed = open_count = nonfinite = outside = 0
     found = degenerate = duplicate_consecutive = zero_length_segments = 0
     invalid_records = []
+    road_geometry_totals = {}
+    missing_road_diagnostics = 0
     exceed = {limit: 0 for limit in (32, 50, 64, 100, 128)}
     for sample_index, info in enumerate(infos, start=args.sample_index):
         token = str(info["token"])
@@ -89,6 +91,12 @@ def main() -> None:
             invalid_records.append(f"index={sample_index} token={token}: {error}")
             continue
         n = len(record["class_ids"])
+        road_geometry = record.get("geometry_diagnostics", {}).get("road_area")
+        if isinstance(road_geometry, dict):
+            for key, value in road_geometry.items():
+                road_geometry_totals[key] = road_geometry_totals.get(key, 0) + int(value)
+        else:
+            missing_road_diagnostics += 1
         counts.append(n)
         empty += n == 0
         closed += int(record["is_closed"].sum())
@@ -117,6 +125,8 @@ def main() -> None:
     print(f"NaN_or_Inf_values={nonfinite} outside_ROI_points={outside} "
           f"degenerate_lines={degenerate} duplicate_consecutive_points={duplicate_consecutive} "
           f"zero_length_consecutive_segments={zero_length_segments}")
+    print(f"road_geometry_totals={road_geometry_totals} "
+          f"frames_missing_road_diagnostics={missing_road_diagnostics}")
     print(f"invalid_records={len(invalid_records)}")
     for error in invalid_records[:20]:
         print(error)

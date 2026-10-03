@@ -41,17 +41,23 @@ class Stage3MapTest(unittest.TestCase):
 
     def test_metric_alignment_and_orientation(self):
         teacher = torch.arange(16, dtype=torch.float32).reshape(1, 4, 4) / 15
-        aligned = align_teacher_map_to_quest_bev(teacher, (-2, -2, 2, 2),
-                                                   (-2, -2, 2, 2), 4, 4, "y", 1, 1)
+        aligned, valid = align_teacher_map_to_quest_bev(
+            teacher, (-2, -2, 2, 2), (-2, -2, 2, 2), 4, 4, "y", 1, 1,
+            lidar2ego=torch.eye(4),
+        )
         torch.testing.assert_close(aligned, teacher, atol=1e-6, rtol=0)
-        flipped = align_teacher_map_to_quest_bev(teacher, (-2, -2, 2, 2),
-                                                   (-2, -2, 2, 2), 4, 4, "y", -1, 1)
+        self.assertTrue(bool(valid.all()))
+        flipped, _ = align_teacher_map_to_quest_bev(
+            teacher, (-2, -2, 2, 2), (-2, -2, 2, 2), 4, 4, "y", -1, 1,
+            lidar2ego=torch.eye(4),
+        )
         torch.testing.assert_close(flipped, teacher.flip(1), atol=1e-6, rtol=0)
 
     def test_unsupported_teacher_channel_does_not_enter_kd(self):
         logits = torch.zeros(1, 2, 2, 2)
         teacher = torch.stack((torch.zeros(2, 2), torch.ones(2, 2)))[None]
-        loss = soft_map_distillation_loss(logits, teacher, torch.tensor([True, False]),
+        loss = soft_map_distillation_loss(logits, teacher, torch.ones(1, 2, 2, dtype=torch.bool),
+                                          torch.tensor([True, False]),
                                           torch.ones(2))
         torch.testing.assert_close(loss, torch.tensor(0.69314718), atol=1e-6, rtol=0)
 

@@ -73,7 +73,8 @@ def main() -> None:
         temporary = path.with_suffix(".pt.tmp")
         torch.save(record, temporary)
         temporary.replace(path)
-        print(f"index={sample_index} token={info['token']} vectors={len(record['class_ids'])}")
+        print(f"index={sample_index} token={info['token']} vectors={len(record['class_ids'])} "
+              f"road_geometry={record['geometry_diagnostics']['road_area']}")
 
 
 if __name__ == "__main__":

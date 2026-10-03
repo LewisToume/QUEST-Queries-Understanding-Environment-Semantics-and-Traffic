@@ -102,16 +102,35 @@ def process_road_area_polygons(
     polygons: list[Any], lidar2global: np.ndarray,
     xy_range: tuple[float, float, float, float], num_points: int,
     min_length_m: float,
+    diagnostics: dict[str, int] | None = None,
 ) -> list[tuple[np.ndarray, bool, float]]:
     from shapely.ops import unary_union
 
-    if not polygons:
+    counts = {"input": len(polygons), "used": 0, "skipped_missing": 0,
+              "skipped_empty": 0, "skipped_invalid": 0, "skipped_non_polygon": 0}
+    valid_polygons = []
+    for polygon in polygons:
+        if polygon is None:
+            counts["skipped_missing"] += 1
+            continue
+        try:
+            if polygon.is_empty:
+                counts["skipped_empty"] += 1
+            elif polygon.geom_type not in ("Polygon", "MultiPolygon"):
+                counts["skipped_non_polygon"] += 1
+            elif not polygon.is_valid:
+                counts["skipped_invalid"] += 1
+            else:
+                valid_polygons.append(polygon)
+                counts["used"] += 1
+        except Exception:
+            counts["skipped_invalid"] += 1
+    if diagnostics is not None:
+        diagnostics.update(counts)
+    if not valid_polygons:
         return []
-    if any(polygon is None or polygon.is_empty or not polygon.is_valid
-           or polygon.geom_type not in ("Polygon", "MultiPolygon") for polygon in polygons):
-        raise ValueError("road-area map object has no valid polygon")
     return process_geometry(
-        unary_union(polygons), lidar2global, xy_range, num_points, min_length_m
+        unary_union(valid_polygons), lidar2global, xy_range, num_points, min_length_m
     )
 
 
@@ -184,21 +203,27 @@ def extract_vector_map(
                     raise ValueError(f"nuPlan {name} object is not a crosswalk polygon")
                 add_geometry(class_id, geometry)
     road_polygons = []
+    unreadable_road_objects = 0
     for name in layer_names[2]:
         if name not in available_layers:
             continue
         for map_object in objects.get(available_layers[name], []):
-            polygon = getattr(map_object, "polygon", None)
-            if polygon is None:
-                raise ValueError(f"nuPlan {name} object has no valid polygon")
+            try:
+                polygon = getattr(map_object, "polygon", None)
+            except Exception:
+                # A malformed external map object must not discard the rest of the road area.
+                unreadable_road_objects += 1
+                continue
             road_polygons.append(polygon)
+    road_diagnostics: dict[str, int] = {}
     for sampled, closed, length in process_road_area_polygons(
-        road_polygons, matrix, xy_range, num_points, min_length_m
+        road_polygons, matrix, xy_range, num_points, min_length_m, road_diagnostics
     ):
         classes.append(2)
         points.append(sampled)
         closed_flags.append(closed)
         lengths.append(length)
+    road_diagnostics["skipped_unreadable"] = unreadable_road_objects
     return {
         "sample_index": int(sample_index), "token": str(info["token"]),
         "class_ids": torch.tensor(classes, dtype=torch.int64),
@@ -210,5 +235,6 @@ def extract_vector_map(
         "num_points": int(num_points), "min_length_m": float(min_length_m),
         "map_version": str(map_version),
         "vector_semantics_version": VECTOR_SEMANTICS_VERSION,
+        "geometry_diagnostics": {"road_area": road_diagnostics},
         "schema_version": VECTOR_GT_SCHEMA_VERSION,
     }

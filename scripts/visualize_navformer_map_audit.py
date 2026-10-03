@@ -6,10 +6,15 @@ import math
 import sys
 from pathlib import Path
 
+import torch
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from quest.map_teacher import align_teacher_map_to_quest_bev, validate_teacher_record
+from quest.map_teacher import (
+    TEACHER_ALIGNMENT_VERSION, TEACHER_COORDINATE_FRAME,
+    align_teacher_map_to_quest_bev, resolve_lidar2ego, validate_teacher_record,
+)
 from quest.map_training import validate_vector_record
 from quest.stage3_dataset import load_record
 from quest.utils import load_yaml_config
@@ -32,6 +37,9 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/map_audit_preview")
     args = parser.parse_args()
     audit = json.loads(args.audit.read_text(encoding="utf-8")) if args.audit.is_file() else {}
+    if audit and (audit.get("teacher_alignment_version") != TEACHER_ALIGNMENT_VERSION
+                  or audit.get("teacher_coordinate_frame") != TEACHER_COORDINATE_FRAME):
+        raise ValueError("existing audit uses old teacher coordinates; regenerate the audit JSON")
     row_axis = args.row_axis if args.row_axis is not None else audit.get("row_axis")
     row_direction = args.row_direction if args.row_direction is not None else audit.get("row_direction")
     col_direction = args.col_direction if args.col_direction is not None else audit.get("col_direction")
@@ -55,9 +63,13 @@ def main() -> None:
         validate_vector_record(vector, token, sample_index, xy_range)
         teacher = load_record(args.teacher_dir / f"{token}.pt")
         scores = validate_teacher_record(teacher, token, sample_index)
-        aligned = align_teacher_map_to_quest_bev(
+        lidar2ego = resolve_lidar2ego(info)
+        if not torch.allclose(teacher["teacher_lidar2ego"], lidar2ego, atol=1e-4, rtol=1e-4):
+            raise ValueError(f"teacher lidar2ego differs from metadata for {token}")
+        aligned, valid = align_teacher_map_to_quest_bev(
             scores, teacher["teacher_pc_range"], xy_range,
             height, width, row_axis, row_direction, col_direction,
+            lidar2ego=lidar2ego,
         )
         masks = rasterize_vectors(vector, xy_range, height, width)
         names = list(teacher["teacher_channel_names_or_ids"])
@@ -82,7 +94,8 @@ def main() -> None:
             axis.set_title(f"GT raster: {name}")
         for channel_id, name in enumerate(names):
             axis = panels[1 + len(MAP_CLASS_NAMES) + channel_id]
-            axis.imshow(aligned[channel_id].numpy(), origin="lower", extent=extent, vmin=0, vmax=1)
+            axis.imshow(np.where(valid.numpy(), aligned[channel_id].numpy(), np.nan),
+                        origin="lower", extent=extent, vmin=0, vmax=1)
             candidate = "unmapped"
             diagnostics = audit.get("channel_diagnostics", [])
             if channel_id < len(diagnostics):
