@@ -8,11 +8,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-TEACHER_MAP_SCHEMA_VERSION = 1
+TEACHER_MAP_SCHEMA_VERSION = 2
+TEACHER_SCORE_KIND = "panseg_mask_score_clamped_0_1"
+TEACHER_RAW_SCORE_SEMANTICS = "Pansegformer get_bboxes lane_score and score_list[-1] mask scores"
+TEACHER_SCORE_TRANSFORM = "clamp(0.0, 1.0); no sigmoid or threshold"
 
 
 def align_teacher_map_to_quest_bev(
-    probabilities: torch.Tensor,
+    soft_scores: torch.Tensor,
     teacher_xy_range: Sequence[float],
     quest_xy_range: Sequence[float],
     quest_h: int,
@@ -22,10 +25,10 @@ def align_teacher_map_to_quest_bev(
     col_direction: int,
 ) -> torch.Tensor:
     """Metric grid_sample; output rows grow with +Y and columns with +X."""
-    if probabilities.ndim != 3 or not torch.isfinite(probabilities).all():
-        raise ValueError("teacher probabilities must be finite [K,H,W]")
-    if not bool(((probabilities >= 0) & (probabilities <= 1)).all()):
-        raise ValueError("teacher probabilities must remain in [0,1]")
+    if soft_scores.ndim != 3 or not torch.isfinite(soft_scores).all():
+        raise ValueError("teacher soft scores must be finite [K,H,W]")
+    if not bool(((soft_scores >= 0) & (soft_scores <= 1)).all()):
+        raise ValueError("teacher soft scores must remain in [0,1]")
     if len(teacher_xy_range) != 4 or len(quest_xy_range) != 4:
         raise ValueError("metric XY ranges must be (xmin,ymin,xmax,ymax)")
     if row_axis not in ("x", "y") or row_direction not in (-1, 1) or col_direction not in (-1, 1):
@@ -36,8 +39,8 @@ def align_teacher_map_to_quest_bev(
         raise ValueError("invalid metric range")
     if qx0 < tx0 or qx1 > tx1 or qy0 < ty0 or qy1 > ty1:
         raise ValueError("teacher metric range does not cover the QUEST ROI")
-    ys = qy0 + (torch.arange(quest_h, device=probabilities.device, dtype=probabilities.dtype) + 0.5) * (qy1 - qy0) / quest_h
-    xs = qx0 + (torch.arange(quest_w, device=probabilities.device, dtype=probabilities.dtype) + 0.5) * (qx1 - qx0) / quest_w
+    ys = qy0 + (torch.arange(quest_h, device=soft_scores.device, dtype=soft_scores.dtype) + 0.5) * (qy1 - qy0) / quest_h
+    xs = qx0 + (torch.arange(quest_w, device=soft_scores.device, dtype=soft_scores.dtype) + 0.5) * (qx1 - qx0) / quest_w
     try:
         yy, xx = torch.meshgrid(ys, xs, indexing="ij")
     except TypeError:
@@ -54,7 +57,7 @@ def align_teacher_map_to_quest_bev(
         col = 1 - col
     grid = torch.stack((2 * col - 1, 2 * row - 1), dim=-1).unsqueeze(0)
     return F.grid_sample(
-        probabilities.unsqueeze(0), grid, mode="bilinear",
+        soft_scores.unsqueeze(0), grid, mode="bilinear",
         padding_mode="zeros", align_corners=False,
     ).squeeze(0)
 
@@ -78,25 +81,25 @@ class MapRasterDistillHead(nn.Module):
 
 def soft_map_distillation_loss(
     student_logits: torch.Tensor,
-    teacher_probabilities: torch.Tensor,
+    teacher_soft_scores: torch.Tensor,
     support_mask: torch.Tensor,
     channel_weights: torch.Tensor,
 ) -> torch.Tensor:
-    if student_logits.shape != teacher_probabilities.shape or student_logits.ndim != 4:
+    if student_logits.shape != teacher_soft_scores.shape or student_logits.ndim != 4:
         raise ValueError("student and teacher maps must be [B,K,H,W] with equal shapes")
     count = student_logits.shape[1]
     if support_mask.shape != (count,) or channel_weights.shape != (count,):
         raise ValueError("teacher support/weights must have one value per channel")
     if not bool(support_mask.any()):
         raise ValueError("no audited teacher channels are supported")
-    if not bool(torch.isfinite(teacher_probabilities).all()) or not bool(
-        ((teacher_probabilities >= 0) & (teacher_probabilities <= 1)).all()
+    if not bool(torch.isfinite(teacher_soft_scores).all()) or not bool(
+        ((teacher_soft_scores >= 0) & (teacher_soft_scores <= 1)).all()
     ):
-        raise ValueError("teacher map must be finite probabilities in [0,1]")
+        raise ValueError("teacher map must contain finite soft scores in [0,1]")
     if not bool(torch.isfinite(channel_weights).all()) or bool((channel_weights < 0).any()):
         raise ValueError("channel weights must be finite and nonnegative")
     per_channel = F.binary_cross_entropy_with_logits(
-        student_logits, teacher_probabilities, reduction="none"
+        student_logits, teacher_soft_scores, reduction="none"
     ).mean(dim=(0, 2, 3))
     weights = channel_weights * support_mask.to(channel_weights.dtype)
     if not bool(weights.sum() > 0):
@@ -120,4 +123,21 @@ def validate_teacher_record(record: Mapping[str, Any], token: str, sample_index:
         raise ValueError("teacher metric pc_range is required")
     if record.get("teacher_coordinate_frame") != "openscene_lidar_xy":
         raise ValueError("teacher and QUEST coordinate frames are not confirmed equal")
+    if record.get("teacher_score_kind") != TEACHER_SCORE_KIND:
+        raise ValueError("Navformer teacher map score kind is not the audited Pansegformer mask score")
+    if record.get("teacher_raw_score_semantics") != TEACHER_RAW_SCORE_SEMANTICS:
+        raise ValueError("Navformer teacher raw score semantics mismatch")
+    if record.get("teacher_score_transform") != TEACHER_SCORE_TRANSFORM:
+        raise ValueError("Navformer teacher score transform mismatch")
+    if record.get("temporal_mode") != "scene_start_to_target":
+        raise ValueError("Navformer map teacher temporal initialization is not reproducible")
+    if not record.get("temporal_history_sha256") or not record.get("temporal_scene_start_token"):
+        raise ValueError("Navformer teacher temporal provenance is missing")
+    if (not record.get("teacher_config") or not record.get("teacher_config_sha256")
+            or not record.get("teacher_checkpoint")
+            or record.get("teacher_checkpoint_size_bytes") is None
+            or record.get("teacher_checkpoint_mtime_ns") is None):
+        raise ValueError("Navformer teacher config/checkpoint provenance is missing")
+    if not bool(torch.isfinite(soft).all()) or not bool(((soft >= 0) & (soft <= 1)).all()):
+        raise ValueError("teacher map soft scores must be finite and bounded [0,1]")
     return soft.float()

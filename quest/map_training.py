@@ -123,9 +123,19 @@ def vector_map_loss(pred_logits: torch.Tensor, pred_points: torch.Tensor,
             chosen = torch.stack([variant for _, _, variant in matches])
             selected = points[pred_indices]
             point_losses.append(F.smooth_l1_loss(selected, chosen))
-            pred_segments = selected[:, 1:] - selected[:, :-1]
-            gt_segments = chosen[:, 1:] - chosen[:, :-1]
-            direction_losses.append((1 - F.cosine_similarity(pred_segments, gt_segments, dim=-1)).mean())
+            per_instance_direction = []
+            for match_index, gt_index in enumerate(gt_indices):
+                predicted = selected[match_index]
+                expected = chosen[match_index]
+                if bool(target["is_closed"][gt_index]):
+                    predicted = torch.cat((predicted, predicted[:1]), dim=0)
+                    expected = torch.cat((expected, expected[:1]), dim=0)
+                predicted_segments = predicted[1:] - predicted[:-1]
+                expected_segments = expected[1:] - expected[:-1]
+                per_instance_direction.append(
+                    (1 - F.cosine_similarity(predicted_segments, expected_segments, dim=-1)).mean()
+                )
+            direction_losses.append(torch.stack(per_instance_direction).mean())
         else:
             point_losses.append(points.sum() * 0)
             direction_losses.append(points.sum() * 0)

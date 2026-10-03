@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import sys
 from pathlib import Path
@@ -11,7 +12,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
-from quest.map_teacher import TEACHER_MAP_SCHEMA_VERSION
+from quest.map_teacher import (
+    TEACHER_MAP_SCHEMA_VERSION, TEACHER_RAW_SCORE_SEMANTICS,
+    TEACHER_SCORE_KIND, TEACHER_SCORE_TRANSFORM, validate_teacher_record,
+)
+from quest.stage3_dataset import load_record
 from run_navformer_openscene_teacher import (
     DEFAULT_IMAGE_ROOT,
     NAVFORMER_ROOT, as_cpu, build_camera_geometry, build_model_and_load_checkpoint,
@@ -25,40 +30,66 @@ def _channels(value: object, name: str) -> torch.Tensor:
     tensor = as_cpu(value)
     if not torch.is_tensor(tensor):
         raise ValueError(f"Navformer {name} must be a tensor; got {type(value).__name__}")
-    while tensor.ndim > 3 and tensor.shape[0] == 1:
-        tensor = tensor[0]
-    if tensor.ndim == 2:
-        tensor = tensor.unsqueeze(0)
     if tensor.ndim != 3:
-        raise ValueError(f"Navformer {name} must resolve to [K,H,W], got {tuple(tensor.shape)}")
+        raise ValueError(f"Navformer {name} must be [K,H,W], got {tuple(tensor.shape)}")
     return tensor.float()
 
 
-def extract_teacher_probabilities(mapping: dict, input_kind: str) -> torch.Tensor:
+def extract_teacher_soft_scores(mapping: dict) -> tuple[torch.Tensor, int]:
     if "lane_score" not in mapping or "score_list" not in mapping:
         raise KeyError("Navformer map output lacks lane_score or drivable score_list")
-    if not isinstance(mapping["score_list"], (list, tuple)) or not mapping["score_list"]:
-        raise ValueError("Navformer score_list must be a nonempty sequence")
-    lanes = _channels(mapping["lane_score"], "lane_score")
-    drivable = _channels(mapping["score_list"][-1], "score_list[-1]")
+    raw_lanes = _channels(mapping["lane_score"], "lane_score")
+    raw_scores = _channels(mapping["score_list"], "score_list")
+    if raw_scores.shape[0] < 1:
+        raise ValueError("Navformer score_list has no drivable mask channel")
+    raw_drivable = raw_scores[-1:]
+    lanes = raw_lanes
+    drivable = raw_drivable
     if lanes.shape[-2:] != drivable.shape[-2:]:
         raise ValueError("Navformer lane/drivable map resolutions differ")
-    values = torch.cat((lanes, drivable), dim=0)
-    if not bool(torch.isfinite(values).all()):
+    raw = torch.cat((lanes, drivable), dim=0)
+    if not bool(torch.isfinite(raw).all()):
         raise ValueError("Navformer map contains NaN/Inf")
-    if input_kind == "logits":
-        values = values.sigmoid()
-    elif input_kind != "probabilities":
-        raise ValueError("--input-kind must explicitly be probabilities or logits")
-    if not bool(((values >= 0) & (values <= 1)).all()):
-        raise ValueError("Navformer map values are not probabilities; check --input-kind")
-    return values
+    return raw.clamp(0.0, 1.0), lanes.shape[0]
+
+
+def temporal_export_plan(all_infos: list[dict], sample_index: int, num_frames: int) -> list[dict]:
+    targets = select_infos(all_infos, sample_index, num_frames)
+    target_indices = set(range(sample_index, sample_index + len(targets)))
+    scenes = {str(info["scene_token"]) for info in targets}
+    by_scene: dict[str, list[tuple[int, dict]]] = {scene: [] for scene in scenes}
+    for index, info in enumerate(all_infos):
+        scene = str(info.get("scene_token"))
+        if scene in by_scene:
+            by_scene[scene].append((index, info))
+    plan = []
+    for scene in sorted(scenes):
+        frames = sorted(by_scene[scene], key=lambda pair: float(pair[1]["timestamp"]))
+        if len({str(info["token"]) for _, info in frames}) != len(frames):
+            raise ValueError(f"duplicate tokens in scene {scene}")
+        timestamps = [float(info["timestamp"]) for _, info in frames]
+        if any(later <= earlier for earlier, later in zip(timestamps, timestamps[1:])):
+            raise ValueError(f"non-increasing timestamps in scene {scene}")
+        latest_target = max(float(info["timestamp"]) for index, info in frames if index in target_indices)
+        first_token = str(frames[0][1]["token"])
+        history = hashlib.sha256()
+        for index, info in frames:
+            if float(info["timestamp"]) > latest_target:
+                break
+            history.update(f"{info['token']}:{info['timestamp']}\n".encode("utf-8"))
+            plan.append({
+                "sample_index": index, "info": info, "target": index in target_indices,
+                "scene_start_token": first_token, "temporal_history_sha256": history.hexdigest(),
+            })
+    if {item["sample_index"] for item in plan if item["target"]} != target_indices:
+        raise RuntimeError("temporal plan target indices differ from the original metadata slice")
+    return plan
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export offline Navformer map probabilities")
+    parser = argparse.ArgumentParser(description="Export offline Navformer Pansegformer soft mask scores")
     parser.add_argument("--sample-index", type=int, default=0)
-    parser.add_argument("--num-frames", type=int, default=500)
+    parser.add_argument("--num-frames", type=int, default=5000)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/navformer_map_soft")
     parser.add_argument("--navformer-root", type=Path, default=NAVFORMER_ROOT)
     parser.add_argument("--config", type=Path, required=True)
@@ -68,7 +99,6 @@ def main() -> None:
     parser.add_argument("--teacher-pc-range", nargs=4, type=float, required=True,
                         metavar=("XMIN", "YMIN", "XMAX", "YMAX"))
     parser.add_argument("--teacher-coordinate-frame", choices=["openscene_lidar_xy"], required=True)
-    parser.add_argument("--input-kind", choices=["probabilities", "logits"], required=True)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     navformer_root = require_directory(args.navformer_root, "Navformer root")
@@ -106,7 +136,43 @@ def main() -> None:
     for module_name in cfg.get("custom_imports", {}).get("imports", ["mmdet3d_plugin"]):
         importlib.import_module(module_name)
     transforms, _ = build_preprocess_transforms(cfg, build_from_cfg, PIPELINES)
-    infos = select_infos(load_infos(metadata_path), args.sample_index, args.num_frames)
+    plan = temporal_export_plan(load_infos(metadata_path), args.sample_index, args.num_frames)
+    config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    checkpoint_stat = checkpoint_path.stat()
+    expected = {
+        "teacher_pc_range": tuple(args.teacher_pc_range),
+        "teacher_coordinate_frame": args.teacher_coordinate_frame,
+        "teacher_checkpoint": str(checkpoint_path),
+        "teacher_config": str(config_path),
+        "teacher_config_sha256": config_hash,
+        "teacher_checkpoint_size_bytes": checkpoint_stat.st_size,
+        "teacher_checkpoint_mtime_ns": checkpoint_stat.st_mtime_ns,
+    }
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    skipped_existing = 0
+    for item in plan:
+        if not item["target"]:
+            continue
+        token = str(item["info"]["token"])
+        path = args.output_dir / f"{token}.pt"
+        if not path.exists() or args.overwrite:
+            continue
+        try:
+            record = load_record(path)
+            validate_teacher_record(record, token, item["sample_index"])
+            for key, value in expected.items():
+                if record.get(key) != value:
+                    raise ValueError(f"{key} differs from this export configuration")
+            if (record.get("temporal_history_sha256") != item["temporal_history_sha256"]
+                    or record.get("temporal_scene_start_token") != item["scene_start_token"]):
+                raise ValueError("temporal history differs from this scene-start inference")
+        except Exception as error:
+            raise ValueError(f"existing teacher label is invalid: {path}: {error}; use --overwrite to regenerate") from error
+        skipped_existing += 1
+    target_count = sum(item["target"] for item in plan)
+    if skipped_existing == target_count:
+        print(f"skipped_existing={skipped_existing} target_count={target_count}; no inference needed")
+        return
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for Navformer teacher export")
     device = torch.device("cuda:0")
@@ -114,11 +180,14 @@ def main() -> None:
     if not getattr(model, "with_seg_head", False):
         raise RuntimeError("built Navformer model has no map seg_head")
     reset_tracking_state(model)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     previous_scene = None
-    for sample_index, info in enumerate(infos, start=args.sample_index):
+    previous_timestamp = None
+    saved = warmup = replayed_existing = 0
+    for item in plan:
+        sample_index, info = item["sample_index"], item["info"]
         scene = str(info["scene_token"])
-        if scene != previous_scene:
+        timestamp = float(info["timestamp"])
+        if scene != previous_scene or (previous_timestamp is not None and timestamp - previous_timestamp > 1.1e6):
             reset_tracking_state(model)
         geometry = build_camera_geometry(info, image_root, cv2)
         processed, image_tensor = preprocess_images(geometry, transforms, mmcv)
@@ -126,28 +195,40 @@ def main() -> None:
         prepare_temporal_metadata(model, model_inputs)
         with torch.no_grad():
             _, mapping = run_track_and_map_without_gt(model, model_inputs)
-        soft = extract_teacher_probabilities(mapping, args.input_kind)
+        soft, lane_count = extract_teacher_soft_scores(mapping)
         token = str(info["token"])
-        path = args.output_dir / f"{token}.pt"
-        if path.exists() and not args.overwrite:
-            raise FileExistsError(f"refusing to overwrite map teacher label: {path}")
-        lane_count = _channels(mapping["lane_score"], "lane_score").shape[0]
-        names = [f"lane_score_{i}" for i in range(lane_count)]
-        names += [f"drivable_score_{i}" for i in range(soft.shape[0] - len(names))]
-        record = {
-            "sample_index": sample_index, "token": token,
-            "teacher_map_soft": soft.cpu(), "teacher_map_shape": tuple(soft.shape),
-            "teacher_pc_range": tuple(args.teacher_pc_range),
-            "teacher_channel_names_or_ids": names,
-            "teacher_checkpoint": str(checkpoint_path),
-            "teacher_coordinate_frame": args.teacher_coordinate_frame,
-            "schema_version": TEACHER_MAP_SCHEMA_VERSION,
-        }
-        temporary = path.with_suffix(".pt.tmp")
-        torch.save(record, temporary)
-        temporary.replace(path)
-        print(f"index={sample_index} token={token} teacher_map_shape={tuple(soft.shape)}")
+        if item["target"]:
+            path = args.output_dir / f"{token}.pt"
+            if path.exists() and not args.overwrite:
+                replayed_existing += 1
+                print(f"index={sample_index} token={token} replayed_existing=true saved=false")
+            else:
+                names = [f"lane_score_{i}" for i in range(lane_count)] + ["drivable_score_0"]
+                record = {
+                    **expected,
+                    "sample_index": sample_index, "token": token,
+                    "teacher_map_soft": soft.cpu(), "teacher_map_shape": tuple(soft.shape),
+                    "teacher_channel_names_or_ids": names,
+                    "teacher_score_kind": TEACHER_SCORE_KIND,
+                    "teacher_raw_score_semantics": TEACHER_RAW_SCORE_SEMANTICS,
+                    "teacher_score_transform": TEACHER_SCORE_TRANSFORM,
+                    "temporal_mode": "scene_start_to_target",
+                    "temporal_scene_start_token": item["scene_start_token"],
+                    "temporal_history_sha256": item["temporal_history_sha256"],
+                    "schema_version": TEACHER_MAP_SCHEMA_VERSION,
+                }
+                temporary = path.with_suffix(".pt.tmp")
+                torch.save(record, temporary)
+                temporary.replace(path)
+                saved += 1
+                print(f"index={sample_index} token={token} target=true saved=true shape={tuple(soft.shape)}")
+        else:
+            warmup += 1
+            print(f"index={sample_index} token={token} target=false saved=false")
         previous_scene = scene
+        previous_timestamp = timestamp
+    print(f"targets={target_count} saved={saved} skipped_existing={skipped_existing} "
+          f"replayed_existing={replayed_existing} warmup_frames={warmup} inference_frames={len(plan)}")
 
 
 if __name__ == "__main__":

@@ -16,8 +16,8 @@ are an error, never silently truncated.
 ```
 
 `MapRasterDistillHead` is training-only. It consumes `[B,384,32,32]` BEV features
-and produces `[B,K,32,32]` logits. The Navformer/Pansegformer teacher produces
-**raster probabilities**, not vector instances. Its output is only an auxiliary
+and produces `[B,K,32,32]` logits. The Navformer/Pansegformer teacher provides
+**bounded raster soft mask scores**, not calibrated probabilities or vector instances. Its output is only an auxiliary
 KD target; inference needs neither that head nor raster post-processing.
 
 ## Coordinate contract
@@ -56,10 +56,20 @@ length. Open lines include both ends. Closed rings use 20 unique points.
 
 Teacher raster, also one `<token>.pt` per original frame:
 
-- `sample_index`, `token`, `schema_version=1`
+- `sample_index`, `token`, `schema_version=2`
 - `teacher_map_soft: float32[K,H,W]` in `[0,1]`, `teacher_map_shape`
 - `teacher_pc_range`, opaque `teacher_channel_names_or_ids`
-- `teacher_checkpoint`, `teacher_coordinate_frame`
+- `teacher_checkpoint`, `teacher_config`, `teacher_coordinate_frame`
+- `teacher_score_kind=panseg_mask_score_clamped_0_1`, raw score semantics and transform
+- scene-start token and SHA-256 digest of the ordered token/timestamp history
+
+In the inspected Pansegformer `get_bboxes()` implementation, `lane_score` is a
+`[K,H,W]` Tensor initialized to zero. Only selected pixels receive their raw
+mask score. `score_list` is a `[Q,H,W]` Tensor; its final channel is the raw
+drivable score. The export concatenates `lane_score` with `score_list[-1:]`
+and applies **only** `clamp(0,1)`. It never applies sigmoid or thresholds, so
+unselected lane background stays exactly zero. The bounded scores are usable
+as BCE soft targets, but are not asserted to be calibrated probabilities.
 
 Both exporters use the same `metadata["infos"][sample_index:sample_index+num_frames]`
 convention as the existing Navformer Agent exporter. Stage 3 validates token,
@@ -74,16 +84,29 @@ when overriding `--metadata`, point both exporters and the audit to that same
 file. An older Agent export made from a different metadata ordering will fail
 the token join instead of training against the wrong frame.
 
+Exports are resumable. An existing vector file is schema/index/token/ROI
+validated and skipped if valid; an invalid file is an error unless
+`--overwrite` is explicit. Teacher export builds each target scene's timeline
+from its first frame. On a partial resume it **still runs inference** through
+warm-up and already-exported frames to preserve tracking/BEV memory, but only
+writes missing targets. Existing teacher files are checked for schema,
+index/token, score semantics, checkpoint/config identity and scene-history
+digest before use. Old schema files need explicit regeneration with
+`--overwrite`; starting mid-scene does not silently create a new temporal
+initialization.
+
 ## Audit gate and known external dependencies
 
 The map teacher must have a real `seg_head` in its config **and** checkpoint.
-The exporter does not substitute an Agent-only checkpoint. It also requires
-explicit `--input-kind probabilities|logits`; logits are converted with sigmoid
-only when requested. Channel IDs such as `lane_score_0` are intentionally
-opaque. The audit reports probability activity, IoU and correlation against
+The exporter does not substitute an Agent-only checkpoint. Channel IDs such as
+`lane_score_0` are intentionally opaque. The audit reports bounded score
+activity, IoU and correlation against
 temporary vector-GT masks. Its JSON starts with `verified=false`, all support
-flags false and no semantic mappings. A human must inspect the orientation,
-visual diagnostic and class evidence, then set `verified=true`, map each
+flags false and no semantic mappings. Use
+`scripts/visualize_navformer_map_audit.py` **before training** to inspect GT
+vectors, three rasterized GT classes and all aligned teacher channels without
+a Stage 3 checkpoint. A human must inspect orientation, imagery and class
+evidence, then set `verified=true`, map each
 supported channel to `centerline`, `ped_crossing`, `road_boundary` or
 `drivable_aux`, and enable only justified support flags. Unsupported channels
 do not contribute to KD.
@@ -92,7 +115,7 @@ The nuPlan Map API and Navformer environment are server-side dependencies.
 The exporter requires `--map-root`/`--map-version` (or the corresponding
 `NUPLAN_MAPS_ROOT`/`NUPLAN_MAP_VERSION` variables). Local code has not verified
 the server's map database version, `CARPARK_AREA` layer availability,
-Pansegformer channel layout, or map coordinate convention. Those must be
+server checkpoint's Pansegformer channel layout, or map coordinate convention. Those must be
 checked on the server before declaring Stage 3 runnable. No fake GT or
 teacher data is generated when they are unavailable.
 
@@ -103,8 +126,9 @@ lambda_agent * L_stage2_agent`. Initial weights are `1.0, 1.0, 0.5` in
 `configs/stage3_map.yaml`. Vector queries use class/point Hungarian cost;
 open polylines compare forward/reverse point order, closed contours compare
 all cyclic and reverse-cyclic orders. Matched point loss uses the selected
-ordering; a small neighboring-segment direction loss is optional. Raster KD
-is BCE-with-logits against **probabilities**, restricted to audited channels
+ordering; a small neighboring-segment direction loss includes the closing
+segment for closed contours. Raster KD is BCE-with-logits against **bounded
+soft mask scores**, restricted to audited channels
 with configurable weights. Stage 2 Agent loss remains unchanged.
 
 AdamW groups: shared BEV `1e-5`, new Map decoder/head/raster head `1e-4`,
@@ -120,14 +144,20 @@ Stage 3 checkpoint for regression comparison.
 
 ## Server workflow
 
+The formal split is raw metadata indices **0-4999 for training** and
+**5000-5099 for held-out evaluation**. The preferred initialization remains
+`checkpoints/quest_stage2_agent_5000_e5.pt`.
+
 1. Export the requested raw-index train and evaluation ranges with
    `scripts/export_nuplan_vector_map.py` and
    `scripts/export_navformer_map_soft.py`. Specify the real nuPlan map root,
-   teacher config/checkpoint, metric range and teacher output kind.
+   teacher config/checkpoint and metric range. Request both 0-4999 and
+   5000-5099; the exporters accept repeated runs with validated existing files.
 2. Inspect `scripts/inspect_nuplan_vector_map.py`. Increase `N_map` if any frame
    exceeds query capacity; do not truncate GT.
 3. Run `scripts/audit_navformer_map_teacher.py` with candidate axis settings,
-   review its per-channel JSON, and explicitly verify only supported channels.
+   review its per-channel JSON and run `scripts/visualize_navformer_map_audit.py`
+   before any training. Explicitly verify only supported channels.
 4. Train with `python scripts/train_stage3_map.py` and evaluate with
    `python scripts/evaluate_stage3_map.py` on held-out frames. Run
    `scripts/visualize_stage3_map.py` to inspect the orientation against

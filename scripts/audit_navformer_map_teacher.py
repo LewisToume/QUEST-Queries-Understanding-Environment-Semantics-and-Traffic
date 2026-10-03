@@ -46,7 +46,7 @@ def main() -> None:
     args = parser.parse_args()
     infos = select_infos(load_infos(args.metadata), args.sample_index, args.num_frames)
     quest_range = (-50.0, -50.0, 50.0, 50.0)
-    probabilities, ground_truth = [], []
+    soft_scores, ground_truth = [], []
     reference = None
     for source_index, info in enumerate(infos, start=args.sample_index):
         token = str(info["token"])
@@ -55,17 +55,19 @@ def main() -> None:
         teacher = load_record(args.teacher_dir / f"{token}.pt")
         soft = validate_teacher_record(teacher, token, source_index)
         signature = (tuple(teacher["teacher_channel_names_or_ids"]),
-                     tuple(teacher["teacher_pc_range"]), str(teacher["teacher_checkpoint"]))
+                     tuple(teacher["teacher_pc_range"]), str(teacher["teacher_checkpoint"]),
+                     teacher["teacher_score_kind"], teacher["teacher_config_sha256"],
+                     teacher["teacher_checkpoint_size_bytes"], teacher["teacher_checkpoint_mtime_ns"])
         if reference is None:
             reference = signature
         elif signature != reference:
             raise ValueError(f"teacher channel/range/checkpoint changed at {token}")
-        probabilities.append(align_teacher_map_to_quest_bev(
+        soft_scores.append(align_teacher_map_to_quest_bev(
             soft, teacher["teacher_pc_range"], quest_range, 32, 32,
             args.row_axis, args.row_direction, args.col_direction,
         ))
         ground_truth.append(rasterize_vectors(vector, quest_range, 32, 32))
-    predictions = torch.stack(probabilities)
+    predictions = torch.stack(soft_scores)
     gt = torch.stack(ground_truth)
     channels = []
     for channel_index, name in enumerate(reference[0]):
@@ -86,8 +88,8 @@ def main() -> None:
                                 "soft_correlation": correlation})
         best = max(comparisons, key=lambda item: item["iou_at_0.5"])
         item = {
-            "channel": name, "mean_probability": float(channel.mean()),
-            "max_probability": float(channel.max()),
+            "channel": name, "mean_soft_score": float(channel.mean()),
+            "max_soft_score": float(channel.max()),
             "fraction_gt_0.1": float((channel > 0.1).float().mean()),
             "fraction_gt_0.3": float((channel > 0.3).float().mean()),
             "fraction_gt_0.5": float(thresholded.float().mean()),
@@ -102,6 +104,10 @@ def main() -> None:
         "sample_count": len(infos), "vector_map_classes": list(MAP_CLASS_NAMES),
         "teacher_channel_names_or_ids": list(reference[0]),
         "teacher_checkpoint": reference[2], "teacher_pc_range": list(reference[1]),
+        "teacher_score_kind": reference[3],
+        "teacher_config_sha256": reference[4],
+        "teacher_checkpoint_size_bytes": reference[5],
+        "teacher_checkpoint_mtime_ns": reference[6],
         "teacher_schema_version": teacher["schema_version"],
         "row_axis": args.row_axis, "row_direction": args.row_direction,
         "col_direction": args.col_direction,

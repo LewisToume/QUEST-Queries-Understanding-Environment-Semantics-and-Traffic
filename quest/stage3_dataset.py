@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .map_teacher import align_teacher_map_to_quest_bev, validate_teacher_record
+from .map_teacher import TEACHER_SCORE_KIND
 from .map_training import validate_vector_record
 from .openscene_dataset import OpenSceneMetadataDataset
 from .vector_map_labels import MAP_CLASS_NAMES
@@ -28,6 +29,8 @@ def load_teacher_audit(path: str | Path) -> dict[str, Any]:
         audit = json.load(stream)
     if audit.get("verified") is not True:
         raise ValueError("teacher channel/orientation audit must be explicitly VERIFIED before KD")
+    if audit.get("teacher_score_kind") != TEACHER_SCORE_KIND:
+        raise ValueError("teacher audit score semantics differ from Pansegformer mask scores")
     if audit.get("vector_map_classes") != list(MAP_CLASS_NAMES):
         raise ValueError("teacher audit was made for a different vector map taxonomy")
     names = audit.get("teacher_channel_names_or_ids", [])
@@ -42,7 +45,8 @@ def load_teacher_audit(path: str | Path) -> dict[str, Any]:
     if any(enabled and mapping[index] not in allowed for index, enabled in enumerate(support)):
         raise ValueError("every supported teacher channel needs a reviewed semantic mapping")
     for key in ("row_axis", "row_direction", "col_direction", "teacher_pc_range",
-                "teacher_checkpoint", "teacher_schema_version"):
+                "teacher_checkpoint", "teacher_schema_version", "teacher_config_sha256",
+                "teacher_checkpoint_size_bytes", "teacher_checkpoint_mtime_ns"):
         if key not in audit:
             raise ValueError(f"teacher audit missing {key}")
     if audit["row_axis"] not in ("x", "y") or audit["row_direction"] not in (-1, 1) or audit["col_direction"] not in (-1, 1):
@@ -107,6 +111,12 @@ class Stage3JoinedDataset(Dataset):
             raise ValueError(f"teacher pc_range differs from audit for {token}")
         if str(teacher["teacher_checkpoint"]) != self.audit["teacher_checkpoint"]:
             raise ValueError(f"teacher checkpoint differs from audit for {token}")
+        if teacher["teacher_score_kind"] != self.audit["teacher_score_kind"]:
+            raise ValueError(f"teacher score semantics differ from audit for {token}")
+        for key in ("teacher_config_sha256", "teacher_checkpoint_size_bytes",
+                    "teacher_checkpoint_mtime_ns"):
+            if teacher[key] != self.audit[key]:
+                raise ValueError(f"teacher {key} differs from audit for {token}")
         sample["source_index"] = torch.tensor(source_index, dtype=torch.int64)
         sample["vector_target"] = vector
         sample["teacher_map_aligned"] = align_teacher_map_to_quest_bev(

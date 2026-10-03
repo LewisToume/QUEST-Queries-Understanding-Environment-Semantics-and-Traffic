@@ -1,7 +1,7 @@
 stage: map_hybrid_distillation
 train:
   start_index: 0
-  num_samples: 500
+  num_samples: 5000
   epochs: 5
   batch_size: 1
   bev_lr: 1.0e-5
@@ -25,7 +25,7 @@ loss_weights:
   lambda_map_kd: 1.0
   lambda_agent: 0.5
 eval:
-  start_index: 500
+  start_index: 5000
   num_samples: 100
   batch_size: 1
   confidence_threshold: 0.25
