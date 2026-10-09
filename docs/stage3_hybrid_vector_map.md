@@ -5,7 +5,7 @@ Stage 3 starts from the Stage 2 Agent checkpoint. The production prediction is
 background) and `[B,N_map,20,2]` normalized local XY points. The existing
 `MapHead` sigmoid output is decoded to meters for evaluation. Stage 3 constructs
 the model with `C_map=3`; Stage 1/2 model configurations and checkpoints are
-unchanged. `N_map` is configurable and all GT vectors must fit; excess instances
+unchanged. `N_map` comes from the certified full train/validation capacity audit; excess instances
 are an error, never silently truncated.
 
 ```
@@ -29,8 +29,10 @@ geometry is transformed by its inverse before clipping to the model's metric
 ROI. Thus global +X/+Y are **not** assumed to be LiDAR +X/+Y. The global
 directions of local +X and +Y are respectively columns 0 and 1 of
 `lidar2global[:3,:3]`. A physical forward/left interpretation has not been
-verified from the local metadata and is deliberately not assumed. Tilted
-LiDAR poses fail closed until map height is handled in 3D.
+verified from the local metadata and is deliberately not assumed. For planar
+map geometry, each global XY point is placed at the current LiDAR origin's
+global Z before applying the full inverse 3D pose; this is the explicit
+reference-height convention. Proper pitch/roll are accepted and validated.
 
 Navformer Pansegformer raster scores live in OpenScene **Ego XY**, while QUEST
 BEV and vector GT live in **LiDAR XY**. Each QUEST cell center `[x,y,0,1]`
@@ -51,10 +53,11 @@ at `(0,0)`, and labeled local +X/+Y axes.
 
 Vector GT, one `<token>.pt` per original metadata frame:
 
-- `sample_index`, `token`, `schema_version=2`, `coordinate_frame=openscene_lidar_xy`
+- `sample_index`, `token`, `scene_token`, `schema_version=3`, `coordinate_frame=openscene_lidar_xy`
 - `class_ids: int64[N]`, `points_xy_m: float32[N,20,2]`
 - `is_closed: bool[N]`, `length_m: float32[N]`, `xy_range_m`
-- `num_points`, `min_length_m`, `map_version`, `vector_semantics_version`
+- `num_points`, `min_length_m`, `map_version`, `map_location`, `map_height_reference`,
+  `map_reference_global_z_m`, `vector_semantics_version`
 - `geometry_diagnostics.road_area` counts valid and skipped malformed polygons
 
 Class 0 is LANE/LANE_CONNECTOR baseline centerline; class 1 is CROSSWALK
@@ -114,7 +117,7 @@ digest before use. Old schema files need explicit regeneration with
 `--overwrite`; starting mid-scene does not silently create a new temporal
 initialization. Schema 2 Teacher labels asserted the wrong LiDAR frame and
 must be regenerated, then re-audited before training.
-The changed polygon semantics require vector schema 2; old vector GT files
+The projected-city and planar-height convention requires vector schema 3; old vector GT files
 must be regenerated. Training preflight rejects mixed export provenance and
 the Stage 3 checkpoint records it for held-out evaluation. Re-run the map
 teacher audit after regenerating GT; a verified audit made against the old
@@ -143,6 +146,13 @@ the server's map database version, `CARPARK_AREA` layer availability,
 server checkpoint's Pansegformer channel layout, or map coordinate convention. Those must be
 checked on the server before declaring Stage 3 runnable. No fake GT or
 teacher data is generated when they are unavailable.
+
+The exporter resolves missing `map_location` by projecting actual GPKG layer
+extents into each city's `projectedCoordSystem` and requiring exactly one
+global XY match, with consistent city per `scene_token`. The optional
+`--check-map-cast` compares source GPKG rows against API-loaded layer rows and
+flags missing/empty geometry while investigating invalid-cast warnings. This
+does not replace visual inspection of map geometry on the server.
 
 ## Loss and checkpoint
 
@@ -179,8 +189,11 @@ The formal split is raw metadata indices **0-4999 for training** and
    `scripts/export_navformer_map_soft.py`. Specify the real nuPlan map root,
    teacher config/checkpoint and metric range. Request both 0-4999 and
    5000-5099; the exporters accept repeated runs with validated existing files.
-2. Inspect `scripts/inspect_nuplan_vector_map.py`. Increase `N_map` if any frame
-   exceeds query capacity; do not truncate GT.
+2. Inspect `scripts/inspect_nuplan_vector_map.py` and run
+   `scripts/audit_vector_gt_capacity.py` over all 5000 train and 100 validation
+   frames. It reports per-class and total P50/P95/P99/max and counts above
+   50/64/100/128. Only complete valid split coverage certifies a query count
+   for training/evaluation; no GT is truncated.
 3. Run `scripts/audit_navformer_map_teacher.py` with candidate axis settings,
    review its per-channel JSON and run `scripts/visualize_navformer_map_audit.py`
    before any training. Explicitly verify only supported channels.

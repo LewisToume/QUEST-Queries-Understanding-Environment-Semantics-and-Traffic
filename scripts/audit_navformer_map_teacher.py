@@ -15,7 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from quest.map_teacher import (
     align_teacher_map_to_quest_bev, resolve_lidar2ego, validate_teacher_record,
 )
-from quest.map_training import validate_vector_record
+from quest.map_training import VECTOR_PROVENANCE_KEYS, validate_vector_record
 from quest.stage3_dataset import load_record
 from quest.vector_map_labels import MAP_CLASS_NAMES
 from scripts.run_navformer_openscene_teacher import load_infos, select_infos
@@ -55,10 +55,8 @@ def main() -> None:
     for source_index, info in enumerate(infos, start=args.sample_index):
         token = str(info["token"])
         vector = load_record(args.vector_dir / f"{token}.pt")
-        validate_vector_record(vector, token, source_index, quest_range)
-        current_vector_provenance = tuple(vector[key] for key in (
-            "num_points", "min_length_m", "map_version", "vector_semantics_version"
-        ))
+        validate_vector_record(vector, token, source_index, quest_range, expected_info=info)
+        current_vector_provenance = tuple(vector[key] for key in VECTOR_PROVENANCE_KEYS)
         if vector_provenance is None:
             vector_provenance = current_vector_provenance
         elif current_vector_provenance != vector_provenance:
@@ -136,10 +134,7 @@ def main() -> None:
         "verified": False,
         "review_note": "Review orientation and semantic classes; explicitly set verified=true and support mask only after human inspection.",
         "sample_count": len(infos), "vector_map_classes": list(MAP_CLASS_NAMES),
-        "vector_gt_provenance": dict(zip(
-            ("num_points", "min_length_m", "map_version", "vector_semantics_version"),
-            vector_provenance,
-        )),
+        "vector_gt_provenance": dict(zip(VECTOR_PROVENANCE_KEYS, vector_provenance)),
         "teacher_channel_names_or_ids": list(reference[0]),
         "teacher_checkpoint": reference[2], "teacher_pc_range": list(reference[1]),
         "teacher_score_kind": reference[3],

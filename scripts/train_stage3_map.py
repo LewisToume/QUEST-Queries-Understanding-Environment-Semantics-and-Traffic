@@ -14,7 +14,8 @@ from quest.agent_training import load_checkpoint_cpu, prepare_navformer_agent_ba
 from quest.bev_pretraining import gradient_rms
 from quest.map_teacher import MapRasterDistillHead
 from quest.map_training import (
-    STAGE3_MODULES, configure_stage3, load_stage2_for_stage3,
+    STAGE3_MODULES, VECTOR_PROVENANCE_KEYS, configure_stage3, load_stage2_for_stage3,
+    load_vector_capacity_audit,
     mixed_stage3_loss, save_stage3_checkpoint, stage3_forward,
     validate_vector_record,
 )
@@ -51,13 +52,16 @@ def build_dataset(model: QUESTModel, config: dict, stage1: dict, audit: dict,
 
 def preflight_vectors(dataset: Stage3JoinedDataset, query_count: int) -> dict:
     provenance = None
+    scene_locations = {}
     for index, info in zip(dataset.source_indices, dataset.images.infos):
         token = str(info["token"])
         record = load_record(dataset.vector_dir / f"{token}.pt")
-        validate_vector_record(record, token, index, dataset.quest_range)
-        current = {key: record[key] for key in (
-            "num_points", "min_length_m", "map_version", "vector_semantics_version"
-        )}
+        validate_vector_record(record, token, index, dataset.quest_range, expected_info=info)
+        scene = str(info["scene_token"])
+        previous_location = scene_locations.setdefault(scene, record["map_location"])
+        if previous_location != record["map_location"]:
+            raise ValueError(f"mixed vector GT cities within scene={scene}")
+        current = {key: record[key] for key in VECTOR_PROVENANCE_KEYS}
         if provenance is None:
             provenance = current
         elif current != provenance:
@@ -153,7 +157,10 @@ def main() -> None:
         raise ValueError("missing_teacher must be error or explicit skip")
     if list(config["map"]["class_names"]) != list(MAP_CLASS_NAMES) or int(config["map"]["num_points"]) != 20:
         raise ValueError("Stage 3 map taxonomy or point count is incompatible")
-    model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=int(config["map"]["map_query_count"]), P=20)
+    query_count, audited_provenance = load_vector_capacity_audit(
+        resolve(config["paths"]["vector_capacity_audit_path"]), config
+    )
+    model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=query_count, P=20)
     model = QUESTModel(**model_config)
     audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]))
     count = args.num_samples if args.num_samples is not None else int(config["train"]["num_samples"])
@@ -161,7 +168,9 @@ def main() -> None:
     if count <= 0 or epochs <= 0:
         raise ValueError("num-samples and epochs must be positive")
     dataset = build_dataset(model, config, stage1, audit, int(config["train"]["start_index"]), count)
-    vector_provenance = preflight_vectors(dataset, int(config["map"]["map_query_count"]))
+    vector_provenance = preflight_vectors(dataset, query_count)
+    if vector_provenance != audited_provenance:
+        raise ValueError("training vector GT provenance differs from certified capacity audit")
     loader = DataLoader(dataset, batch_size=int(config["train"]["batch_size"]),
                         shuffle=True, num_workers=0, collate_fn=collate_stage3)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -173,7 +182,7 @@ def main() -> None:
     optimizer = configure_stage3(model, raster_head, config["train"])
     effective = {**config, "agent_train": stage2["train"], "agent_loss": stage2["agent_loss"],
                  "map_loss": config["map"], "effective_num_samples": len(dataset),
-                 "effective_epochs": epochs}
+                 "effective_epochs": epochs, "effective_map_query_count": query_count}
     print("optimizer_groups=" + str([(group["lr"], len(group["params"])) for group in optimizer.param_groups]))
     for epoch in range(1, epochs + 1):
         train_one_epoch(model, raster_head, loader, optimizer, device, effective, audit, epoch)

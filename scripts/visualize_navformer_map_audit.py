@@ -60,7 +60,7 @@ def main() -> None:
     for sample_index, info in enumerate(infos, start=args.sample_index):
         token = str(info["token"])
         vector = load_record(args.vector_dir / f"{token}.pt")
-        validate_vector_record(vector, token, sample_index, xy_range)
+        validate_vector_record(vector, token, sample_index, xy_range, expected_info=info)
         teacher = load_record(args.teacher_dir / f"{token}.pt")
         scores = validate_teacher_record(teacher, token, sample_index)
         lidar2ego = resolve_lidar2ego(info)

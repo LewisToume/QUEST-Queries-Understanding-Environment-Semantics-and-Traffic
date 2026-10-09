@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 import math
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,16 @@ from .map_teacher import (
 )
 from .model import QUEST_ARCHITECTURE_VERSION
 from .vector_map_labels import (
-    COORDINATE_FRAME, MAP_CLASS_NAMES, VECTOR_GT_SCHEMA_VERSION, VECTOR_SEMANTICS_VERSION,
+    COORDINATE_FRAME, MAP_CLASS_NAMES, MAP_HEIGHT_REFERENCE, VECTOR_GT_SCHEMA_VERSION,
+    VECTOR_SEMANTICS_VERSION, require_lidar2global,
 )
 
 
 STAGE3_NAME = "map_hybrid_distillation"
+VECTOR_PROVENANCE_KEYS = (
+    "num_points", "min_length_m", "map_version", "vector_semantics_version",
+    "map_height_reference",
+)
 STAGE3_MODULES = (
     "geometry_lift", "bev_encoder", "agent_proposal_head", "agent_decoder",
     "agent_head", "map_decoder", "map_head",
@@ -31,7 +37,9 @@ STAGE3_MODULES = (
 def validate_vector_record(record: Mapping[str, Any], token: str, sample_index: int,
                            xy_range: tuple[float, float, float, float], *,
                            expected_min_length_m: float | None = None,
-                           expected_map_version: str | None = None) -> None:
+                           expected_map_version: str | None = None,
+                           expected_info: Mapping[str, Any] | None = None,
+                           expected_map_location: str | None = None) -> None:
     if record.get("schema_version") != VECTOR_GT_SCHEMA_VERSION:
         raise ValueError("nuPlan vector GT schema mismatch; regenerate old vector labels")
     if record.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION:
@@ -48,6 +56,21 @@ def validate_vector_record(record: Mapping[str, Any], token: str, sample_index: 
         raise ValueError("nuPlan vector GT min_length_m differs from this export")
     if expected_map_version is not None and version != expected_map_version:
         raise ValueError("nuPlan vector GT map_version differs from this export")
+    if record.get("map_height_reference") != MAP_HEIGHT_REFERENCE:
+        raise ValueError("nuPlan vector GT map height convention mismatch; regenerate labels")
+    reference_z = record.get("map_reference_global_z_m")
+    if not isinstance(reference_z, (float, int)) or not math.isfinite(reference_z):
+        raise ValueError("nuPlan vector GT global reference height is invalid")
+    if not isinstance(record.get("map_location"), str) or not record["map_location"]:
+        raise ValueError("nuPlan vector GT resolved map_location is missing")
+    if expected_map_location is not None and record["map_location"] != expected_map_location:
+        raise ValueError("nuPlan vector GT map_location differs from projected city match")
+    if expected_info is not None:
+        if str(record.get("scene_token")) != str(expected_info.get("scene_token")):
+            raise ValueError("nuPlan vector GT scene_token differs from metadata")
+        current_z = float(require_lidar2global(expected_info)[2, 3])
+        if not math.isclose(reference_z, current_z, rel_tol=0, abs_tol=1e-4):
+            raise ValueError("nuPlan vector GT reference height differs from metadata")
     if str(record.get("token")) != token or record.get("sample_index") != sample_index:
         raise ValueError(f"nuPlan vector GT index/token mismatch for {token}")
     if record.get("coordinate_frame") != COORDINATE_FRAME:
@@ -69,6 +92,37 @@ def validate_vector_record(record: Mapping[str, Any], token: str, sample_index: 
     if bool(((points[..., 0] < x0 - 1e-3) | (points[..., 0] > x1 + 1e-3)
              | (points[..., 1] < y0 - 1e-3) | (points[..., 1] > y1 + 1e-3)).any()):
         raise ValueError("nuPlan vector GT contains points outside ROI")
+
+
+def load_vector_capacity_audit(path: str | Path, config: Mapping[str, Any]) -> tuple[int, dict]:
+    with Path(path).open(encoding="utf-8") as stream:
+        audit = json.load(stream)
+    if (audit.get("capacity_certified") is not True
+            or audit.get("schema_version") != VECTOR_GT_SCHEMA_VERSION
+            or audit.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION):
+        raise ValueError("full train/validation Vector GT capacity audit is missing or obsolete")
+    for split, section in (("train", config["train"]), ("eval", config["eval"])):
+        actual = audit.get("splits", {}).get(split, {})
+        if (actual.get("start_index") != section["start_index"]
+                or actual.get("num_samples") != section["num_samples"]
+                or actual.get("available") != section["num_samples"]):
+            raise ValueError(f"Vector GT capacity audit does not cover full {split} split")
+    provenance = audit.get("vector_gt_provenance")
+    if (not isinstance(provenance, dict)
+            or provenance.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION
+            or provenance.get("map_height_reference") != MAP_HEIGHT_REFERENCE
+            or provenance.get("num_points") != 20
+            or not provenance.get("map_version")):
+        raise ValueError("Vector GT capacity audit provenance is incompatible")
+    count = audit.get("recommended_map_query_count")
+    if not isinstance(count, int) or count <= 0:
+        raise ValueError("Vector GT audit has no valid query capacity")
+    if count < max(audit["splits"][split]["total"]["max"] for split in ("train", "eval")):
+        raise ValueError("Vector GT audit query capacity would truncate targets")
+    configured = config["map"].get("map_query_count")
+    if configured is not None and int(configured) != count:
+        raise ValueError("configured map_query_count differs from full Vector GT audit")
+    return count, provenance
 
 
 def equivalent_point_orders(points: torch.Tensor, closed: bool) -> torch.Tensor:
@@ -314,6 +368,7 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead,
     if not isinstance(provenance, Mapping) or provenance.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION:
         raise ValueError("Stage 3 checkpoint vector GT semantics mismatch")
     if (provenance.get("num_points") != 20 or not provenance.get("map_version")
+            or provenance.get("map_height_reference") != MAP_HEIGHT_REFERENCE
             or not isinstance(provenance.get("min_length_m"), (float, int))):
         raise ValueError("Stage 3 checkpoint vector GT provenance is incomplete")
     if checkpoint.get("teacher_schema_version") != TEACHER_MAP_SCHEMA_VERSION:

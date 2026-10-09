@@ -10,7 +10,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from quest.map_training import validate_vector_record
+from quest.map_training import load_vector_capacity_audit, validate_vector_record
 from quest.stage3_dataset import load_record
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES
@@ -86,7 +86,7 @@ def main() -> None:
         if degenerate_mask is not None:
             degenerate += int(degenerate_mask.sum())
         try:
-            validate_vector_record(record, token, sample_index, xy_range)
+            validate_vector_record(record, token, sample_index, xy_range, expected_info=info)
         except (ValueError, TypeError, KeyError) as error:
             invalid_records.append(f"index={sample_index} token={token}: {error}")
             continue
@@ -131,9 +131,14 @@ def main() -> None:
     for error in invalid_records[:20]:
         print(error)
     print(f"frames_exceeding_instance_limits={exceed}")
-    query_count = int(stage3["map"]["map_query_count"])
-    if any(value > query_count for value in counts):
-        raise ValueError(f"GT exceeds configured N_map={query_count}; increase query count before training")
+    capacity_path = PROJECT_ROOT / stage3["paths"]["vector_capacity_audit_path"]
+    if capacity_path.is_file():
+        query_count, _ = load_vector_capacity_audit(capacity_path, stage3)
+        print(f"certified_N_map={query_count}")
+        if any(value > query_count for value in counts):
+            raise ValueError(f"GT exceeds certified N_map={query_count}")
+    else:
+        print("certified_N_map=pending_full_train_eval_audit")
     if invalid_records or missing:
         raise ValueError("vector GT coverage or validation failed; see report above")
 

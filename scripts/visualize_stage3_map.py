@@ -11,7 +11,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.agent_training import load_checkpoint_cpu
 from quest.map_teacher import MapRasterDistillHead
-from quest.map_training import denormalize_points, load_stage3_checkpoint, stage3_forward
+from quest.map_training import (VECTOR_PROVENANCE_KEYS, denormalize_points,
+                                load_stage3_checkpoint, load_vector_capacity_audit, stage3_forward)
 from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3, load_teacher_audit
 from quest.utils import load_yaml_config
@@ -33,7 +34,10 @@ def main() -> None:
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
-    model_config.update(C_map=3, N_map=int(config["map"]["map_query_count"]), P=20)
+    query_count, audited_provenance = load_vector_capacity_audit(
+        resolve(config["paths"]["vector_capacity_audit_path"]), config
+    )
+    model_config.update(C_map=3, N_map=query_count, P=20)
     model = QUESTModel(**model_config)
     audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]))
     raster_head = MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
@@ -44,9 +48,9 @@ def main() -> None:
     raster_head.to(device).eval()
     dataset = build_dataset(model, config, stage1, audit, args.sample_index, 1)
     sample = dataset[0]
-    if checkpoint["vector_gt_provenance"] != {key: sample["vector_target"][key] for key in (
-        "num_points", "min_length_m", "map_version", "vector_semantics_version"
-    )}:
+    if checkpoint["vector_gt_provenance"] != audited_provenance or audited_provenance != {
+        key: sample["vector_target"][key] for key in VECTOR_PROVENANCE_KEYS
+    }:
         raise ValueError("visualization vector GT provenance differs from Stage 3 checkpoint")
     batch = collate_stage3([sample])
     with torch.no_grad():

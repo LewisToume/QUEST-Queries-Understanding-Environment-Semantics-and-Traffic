@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import warnings
 from pathlib import Path
 
 import torch
@@ -11,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.vector_map_labels import extract_vector_map
+from quest.nuplan_map_locator import NuPlanMapLocator
 from quest.map_training import validate_vector_record
 from quest.stage3_dataset import load_record
 from quest.utils import load_yaml_config
@@ -28,6 +30,8 @@ def main() -> None:
     parser.add_argument("--num-points", type=int, default=20)
     parser.add_argument("--min-length-m", type=float, default=1.0)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--check-map-cast", action="store_true",
+                        help="Fail if map loading emits invalid-cast warnings or projected layer counts differ from GPKG metadata")
     args = parser.parse_args()
     if args.map_root is None or not args.map_version:
         raise ValueError("--map-root and --map-version (or NUPLAN_MAPS_ROOT/NUPLAN_MAP_VERSION) are required")
@@ -36,7 +40,10 @@ def main() -> None:
     from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
     from nuplan.common.maps.nuplan_map.map_factory import NuPlanMapFactory
 
-    factory = NuPlanMapFactory(GPKGMapsDB(str(args.map_root), args.map_version))
+    maps_db = GPKGMapsDB(map_version=args.map_version, map_root=str(args.map_root))
+    factory = NuPlanMapFactory(maps_db)
+    locator = NuPlanMapLocator(maps_db)
+    print(f"projected_map_bounds={locator.bounds}")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
     x0, x1 = model_config["x_range"]
     y0, y1 = model_config["y_range"]
@@ -45,7 +52,9 @@ def main() -> None:
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
     maps = {}
+    checked_locations = set()
     for sample_index, info in enumerate(infos, start=args.sample_index):
+        location = locator.resolve(info)
         path = output / f"{info['token']}.pt"
         if path.exists() and not args.overwrite:
             try:
@@ -54,6 +63,8 @@ def main() -> None:
                     existing, str(info["token"]), sample_index, quest_range,
                     expected_min_length_m=args.min_length_m,
                     expected_map_version=args.map_version,
+                    expected_info=info,
+                    expected_map_location=location,
                 )
                 if existing["num_points"] != args.num_points:
                     raise ValueError("existing vector num_points differs from --num-points")
@@ -61,19 +72,27 @@ def main() -> None:
                 raise ValueError(f"existing vector GT is invalid: {path}: {error}; use --overwrite to regenerate") from error
             print(f"index={sample_index} token={info['token']} skipped_existing=true")
             continue
-        location = info.get("map_location")
-        if not location:
-            raise KeyError(f"OpenScene frame {sample_index} has no map_location")
         if location not in maps:
             maps[location] = factory.build_map_from_name(location)
-        record = extract_vector_map(
-            info, maps[location], sample_index, quest_range,
-            args.num_points, args.min_length_m, map_version=args.map_version,
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            record = extract_vector_map(
+                info, maps[location], sample_index, quest_range,
+                args.num_points, args.min_length_m, map_version=args.map_version,
+                map_location=location,
+            )
+        invalid_cast = [str(item.message) for item in caught
+                        if "invalid value encountered in cast" in str(item.message)]
+        if invalid_cast:
+            raise RuntimeError(f"map extraction emitted invalid-cast warning for token={info['token']}: {invalid_cast}")
+        if args.check_map_cast and location not in checked_locations:
+            from quest.nuplan_map_locator import check_map_layer_counts
+            check_map_layer_counts(maps_db, location)
+            checked_locations.add(location)
         temporary = path.with_suffix(".pt.tmp")
         torch.save(record, temporary)
         temporary.replace(path)
-        print(f"index={sample_index} token={info['token']} vectors={len(record['class_ids'])} "
+        print(f"index={sample_index} token={info['token']} map={location} vectors={len(record['class_ids'])} "
               f"road_geometry={record['geometry_diagnostics']['road_area']}")
 
 

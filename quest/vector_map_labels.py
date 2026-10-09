@@ -8,10 +8,11 @@ import numpy as np
 import torch
 
 
-VECTOR_GT_SCHEMA_VERSION = 2
-VECTOR_SEMANTICS_VERSION = "polygon_boundary_before_roi_road_union_v2"
+VECTOR_GT_SCHEMA_VERSION = 3
+VECTOR_SEMANTICS_VERSION = "polygon_boundary_before_roi_road_union_lidar_height_v3"
 MAP_CLASS_NAMES = ("centerline", "ped_crossing", "road_boundary")
 COORDINATE_FRAME = "openscene_lidar_xy"
+MAP_HEIGHT_REFERENCE = "per_frame_lidar_origin_global_z"
 
 
 def require_lidar2global(info: Mapping[str, Any]) -> np.ndarray:
@@ -20,22 +21,27 @@ def require_lidar2global(info: Mapping[str, Any]) -> np.ndarray:
         raise ValueError("metadata lidar2global must be a finite 4x4 matrix")
     if not np.allclose(matrix[3], [0, 0, 0, 1], atol=1e-5):
         raise ValueError("lidar2global has an invalid homogeneous row")
-    if not np.allclose(matrix[:3, :3].T @ matrix[:3, :3], np.eye(3), atol=1e-3):
+    rotation = matrix[:3, :3]
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-3):
         raise ValueError("lidar2global rotation is not orthonormal")
-    inverse = np.linalg.inv(matrix)
-    if np.max(np.abs(inverse[:2, 2])) > 1e-3:
-        raise ValueError("tilted lidar frame needs a 3D map height transform")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-3):
+        raise ValueError("lidar2global rotation must be proper with determinant +1")
     return matrix
 
 
 def global_to_local_geometry(geometry: Any, lidar2global: np.ndarray) -> Any:
     from shapely.affinity import affine_transform
 
-    inverse = np.linalg.inv(lidar2global)
+    matrix = require_lidar2global({"lidar2global": lidar2global})
+    inverse = np.linalg.inv(matrix)
+    # The map is 2D. Place every map point at the LiDAR origin's global height,
+    # so pitch/roll do not turn an arbitrary global z=0 into an XY offset.
+    reference_z = float(matrix[2, 3])
     return affine_transform(
         geometry,
         [inverse[0, 0], inverse[0, 1], inverse[1, 0], inverse[1, 1],
-         inverse[0, 3], inverse[1, 3]],
+         inverse[0, 2] * reference_z + inverse[0, 3],
+         inverse[1, 2] * reference_z + inverse[1, 3]],
     )
 
 
@@ -152,7 +158,7 @@ def _baseline_geometry(map_object: Any) -> Any:
 def extract_vector_map(
     info: Mapping[str, Any], map_api: Any, sample_index: int,
     xy_range: tuple[float, float, float, float], num_points: int = 20,
-    min_length_m: float = 1.0, *, map_version: str,
+    min_length_m: float = 1.0, *, map_version: str, map_location: str,
 ) -> dict[str, Any]:
     from nuplan.common.maps.maps_datatypes import SemanticMapLayer
     from nuplan.common.actor_state.state_representation import Point2D
@@ -226,6 +232,7 @@ def extract_vector_map(
     road_diagnostics["skipped_unreadable"] = unreadable_road_objects
     return {
         "sample_index": int(sample_index), "token": str(info["token"]),
+        "scene_token": str(info["scene_token"]),
         "class_ids": torch.tensor(classes, dtype=torch.int64),
         "points_xy_m": torch.tensor(np.stack(points) if points else np.empty((0, num_points, 2)), dtype=torch.float32),
         "is_closed": torch.tensor(closed_flags, dtype=torch.bool),
@@ -234,6 +241,9 @@ def extract_vector_map(
         "coordinate_frame": COORDINATE_FRAME,
         "num_points": int(num_points), "min_length_m": float(min_length_m),
         "map_version": str(map_version),
+        "map_location": str(map_location),
+        "map_height_reference": MAP_HEIGHT_REFERENCE,
+        "map_reference_global_z_m": float(matrix[2, 3]),
         "vector_semantics_version": VECTOR_SEMANTICS_VERSION,
         "geometry_diagnostics": {"road_area": road_diagnostics},
         "schema_version": VECTOR_GT_SCHEMA_VERSION,

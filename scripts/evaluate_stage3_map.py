@@ -15,6 +15,7 @@ from quest.agent_training import load_checkpoint_cpu
 from quest.map_teacher import MapRasterDistillHead, soft_map_distillation_loss
 from quest.map_training import (
     class_aware_vector_matches, denormalize_points, load_stage3_checkpoint,
+    load_vector_capacity_audit,
     stage3_forward,
 )
 from quest.model import QUESTModel
@@ -37,13 +38,18 @@ def main() -> None:
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
-    model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=int(config["map"]["map_query_count"]), P=20)
+    query_count, audited_provenance = load_vector_capacity_audit(
+        resolve(config["paths"]["vector_capacity_audit_path"]), config
+    )
+    model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=query_count, P=20)
     model = QUESTModel(**model_config)
     audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]))
     start = args.start if args.start is not None else int(config["eval"]["start_index"])
     count = args.count if args.count is not None else int(config["eval"]["num_samples"])
     dataset = build_dataset(model, config, stage1, audit, start, count)
-    vector_provenance = preflight_vectors(dataset, int(config["map"]["map_query_count"]))
+    vector_provenance = preflight_vectors(dataset, query_count)
+    if vector_provenance != audited_provenance:
+        raise ValueError("evaluation vector GT provenance differs from certified capacity audit")
     loader = DataLoader(dataset, batch_size=int(config["eval"]["batch_size"]),
                         shuffle=False, num_workers=0, collate_fn=collate_stage3)
     raster_head = MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))

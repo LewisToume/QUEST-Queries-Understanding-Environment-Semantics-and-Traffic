@@ -6,7 +6,8 @@ import torch
 from quest.map_teacher import align_teacher_map_to_quest_bev, soft_map_distillation_loss
 from quest.map_training import equivalent_point_orders, match_vector_queries, validate_vector_record
 from quest.vector_map_labels import (
-    COORDINATE_FRAME, VECTOR_GT_SCHEMA_VERSION, VECTOR_SEMANTICS_VERSION, resample_polyline,
+    COORDINATE_FRAME, MAP_HEIGHT_REFERENCE, VECTOR_GT_SCHEMA_VERSION,
+    VECTOR_SEMANTICS_VERSION, resample_polyline,
 )
 
 
@@ -65,6 +66,8 @@ class Stage3MapTest(unittest.TestCase):
         record = {"schema_version": VECTOR_GT_SCHEMA_VERSION, "sample_index": 4, "token": "token-4",
                   "coordinate_frame": COORDINATE_FRAME, "xy_range_m": (-50, -50, 50, 50),
                   "num_points": 20, "min_length_m": 1.0, "map_version": "test-map",
+                  "map_height_reference": MAP_HEIGHT_REFERENCE, "map_reference_global_z_m": 0.0,
+                  "map_location": "test-city", "scene_token": "scene-4",
                   "vector_semantics_version": VECTOR_SEMANTICS_VERSION,
                   "class_ids": torch.empty(0, dtype=torch.long),
                   "points_xy_m": torch.empty(0, 20, 2),
@@ -85,6 +88,12 @@ class Stage3MapTest(unittest.TestCase):
         record["schema_version"] = 1
         with self.assertRaisesRegex(ValueError, "regenerate old vector labels"):
             validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50))
+        record["schema_version"] = VECTOR_GT_SCHEMA_VERSION
+        info = {"scene_token": "scene-4", "lidar2global": np.eye(4)}
+        validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50), expected_info=info)
+        record["map_reference_global_z_m"] = 100.0
+        with self.assertRaisesRegex(ValueError, "reference height differs"):
+            validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50), expected_info=info)
 
 
 if __name__ == "__main__":

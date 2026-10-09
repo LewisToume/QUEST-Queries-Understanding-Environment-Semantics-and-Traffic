@@ -12,7 +12,7 @@ train:
   missing_teacher: error
 map:
   class_names: [centerline, ped_crossing, road_boundary]
-  map_query_count: 50
+  map_query_count: null  # Resolved from the certified full train/validation Vector GT audit.
   num_points: 20
   map_cls_cost_weight: 2.0
   map_point_cost_weight: 5.0
@@ -35,5 +35,6 @@ paths:
   checkpoint_path: checkpoints/quest_stage3_map.pt
   agent_soft_labels_dir: data/soft_labels_navformer
   vector_gt_dir: data/vector_map_gt
+  vector_capacity_audit_path: data/vector_map_capacity_audit.json
   map_teacher_dir: data/navformer_map_soft
   teacher_audit_path: data/navformer_map_audit.json

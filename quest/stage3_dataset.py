@@ -14,7 +14,7 @@ from .map_teacher import (
 )
 from .map_training import validate_vector_record
 from .openscene_dataset import OpenSceneMetadataDataset
-from .vector_map_labels import MAP_CLASS_NAMES, VECTOR_SEMANTICS_VERSION
+from .vector_map_labels import MAP_CLASS_NAMES, MAP_HEIGHT_REFERENCE, VECTOR_SEMANTICS_VERSION
 
 
 def load_record(path: Path) -> Mapping[str, Any]:
@@ -43,6 +43,7 @@ def load_teacher_audit(path: str | Path) -> dict[str, Any]:
     vector_provenance = audit.get("vector_gt_provenance")
     if (not isinstance(vector_provenance, dict)
             or vector_provenance.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION
+            or vector_provenance.get("map_height_reference") != MAP_HEIGHT_REFERENCE
             or vector_provenance.get("num_points") != 20
             or not vector_provenance.get("map_version")
             or not isinstance(vector_provenance.get("min_length_m"), (float, int))):
@@ -116,7 +117,8 @@ class Stage3JoinedDataset(Dataset):
         if "sample_index" in agent_payload and agent_payload["sample_index"] != source_index:
             raise ValueError(f"Agent pseudo label index/token mismatch for {token}")
         vector = load_record(self.vector_dir / f"{token}.pt")
-        validate_vector_record(vector, token, source_index, self.quest_range)
+        validate_vector_record(vector, token, source_index, self.quest_range,
+                               expected_info=self.images.infos[position])
         for key, expected in self.audit["vector_gt_provenance"].items():
             if vector.get(key) != expected:
                 raise ValueError(f"vector GT {key} differs from audited labels for {token}")
