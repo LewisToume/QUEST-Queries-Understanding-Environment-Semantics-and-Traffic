@@ -12,7 +12,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.vector_map_labels import extract_vector_map
-from quest.nuplan_map_locator import NuPlanMapLocator
+from quest.nuplan_map_locator import (
+    MAP_LAYER_AUDIT_VERSION, NuPlanMapLocator, check_map_layer_counts,
+    validate_map_layer_audit,
+)
 from quest.nuplan_relation_audit import (
     BASELINE_RELATION_AUDIT_VERSION, NuPlanBaselineRelationAudit,
     classify_invalid_cast_warnings, validate_relation_audit,
@@ -35,7 +38,7 @@ def main() -> None:
     parser.add_argument("--min-length-m", type=float, default=1.0)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--check-map-cast", action="store_true",
-                        help="Also check road/crosswalk GPKG/API row counts; baseline/lane checks are always enforced")
+                        help="Also check auxiliary boundary/stop layers; all exported map layers are always audited")
     args = parser.parse_args()
     if args.map_root is None or not args.map_version:
         raise ValueError("--map-root and --map-version (or NUPLAN_MAPS_ROOT/NUPLAN_MAP_VERSION) are required")
@@ -57,9 +60,14 @@ def main() -> None:
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
     maps = {}
-    checked_locations = set()
+    layer_comparison_cache = {}
     for sample_index, info in enumerate(infos, start=args.sample_index):
         location = locator.resolve(info)
+        layer_diagnostics = check_map_layer_counts(
+            maps_db, location, info, quest_range,
+            cache=layer_comparison_cache, all_map_layers=args.check_map_cast,
+        )
+        validate_map_layer_audit(layer_diagnostics)
         path = output / f"{info['token']}.pt"
         if path.exists() and not args.overwrite:
             try:
@@ -73,16 +81,14 @@ def main() -> None:
                 )
                 if existing["num_points"] != args.num_points:
                     raise ValueError("existing vector num_points differs from --num-points")
+                if existing["map_layer_diagnostics"] != layer_diagnostics:
+                    raise ValueError("existing per-frame map-layer audit differs from current GPKG/API/ROI")
             except Exception as error:
                 raise ValueError(f"existing vector GT is invalid: {path}: {error}; use --overwrite to regenerate") from error
             print(f"index={sample_index} token={info['token']} skipped_existing=true")
             continue
         if location not in maps:
             maps[location] = factory.build_map_from_name(location)
-        if location not in checked_locations:
-            from quest.nuplan_map_locator import check_map_layer_counts
-            check_map_layer_counts(maps_db, location, all_map_layers=args.check_map_cast)
-            checked_locations.add(location)
         cast_diagnostics = relation_audit.audit(location, info, maps[location], quest_range)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", RuntimeWarning)
@@ -102,6 +108,8 @@ def main() -> None:
         validate_relation_audit(cast_diagnostics)
         record["map_cast_audit_version"] = BASELINE_RELATION_AUDIT_VERSION
         record["map_cast_diagnostics"] = cast_diagnostics
+        record["map_layer_audit_version"] = MAP_LAYER_AUDIT_VERSION
+        record["map_layer_diagnostics"] = layer_diagnostics
         validate_vector_record(
             record, str(info["token"]), sample_index, quest_range,
             expected_min_length_m=args.min_length_m,
@@ -113,7 +121,8 @@ def main() -> None:
         temporary.replace(path)
         print(f"index={sample_index} token={info['token']} map={location} vectors={len(record['class_ids'])} "
               f"road_geometry={record['geometry_diagnostics']['road_area']} "
-              f"map_cast_diagnostics={cast_diagnostics}")
+              f"map_cast_diagnostics={cast_diagnostics} "
+              f"map_layer_diagnostics={layer_diagnostics}")
 
 
 if __name__ == "__main__":

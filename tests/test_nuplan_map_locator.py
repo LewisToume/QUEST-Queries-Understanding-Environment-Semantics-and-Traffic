@@ -6,11 +6,50 @@ from pathlib import Path
 import numpy as np
 from shapely.geometry import Point
 
-from quest.nuplan_map_locator import NuPlanMapLocator, projected_map_bounds
+from quest.nuplan_map_locator import (
+    MAP_EXPORT_REQUIRED_LAYERS, MAP_LAYER_AUDIT_VERSION, NuPlanMapLocator,
+    check_map_layer_counts, projected_map_bounds,
+    validate_map_layer_audit,
+)
 from quest.vector_map_labels import global_to_local_geometry, require_lidar2global
 
 
 class NuPlanMapLocatorTest(unittest.TestCase):
+    def test_preexisting_invalid_geometry_is_checked_again_for_each_frame(self):
+        from shapely.geometry import box
+
+        cached_layer = {"source_rows": 1, "api_rows": 1, "source_invalid_rows": 1,
+                        "api_invalid_rows": 1,
+                        "existing_invalid": {"7": (box(100, 100, 101, 101),
+                                                   box(100, 100, 101, 101))}}
+        cached = {"city": {layer: dict(cached_layer) for layer in MAP_EXPORT_REQUIRED_LAYERS}}
+        first = np.eye(4)
+        first[:2, 3] = [0, 0]
+        info = {"token": "first", "lidar2global": first}
+        safe = check_map_layer_counts(None, "city", info, (-1, -1, 1, 1), cache=cached)
+        validate_map_layer_audit(safe)
+        self.assertEqual(safe["per_layer"]["baseline_paths"]["preexisting_invalid_outside_roi"], 1)
+        second = np.eye(4)
+        second[:2, 3] = [100, 100]
+        with self.assertRaisesRegex(ValueError, "affects this frame ROI"):
+            check_map_layer_counts(None, "city", {"token": "second", "lidar2global": second},
+                                   (-1, -1, 1, 1), cache=cached)
+
+    def test_new_invalid_or_missing_rows_are_blocked(self):
+        row = {"source_rows": 1, "api_rows": 1, "source_invalid_rows": 0,
+               "api_invalid_rows": 0, "preexisting_invalid_outside_roi": 0,
+               "preexisting_invalid_examples": [], "new_invalid_rows": 0, "missing_rows": 0}
+        safe = {"version": MAP_LAYER_AUDIT_VERSION, "status": "verified_for_frame_roi",
+                "per_layer": {layer: dict(row) for layer in MAP_EXPORT_REQUIRED_LAYERS}}
+        validate_map_layer_audit(safe)
+        safe["per_layer"]["baseline_paths"]["new_invalid_rows"] = 1
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            validate_map_layer_audit(safe)
+        safe["per_layer"]["baseline_paths"]["new_invalid_rows"] = 0
+        safe["per_layer"]["baseline_paths"]["missing_rows"] = 1
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            validate_map_layer_audit(safe)
+
     def test_geographic_gpkg_extent_projects_to_city_utm(self):
         from pyproj import Transformer
 

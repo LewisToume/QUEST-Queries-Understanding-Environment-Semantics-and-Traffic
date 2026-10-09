@@ -48,6 +48,7 @@ def main() -> None:
     road_geometry_totals = {}
     missing_road_diagnostics = 0
     cast_warning_frames = cast_warning_events = 0
+    preexisting_invalid_outside_roi_frames = 0
     invalid_relation_max = {"lane_fid": 0, "lane_connector_fid": 0}
     exceed = {limit: 0 for limit in (32, 50, 64, 100, 128)}
     for sample_index, info in enumerate(infos, start=args.sample_index):
@@ -96,6 +97,10 @@ def main() -> None:
         cast = record["map_cast_diagnostics"]
         cast_warning_frames += bool(cast["invalid_cast_warning_count"])
         cast_warning_events += cast["invalid_cast_warning_count"]
+        preexisting_invalid_outside_roi_frames += any(
+            item["preexisting_invalid_outside_roi"]
+            for item in record["map_layer_diagnostics"]["per_layer"].values()
+        )
         for column in invalid_relation_max:
             invalid_relation_max[column] = max(
                 invalid_relation_max[column], cast["fields"][column]["invalid_non_null_rows"]
@@ -138,6 +143,7 @@ def main() -> None:
           f"frames_missing_road_diagnostics={missing_road_diagnostics}")
     print(f"map_cast_warning_frames={cast_warning_frames} warning_events={cast_warning_events} "
           f"invalid_non_null_relation_max_per_city={invalid_relation_max}")
+    print(f"frames_with_preexisting_invalid_geometry_outside_roi={preexisting_invalid_outside_roi_frames}")
     print(f"invalid_records={len(invalid_records)}")
     for error in invalid_records[:20]:
         print(error)

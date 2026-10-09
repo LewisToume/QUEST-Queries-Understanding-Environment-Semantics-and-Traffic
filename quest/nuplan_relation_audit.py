@@ -44,11 +44,9 @@ class NuPlanBaselineRelationAudit:
             paths = self.maps_db.load_vector_layer(location, "baseline_paths")
             if "geometry" not in paths or "fid" not in paths:
                 raise ValueError(f"{location} baseline_paths lacks geometry/fid")
-            unknown_geometry = (int(paths.geometry.isna().sum())
-                                + int(paths.geometry.is_empty.sum())
-                                + int((~paths.geometry.is_valid).sum()))
-            if unknown_geometry:
-                raise ValueError(f"{location} baseline_paths has {unknown_geometry} unusable geometries; ROI impact unknown")
+            unlocatable = int(paths.geometry.isna().sum()) + int(paths.geometry.is_empty.sum())
+            if unlocatable:
+                raise ValueError(f"{location} baseline_paths has {unlocatable} unlocatable geometries; ROI impact unknown")
             values, valid, invalid = {}, {}, {}
             for column in RELATION_COLUMNS.values():
                 if column not in paths:
@@ -66,7 +64,7 @@ class NuPlanBaselineRelationAudit:
 
     def audit(self, location: str, info: Mapping[str, Any], map_api: Any,
               xy_range: tuple[float, float, float, float]) -> dict[str, Any]:
-        from shapely.geometry import Polygon
+        from shapely.geometry import Polygon, box
         from nuplan.common.actor_state.state_representation import Point2D
         from nuplan.common.maps.maps_datatypes import SemanticMapLayer
 
@@ -78,6 +76,12 @@ class NuPlanBaselineRelationAudit:
         roi_global = Polygon(projected)
         if roi_global.is_empty or not roi_global.is_valid or roi_global.area <= 0:
             raise ValueError("LiDAR ROI has no valid projected map footprint")
+        invalid_paths = city["paths"].loc[~city["paths"].geometry.is_valid]
+        for fid, geometry in invalid_paths.geometry.items():
+            bounds = geometry.bounds
+            if (len(bounds) != 4 or not all(np.isfinite(value) for value in bounds)
+                    or box(*bounds).intersects(roi_global)):
+                raise ValueError(f"{location} invalid baseline fid={fid} may affect current ROI")
         roi_rows = _intersecting_positions(city["paths"], roi_global)
         radius = max(abs(x0), abs(x1), abs(y0), abs(y1)) * 2**0.5 + 10.0
         layers = [getattr(SemanticMapLayer, name) for name in RELATION_COLUMNS]

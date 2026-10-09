@@ -5,6 +5,7 @@ import torch
 
 from quest.map_teacher import align_teacher_map_to_quest_bev, soft_map_distillation_loss
 from quest.map_training import equivalent_point_orders, match_vector_queries, validate_vector_record
+from quest.nuplan_map_locator import MAP_LAYER_AUDIT_VERSION, MAP_EXPORT_REQUIRED_LAYERS
 from quest.nuplan_relation_audit import BASELINE_RELATION_AUDIT_VERSION
 from quest.vector_map_labels import (
     COORDINATE_FRAME, MAP_HEIGHT_REFERENCE, VECTOR_GT_SCHEMA_VERSION,
@@ -70,6 +71,15 @@ class Stage3MapTest(unittest.TestCase):
                   "map_height_reference": MAP_HEIGHT_REFERENCE, "map_reference_global_z_m": 0.0,
                   "map_location": "test-city", "scene_token": "scene-4",
                   "map_cast_audit_version": BASELINE_RELATION_AUDIT_VERSION,
+                  "map_layer_audit_version": MAP_LAYER_AUDIT_VERSION,
+                  "map_layer_diagnostics": {
+                      "version": MAP_LAYER_AUDIT_VERSION, "status": "verified_for_frame_roi",
+                      "per_layer": {name: {"source_rows": 0, "api_rows": 0,
+                                           "source_invalid_rows": 0, "api_invalid_rows": 0,
+                                           "preexisting_invalid_outside_roi": 0,
+                                           "new_invalid_rows": 0, "missing_rows": 0}
+                                    for name in MAP_EXPORT_REQUIRED_LAYERS},
+                  },
                   "map_cast_diagnostics": {
                       "version": BASELINE_RELATION_AUDIT_VERSION,
                       "status": "verified_no_baseline_relation_omission_in_roi", "roi_baseline_rows": 0,

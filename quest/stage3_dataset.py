@@ -13,6 +13,7 @@ from .map_teacher import (
     validate_teacher_record,
 )
 from .map_training import validate_vector_record
+from .nuplan_map_locator import MAP_LAYER_AUDIT_VERSION
 from .nuplan_relation_audit import BASELINE_RELATION_AUDIT_VERSION
 from .openscene_dataset import OpenSceneMetadataDataset
 from .vector_map_labels import MAP_CLASS_NAMES, MAP_HEIGHT_REFERENCE, VECTOR_SEMANTICS_VERSION
@@ -46,6 +47,7 @@ def load_teacher_audit(path: str | Path) -> dict[str, Any]:
             or vector_provenance.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION
             or vector_provenance.get("map_height_reference") != MAP_HEIGHT_REFERENCE
             or vector_provenance.get("map_cast_audit_version") != BASELINE_RELATION_AUDIT_VERSION
+            or vector_provenance.get("map_layer_audit_version") != MAP_LAYER_AUDIT_VERSION
             or vector_provenance.get("num_points") != 20
             or not vector_provenance.get("map_version")
             or not isinstance(vector_provenance.get("min_length_m"), (float, int))):
