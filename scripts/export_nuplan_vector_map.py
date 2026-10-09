@@ -13,6 +13,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.vector_map_labels import extract_vector_map
 from quest.nuplan_map_locator import NuPlanMapLocator
+from quest.nuplan_relation_audit import (
+    BASELINE_RELATION_AUDIT_VERSION, NuPlanBaselineRelationAudit,
+    classify_invalid_cast_warnings, validate_relation_audit,
+)
 from quest.map_training import validate_vector_record
 from quest.stage3_dataset import load_record
 from quest.utils import load_yaml_config
@@ -31,7 +35,7 @@ def main() -> None:
     parser.add_argument("--min-length-m", type=float, default=1.0)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--check-map-cast", action="store_true",
-                        help="Fail if map loading emits invalid-cast warnings or projected layer counts differ from GPKG metadata")
+                        help="Also check road/crosswalk GPKG/API row counts; baseline/lane checks are always enforced")
     args = parser.parse_args()
     if args.map_root is None or not args.map_version:
         raise ValueError("--map-root and --map-version (or NUPLAN_MAPS_ROOT/NUPLAN_MAP_VERSION) are required")
@@ -43,6 +47,7 @@ def main() -> None:
     maps_db = GPKGMapsDB(map_version=args.map_version, map_root=str(args.map_root))
     factory = NuPlanMapFactory(maps_db)
     locator = NuPlanMapLocator(maps_db)
+    relation_audit = NuPlanBaselineRelationAudit(maps_db)
     print(f"projected_map_bounds={locator.bounds}")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
     x0, x1 = model_config["x_range"]
@@ -74,6 +79,11 @@ def main() -> None:
             continue
         if location not in maps:
             maps[location] = factory.build_map_from_name(location)
+        if location not in checked_locations:
+            from quest.nuplan_map_locator import check_map_layer_counts
+            check_map_layer_counts(maps_db, location, all_map_layers=args.check_map_cast)
+            checked_locations.add(location)
+        cast_diagnostics = relation_audit.audit(location, info, maps[location], quest_range)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", RuntimeWarning)
             record = extract_vector_map(
@@ -81,19 +91,29 @@ def main() -> None:
                 args.num_points, args.min_length_m, map_version=args.map_version,
                 map_location=location,
             )
-        invalid_cast = [str(item.message) for item in caught
-                        if "invalid value encountered in cast" in str(item.message)]
-        if invalid_cast:
-            raise RuntimeError(f"map extraction emitted invalid-cast warning for token={info['token']}: {invalid_cast}")
-        if args.check_map_cast and location not in checked_locations:
-            from quest.nuplan_map_locator import check_map_layer_counts
-            check_map_layer_counts(maps_db, location)
-            checked_locations.add(location)
+        cast_diagnostics["invalid_cast_warnings"] = classify_invalid_cast_warnings(caught)
+        cast_diagnostics["invalid_cast_warning_count"] = sum(
+            item["count"] for item in cast_diagnostics["invalid_cast_warnings"]
+        )
+        unexpected = [str(item.message) for item in caught
+                      if "invalid value encountered in cast" not in str(item.message)]
+        if unexpected:
+            raise RuntimeError(f"unreviewed nuPlan RuntimeWarning for token={info['token']}: {unexpected}")
+        validate_relation_audit(cast_diagnostics)
+        record["map_cast_audit_version"] = BASELINE_RELATION_AUDIT_VERSION
+        record["map_cast_diagnostics"] = cast_diagnostics
+        validate_vector_record(
+            record, str(info["token"]), sample_index, quest_range,
+            expected_min_length_m=args.min_length_m,
+            expected_map_version=args.map_version,
+            expected_info=info, expected_map_location=location,
+        )
         temporary = path.with_suffix(".pt.tmp")
         torch.save(record, temporary)
         temporary.replace(path)
         print(f"index={sample_index} token={info['token']} map={location} vectors={len(record['class_ids'])} "
-              f"road_geometry={record['geometry_diagnostics']['road_area']}")
+              f"road_geometry={record['geometry_diagnostics']['road_area']} "
+              f"map_cast_diagnostics={cast_diagnostics}")
 
 
 if __name__ == "__main__":

@@ -47,6 +47,8 @@ def main() -> None:
     invalid_records = []
     road_geometry_totals = {}
     missing_road_diagnostics = 0
+    cast_warning_frames = cast_warning_events = 0
+    invalid_relation_max = {"lane_fid": 0, "lane_connector_fid": 0}
     exceed = {limit: 0 for limit in (32, 50, 64, 100, 128)}
     for sample_index, info in enumerate(infos, start=args.sample_index):
         token = str(info["token"])
@@ -91,6 +93,13 @@ def main() -> None:
             invalid_records.append(f"index={sample_index} token={token}: {error}")
             continue
         n = len(record["class_ids"])
+        cast = record["map_cast_diagnostics"]
+        cast_warning_frames += bool(cast["invalid_cast_warning_count"])
+        cast_warning_events += cast["invalid_cast_warning_count"]
+        for column in invalid_relation_max:
+            invalid_relation_max[column] = max(
+                invalid_relation_max[column], cast["fields"][column]["invalid_non_null_rows"]
+            )
         road_geometry = record.get("geometry_diagnostics", {}).get("road_area")
         if isinstance(road_geometry, dict):
             for key, value in road_geometry.items():
@@ -127,6 +136,8 @@ def main() -> None:
           f"zero_length_consecutive_segments={zero_length_segments}")
     print(f"road_geometry_totals={road_geometry_totals} "
           f"frames_missing_road_diagnostics={missing_road_diagnostics}")
+    print(f"map_cast_warning_frames={cast_warning_frames} warning_events={cast_warning_events} "
+          f"invalid_non_null_relation_max_per_city={invalid_relation_max}")
     print(f"invalid_records={len(invalid_records)}")
     for error in invalid_records[:20]:
         print(error)

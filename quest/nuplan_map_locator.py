@@ -73,17 +73,19 @@ class NuPlanMapLocator:
         return location
 
 
-def check_map_layer_counts(maps_db: Any, location: str) -> None:
+def check_map_layer_counts(maps_db: Any, location: str, *, all_map_layers: bool = False) -> None:
     """Compare source and API-loaded rows; warnings alone cannot prove no loss."""
     gpkg_path = maps_db.get_gpkg_path_and_store_on_disk(location)
-    layers = (
-        "lanes_polygons", "lane_groups_polygons", "intersections",
-        "crosswalks", "carpark_areas",
-    )
+    required = ("baseline_paths", "lanes_polygons", "lane_connectors",
+                "gen_lane_connectors_scaled_width_polygons")
+    layers = required + (("lane_groups_polygons", "intersections", "crosswalks",
+                          "carpark_areas") if all_map_layers else ())
     with sqlite3.connect(f"file:{Path(gpkg_path).resolve().as_posix()}?mode=ro", uri=True) as db:
         available = {row[0] for row in db.execute(
             "SELECT table_name FROM gpkg_contents WHERE data_type = 'features'"
         )}
+        if not set(required).issubset(available):
+            raise ValueError(f"{location} is missing baseline/lane source layers: {set(required) - available}")
         for layer in layers:
             if layer not in available:
                 continue
@@ -93,7 +95,9 @@ def check_map_layer_counts(maps_db: Any, location: str) -> None:
             loaded_count = len(loaded)
             missing_geometry = int(loaded.geometry.isna().sum())
             empty_geometry = int(loaded.geometry.is_empty.sum())
+            invalid_geometry = int((~loaded.geometry.is_valid).sum()) if layer in required else 0
             print(f"map_cast_audit location={location} layer={layer} source_rows={source_count} "
-                  f"api_rows={loaded_count} null_geometry={missing_geometry} empty_geometry={empty_geometry}")
-            if source_count != loaded_count or missing_geometry or empty_geometry:
+                  f"api_rows={loaded_count} null_geometry={missing_geometry} "
+                  f"empty_geometry={empty_geometry} invalid_required_geometry={invalid_geometry}")
+            if source_count != loaded_count or missing_geometry or empty_geometry or invalid_geometry:
                 raise ValueError(f"map layer {layer} may have lost valid geometry during load; inspect source")

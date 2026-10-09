@@ -68,6 +68,7 @@ def main() -> None:
     missing = []
     for split, start, count in (("train", train_start, train_count), ("eval", eval_start, eval_count)):
         totals = []
+        cast_warning_frames = cast_warning_events = 0
         by_class = {name: [] for name in MAP_CLASS_NAMES}
         for index in range(start, start + count):
             info = infos[index]
@@ -88,6 +89,8 @@ def main() -> None:
             elif current != provenance:
                 raise ValueError(f"mixed vector GT provenance at {split} index={index} token={token}")
             classes = record["class_ids"]
+            cast_warning_frames += bool(record["map_cast_diagnostics"]["invalid_cast_warning_count"])
+            cast_warning_events += record["map_cast_diagnostics"]["invalid_cast_warning_count"]
             totals.append(len(classes))
             for class_id, name in enumerate(MAP_CLASS_NAMES):
                 by_class[name].append(int((classes == class_id).sum()))
@@ -99,6 +102,8 @@ def main() -> None:
             "start_index": start, "num_samples": count, "available": len(totals),
             "total": summary(totals),
             "per_class": {name: summary(values) for name, values in by_class.items()},
+            "map_cast_warning_frames": cast_warning_frames,
+            "map_cast_warning_events": cast_warning_events,
         }
     max_count = max(results["train"]["total"]["max"], results["eval"]["total"]["max"])
     certified = (not missing and train_start == int(config["train"]["start_index"])

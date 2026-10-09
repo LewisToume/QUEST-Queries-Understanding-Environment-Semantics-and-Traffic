@@ -53,12 +53,14 @@ at `(0,0)`, and labeled local +X/+Y axes.
 
 Vector GT, one `<token>.pt` per original metadata frame:
 
-- `sample_index`, `token`, `scene_token`, `schema_version=3`, `coordinate_frame=openscene_lidar_xy`
+- `sample_index`, `token`, `scene_token`, `schema_version=4`, `coordinate_frame=openscene_lidar_xy`
 - `class_ids: int64[N]`, `points_xy_m: float32[N,20,2]`
 - `is_closed: bool[N]`, `length_m: float32[N]`, `xy_range_m`
 - `num_points`, `min_length_m`, `map_version`, `map_location`, `map_height_reference`,
   `map_reference_global_z_m`, `vector_semantics_version`
 - `geometry_diagnostics.road_area` counts valid and skipped malformed polygons
+- `map_cast_audit_version`, `map_cast_diagnostics` record the baseline relation
+  fields, null/invalid counts, nearby candidate linkage, and cast warning sites.
 
 Class 0 is LANE/LANE_CONNECTOR baseline centerline; class 1 is CROSSWALK
 contour; class 2 is ROADBLOCK/INTERSECTION/CARPARK_AREA boundary. Every
@@ -117,7 +119,8 @@ digest before use. Old schema files need explicit regeneration with
 `--overwrite`; starting mid-scene does not silently create a new temporal
 initialization. Schema 2 Teacher labels asserted the wrong LiDAR frame and
 must be regenerated, then re-audited before training.
-The projected-city and planar-height convention requires vector schema 3; old vector GT files
+The projected-city, planar-height and baseline-relation audit contract requires
+vector schema 4; old vector GT files
 must be regenerated. Training preflight rejects mixed export provenance and
 the Stage 3 checkpoint records it for held-out evaluation. Re-run the map
 teacher audit after regenerating GT; a verified audit made against the old
@@ -150,9 +153,14 @@ teacher data is generated when they are unavailable.
 The exporter resolves missing `map_location` by projecting actual GPKG layer
 extents into each city's `projectedCoordSystem` and requiring exactly one
 global XY match, with consistent city per `scene_token`. The optional
-`--check-map-cast` compares source GPKG rows against API-loaded layer rows and
-flags missing/empty geometry while investigating invalid-cast warnings. This
-does not replace visual inspection of map geometry on the server.
+baseline/lane source row counts are checked against API-loaded layers on every
+city. `--check-map-cast` also checks road/crosswalk layers. The nuPlan utility
+casts whole baseline association columns to int, including nulls in the
+non-applicable lane/connector field. Such a warning is recorded, not blindly
+fatal: the exporter verifies that every nearby candidate has one baseline and
+every ROI-intersecting baseline has one nearby parent. Invalid non-null IDs,
+unlinked/ambiguous ROI baselines, missing geometry or unknown warning sources
+stop export. This does not replace visual inspection on the server.
 
 ## Loss and checkpoint
 

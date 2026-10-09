@@ -5,6 +5,7 @@ import torch
 
 from quest.map_teacher import align_teacher_map_to_quest_bev, soft_map_distillation_loss
 from quest.map_training import equivalent_point_orders, match_vector_queries, validate_vector_record
+from quest.nuplan_relation_audit import BASELINE_RELATION_AUDIT_VERSION
 from quest.vector_map_labels import (
     COORDINATE_FRAME, MAP_HEIGHT_REFERENCE, VECTOR_GT_SCHEMA_VERSION,
     VECTOR_SEMANTICS_VERSION, resample_polyline,
@@ -68,6 +69,18 @@ class Stage3MapTest(unittest.TestCase):
                   "num_points": 20, "min_length_m": 1.0, "map_version": "test-map",
                   "map_height_reference": MAP_HEIGHT_REFERENCE, "map_reference_global_z_m": 0.0,
                   "map_location": "test-city", "scene_token": "scene-4",
+                  "map_cast_audit_version": BASELINE_RELATION_AUDIT_VERSION,
+                  "map_cast_diagnostics": {
+                      "version": BASELINE_RELATION_AUDIT_VERSION,
+                      "status": "verified_no_baseline_relation_omission_in_roi", "roi_baseline_rows": 0,
+                      "candidate_objects": {"LANE": 0, "LANE_CONNECTOR": 0},
+                      "fields": {key: {"null_rows": 0, "invalid_non_null_rows": 0,
+                                       "invalid_non_null_roi_rows": 0, "valid_association_rows": 0}
+                                 for key in ("lane_fid", "lane_connector_fid")},
+                      "unresolved_roi_rows": [], "missing_candidate_relations": [],
+                      "unresolved_global_fields": [], "invalid_cast_warnings": [],
+                      "invalid_cast_warning_count": 0,
+                  },
                   "vector_semantics_version": VECTOR_SEMANTICS_VERSION,
                   "class_ids": torch.empty(0, dtype=torch.long),
                   "points_xy_m": torch.empty(0, 20, 2),
@@ -89,6 +102,10 @@ class Stage3MapTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "regenerate old vector labels"):
             validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50))
         record["schema_version"] = VECTOR_GT_SCHEMA_VERSION
+        record["map_cast_diagnostics"]["status"] = "unverified"
+        with self.assertRaisesRegex(ValueError, "relation audit"):
+            validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50))
+        record["map_cast_diagnostics"]["status"] = "verified_no_baseline_relation_omission_in_roi"
         info = {"scene_token": "scene-4", "lidar2global": np.eye(4)}
         validate_vector_record(record, "token-4", 4, (-50, -50, 50, 50), expected_info=info)
         record["map_reference_global_z_m"] = 100.0

@@ -17,6 +17,7 @@ from .map_teacher import (
     MapRasterDistillHead, soft_map_distillation_loss,
 )
 from .model import QUEST_ARCHITECTURE_VERSION
+from .nuplan_relation_audit import BASELINE_RELATION_AUDIT_VERSION, validate_relation_audit
 from .vector_map_labels import (
     COORDINATE_FRAME, MAP_CLASS_NAMES, MAP_HEIGHT_REFERENCE, VECTOR_GT_SCHEMA_VERSION,
     VECTOR_SEMANTICS_VERSION, require_lidar2global,
@@ -27,6 +28,7 @@ STAGE3_NAME = "map_hybrid_distillation"
 VECTOR_PROVENANCE_KEYS = (
     "num_points", "min_length_m", "map_version", "vector_semantics_version",
     "map_height_reference",
+    "map_cast_audit_version",
 )
 STAGE3_MODULES = (
     "geometry_lift", "bev_encoder", "agent_proposal_head", "agent_decoder",
@@ -44,6 +46,12 @@ def validate_vector_record(record: Mapping[str, Any], token: str, sample_index: 
         raise ValueError("nuPlan vector GT schema mismatch; regenerate old vector labels")
     if record.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION:
         raise ValueError("nuPlan vector GT geometry semantics mismatch; regenerate vector labels")
+    if record.get("map_cast_audit_version") != BASELINE_RELATION_AUDIT_VERSION:
+        raise ValueError("nuPlan vector GT invalid-cast audit version mismatch; regenerate labels")
+    audit = record.get("map_cast_diagnostics")
+    if not isinstance(audit, Mapping):
+        raise ValueError("nuPlan vector GT has no baseline relation audit")
+    validate_relation_audit(audit)
     if record.get("num_points") != 20:
         raise ValueError("nuPlan vector GT num_points must be 20")
     minimum = record.get("min_length_m")
@@ -111,6 +119,7 @@ def load_vector_capacity_audit(path: str | Path, config: Mapping[str, Any]) -> t
     if (not isinstance(provenance, dict)
             or provenance.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION
             or provenance.get("map_height_reference") != MAP_HEIGHT_REFERENCE
+            or provenance.get("map_cast_audit_version") != BASELINE_RELATION_AUDIT_VERSION
             or provenance.get("num_points") != 20
             or not provenance.get("map_version")):
         raise ValueError("Vector GT capacity audit provenance is incompatible")
@@ -369,6 +378,7 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead,
         raise ValueError("Stage 3 checkpoint vector GT semantics mismatch")
     if (provenance.get("num_points") != 20 or not provenance.get("map_version")
             or provenance.get("map_height_reference") != MAP_HEIGHT_REFERENCE
+            or provenance.get("map_cast_audit_version") != BASELINE_RELATION_AUDIT_VERSION
             or not isinstance(provenance.get("min_length_m"), (float, int))):
         raise ValueError("Stage 3 checkpoint vector GT provenance is incomplete")
     if checkpoint.get("teacher_schema_version") != TEACHER_MAP_SCHEMA_VERSION:

@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 
-VECTOR_GT_SCHEMA_VERSION = 3
+VECTOR_GT_SCHEMA_VERSION = 4
 VECTOR_SEMANTICS_VERSION = "polygon_boundary_before_roi_road_union_lidar_height_v3"
 MAP_CLASS_NAMES = ("centerline", "ped_crossing", "road_boundary")
 COORDINATE_FRAME = "openscene_lidar_xy"
