@@ -22,6 +22,7 @@ from quest.nuplan_relation_audit import (
 )
 from quest.map_training import validate_vector_record
 from quest.stage3_dataset import load_record
+from quest.stage3_split import load_stage3_split, selected_frames
 from quest.utils import load_yaml_config
 from scripts.run_navformer_openscene_teacher import load_infos, select_infos
 
@@ -39,6 +40,8 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--check-map-cast", action="store_true",
                         help="Also check auxiliary boundary/stop layers; all exported map layers are always audited")
+    parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
     args = parser.parse_args()
     if args.map_root is None or not args.map_version:
         raise ValueError("--map-root and --map-version (or NUPLAN_MAPS_ROOT/NUPLAN_MAP_VERSION) are required")
@@ -56,12 +59,19 @@ def main() -> None:
     x0, x1 = model_config["x_range"]
     y0, y1 = model_config["y_range"]
     quest_range = (float(x0), float(y0), float(x1), float(y1))
-    infos = select_infos(load_infos(args.metadata), args.sample_index, args.num_frames)
+    all_infos = load_infos(args.metadata)
+    if args.split_manifest is not None:
+        manifest = load_stage3_split(args.split_manifest, all_infos, args.metadata)
+        indexed_infos = [(row["index"], all_infos[row["index"]])
+                         for row in selected_frames(manifest, args.split)]
+    else:
+        infos = select_infos(all_infos, args.sample_index, args.num_frames)
+        indexed_infos = list(enumerate(infos, start=args.sample_index))
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
     maps = {}
     layer_comparison_cache = {}
-    for sample_index, info in enumerate(infos, start=args.sample_index):
+    for sample_index, info in indexed_infos:
         location = locator.resolve(info)
         layer_diagnostics = check_map_layer_counts(
             maps_db, location, info, quest_range,

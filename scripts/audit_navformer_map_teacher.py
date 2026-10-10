@@ -17,6 +17,7 @@ from quest.map_teacher import (
 )
 from quest.map_training import VECTOR_PROVENANCE_KEYS, validate_vector_record
 from quest.stage3_dataset import load_record
+from quest.stage3_split import load_stage3_split, selected_frames
 from quest.vector_map_labels import MAP_CLASS_NAMES
 from scripts.run_navformer_openscene_teacher import load_infos, select_infos
 
@@ -46,13 +47,26 @@ def main() -> None:
     parser.add_argument("--row-axis", choices=["x", "y"], required=True)
     parser.add_argument("--row-direction", type=int, choices=[-1, 1], required=True)
     parser.add_argument("--col-direction", type=int, choices=[-1, 1], required=True)
+    parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
-    infos = select_infos(load_infos(args.metadata), args.sample_index, args.num_frames)
+    if args.output.exists() and not args.overwrite:
+        raise FileExistsError(f"teacher audit already exists: {args.output}; choose a new --output or --overwrite")
+    all_infos = load_infos(args.metadata)
+    if args.split_manifest is not None:
+        manifest = load_stage3_split(args.split_manifest, all_infos, args.metadata)
+        indexed_infos = [(row["index"], all_infos[row["index"]])
+                         for row in selected_frames(manifest, args.split)]
+    else:
+        manifest = None
+        infos = select_infos(all_infos, args.sample_index, args.num_frames)
+        indexed_infos = list(enumerate(infos, start=args.sample_index))
     quest_range = (-50.0, -50.0, 50.0, 50.0)
     soft_scores, valid_masks, ground_truth = [], [], []
     reference = None
     vector_provenance = None
-    for source_index, info in enumerate(infos, start=args.sample_index):
+    for source_index, info in indexed_infos:
         token = str(info["token"])
         vector = load_record(args.vector_dir / f"{token}.pt")
         validate_vector_record(vector, token, source_index, quest_range, expected_info=info)
@@ -133,7 +147,9 @@ def main() -> None:
     audit = {
         "verified": False,
         "review_note": "Review orientation and semantic classes; explicitly set verified=true and support mask only after human inspection.",
-        "sample_count": len(infos), "vector_map_classes": list(MAP_CLASS_NAMES),
+        "sample_count": len(indexed_infos), "vector_map_classes": list(MAP_CLASS_NAMES),
+        "stage3_split_sha256": manifest["split_sha256"] if manifest is not None else None,
+        "audited_source_indices": [index for index, _ in indexed_infos],
         "vector_gt_provenance": dict(zip(VECTOR_PROVENANCE_KEYS, vector_provenance)),
         "teacher_channel_names_or_ids": list(reference[0]),
         "teacher_checkpoint": reference[2], "teacher_pc_range": list(reference[1]),

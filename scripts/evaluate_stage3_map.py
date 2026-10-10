@@ -20,6 +20,7 @@ from quest.map_training import (
 )
 from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3, load_teacher_audit
+from quest.stage3_split import load_stage3_split
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES
 from scripts.train_stage3_map import build_dataset, preflight_vectors, resolve
@@ -38,15 +39,23 @@ def main() -> None:
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
+    from scripts.run_navformer_openscene_teacher import load_infos
+    metadata_path = resolve(stage1["dataset"]["metadata_path"])
+    manifest = load_stage3_split(resolve(config["paths"]["split_manifest_path"]),
+                                 load_infos(metadata_path), metadata_path)
     query_count, audited_provenance = load_vector_capacity_audit(
-        resolve(config["paths"]["vector_capacity_audit_path"]), config
+        resolve(config["paths"]["vector_capacity_audit_path"]), config, manifest
     )
     model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=query_count, P=20)
     model = QUESTModel(**model_config)
-    audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]))
-    start = args.start if args.start is not None else int(config["eval"]["start_index"])
-    count = args.count if args.count is not None else int(config["eval"]["num_samples"])
-    dataset = build_dataset(model, config, stage1, audit, start, count)
+    audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]),
+                               expected_split_sha256=manifest["split_sha256"])
+    indices = [row["index"] for row in manifest["validation"]["frames"]]
+    if args.start is not None or (args.count is not None and args.count != len(indices)):
+        raise ValueError("formal Stage 3 evaluation uses the complete validation manifest")
+    dataset = build_dataset(model, config, stage1, audit, indices)
+    if dataset.source_indices != indices:
+        raise ValueError("formal Stage 3 evaluation cannot silently skip manifest frames")
     vector_provenance = preflight_vectors(dataset, query_count)
     if vector_provenance != audited_provenance:
         raise ValueError("evaluation vector GT provenance differs from certified capacity audit")
@@ -55,6 +64,8 @@ def main() -> None:
     raster_head = MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
     checkpoint_path = resolve(args.checkpoint or config["paths"]["checkpoint_path"])
     checkpoint = load_checkpoint_cpu(checkpoint_path)
+    if checkpoint.get("training_config", {}).get("stage3_split_sha256") != manifest["split_sha256"]:
+        raise ValueError("Stage 3 checkpoint was trained for a different frame-list split")
     if checkpoint.get("vector_gt_provenance") != vector_provenance:
         raise ValueError("evaluation vector GT export provenance differs from Stage 3 checkpoint")
     if tuple(checkpoint.get("map_class_names", ())) != MAP_CLASS_NAMES:

@@ -29,11 +29,13 @@ def load_record(path: Path) -> Mapping[str, Any]:
     return record
 
 
-def load_teacher_audit(path: str | Path) -> dict[str, Any]:
+def load_teacher_audit(path: str | Path, expected_split_sha256: str | None = None) -> dict[str, Any]:
     with Path(path).open(encoding="utf-8") as stream:
         audit = json.load(stream)
     if audit.get("verified") is not True:
         raise ValueError("teacher channel/orientation audit must be explicitly VERIFIED before KD")
+    if expected_split_sha256 is not None and audit.get("stage3_split_sha256") != expected_split_sha256:
+        raise ValueError("teacher audit was not made for the current Stage 3 split")
     if audit.get("teacher_score_kind") != TEACHER_SCORE_KIND:
         raise ValueError("teacher audit score semantics differ from Pansegformer mask scores")
     if (audit.get("teacher_coordinate_frame") != TEACHER_COORDINATE_FRAME

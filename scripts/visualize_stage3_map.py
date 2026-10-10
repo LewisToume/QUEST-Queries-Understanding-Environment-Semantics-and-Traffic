@@ -15,6 +15,7 @@ from quest.map_training import (VECTOR_PROVENANCE_KEYS, denormalize_points,
                                 load_stage3_checkpoint, load_vector_capacity_audit, stage3_forward)
 from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3, load_teacher_audit
+from quest.stage3_split import load_stage3_split
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES
 from scripts.train_stage3_map import build_dataset, resolve
@@ -34,19 +35,26 @@ def main() -> None:
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
+    from scripts.run_navformer_openscene_teacher import load_infos
+    metadata_path = resolve(stage1["dataset"]["metadata_path"])
+    manifest = load_stage3_split(resolve(config["paths"]["split_manifest_path"]),
+                                 load_infos(metadata_path), metadata_path)
     query_count, audited_provenance = load_vector_capacity_audit(
-        resolve(config["paths"]["vector_capacity_audit_path"]), config
+        resolve(config["paths"]["vector_capacity_audit_path"]), config, manifest
     )
     model_config.update(C_map=3, N_map=query_count, P=20)
     model = QUESTModel(**model_config)
-    audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]))
+    audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]),
+                               expected_split_sha256=manifest["split_sha256"])
     raster_head = MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
     checkpoint = load_checkpoint_cpu(resolve(args.checkpoint or config["paths"]["checkpoint_path"]))
     load_stage3_checkpoint(model, raster_head, checkpoint)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
     raster_head.to(device).eval()
-    dataset = build_dataset(model, config, stage1, audit, args.sample_index, 1)
+    if args.sample_index not in {row["index"] for row in manifest["validation"]["frames"]}:
+        raise ValueError("visualization sample-index is not in the validation manifest")
+    dataset = build_dataset(model, config, stage1, audit, [args.sample_index])
     sample = dataset[0]
     if checkpoint["vector_gt_provenance"] != audited_provenance or audited_provenance != {
         key: sample["vector_target"][key] for key in VECTOR_PROVENANCE_KEYS

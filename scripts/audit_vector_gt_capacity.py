@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.map_training import VECTOR_PROVENANCE_KEYS, validate_vector_record
+from quest.stage3_split import load_stage3_split
 from quest.stage3_dataset import load_record
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES, VECTOR_GT_SCHEMA_VERSION, VECTOR_SEMANTICS_VERSION
@@ -46,32 +47,30 @@ def main() -> None:
     parser.add_argument("--eval-count", type=int)
     parser.add_argument("--show-vectors", type=int, default=0)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--split-manifest", type=Path)
     args = parser.parse_args()
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
     model = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
     xy_range = (float(model["x_range"][0]), float(model["y_range"][0]),
                 float(model["x_range"][1]), float(model["y_range"][1]))
-    train_start = args.train_start if args.train_start is not None else int(config["train"]["start_index"])
-    train_count = args.train_count if args.train_count is not None else int(config["train"]["num_samples"])
-    eval_start = args.eval_start if args.eval_start is not None else int(config["eval"]["start_index"])
-    eval_count = args.eval_count if args.eval_count is not None else int(config["eval"]["num_samples"])
-    if min(train_start, train_count, eval_start, eval_count) < 0 or train_count + eval_count == 0:
-        raise ValueError("invalid train/eval ranges")
-    if set(range(train_start, train_start + train_count)) & set(range(eval_start, eval_start + eval_count)):
-        raise ValueError("train/eval ranges overlap")
     infos = load_infos(args.metadata)
-    if max(train_start + train_count, eval_start + eval_count) > len(infos):
-        raise ValueError("requested range exceeds metadata")
+    manifest_path = args.split_manifest or PROJECT_ROOT / config["paths"]["split_manifest_path"]
+    manifest = load_stage3_split(manifest_path, infos, args.metadata)
+    if any(value is not None for value in (args.train_start, args.train_count, args.eval_start, args.eval_count)):
+        raise ValueError("range overrides cannot certify the formal Stage 3 frame-list split")
+    split_rows = (("train", manifest["train"]["frames"]),
+                  ("eval", manifest["validation"]["frames"]))
     provenance = None
     scene_locations = {}
     results = {}
     missing = []
-    for split, start, count in (("train", train_start, train_count), ("eval", eval_start, eval_count)):
+    for split, rows in split_rows:
         totals = []
         cast_warning_frames = cast_warning_events = 0
         preexisting_invalid_outside_roi_frames = 0
         by_class = {name: [] for name in MAP_CLASS_NAMES}
-        for index in range(start, start + count):
+        for position, row in enumerate(rows):
+            index = row["index"]
             info = infos[index]
             token = str(info["token"])
             path = args.vector_dir / f"{token}.pt"
@@ -99,12 +98,14 @@ def main() -> None:
             totals.append(len(classes))
             for class_id, name in enumerate(MAP_CLASS_NAMES):
                 by_class[name].append(int((classes == class_id).sum()))
-            if args.show_vectors and index == start:
+            if args.show_vectors and position == 0:
                 for class_id, points in zip(classes[:args.show_vectors], record["points_xy_m"][:args.show_vectors]):
                     print(f"vector token={token} class={MAP_CLASS_NAMES[int(class_id)]} "
                           f"first_xy_m={points[0].tolist()} last_xy_m={points[-1].tolist()}")
         results[split] = {
-            "start_index": start, "num_samples": count, "available": len(totals),
+            "indices": [row["index"] for row in rows],
+            "tokens": [row["token"] for row in rows],
+            "num_samples": len(rows), "available": len(totals),
             "total": summary(totals),
             "per_class": {name: summary(values) for name, values in by_class.items()},
             "map_cast_warning_frames": cast_warning_frames,
@@ -112,12 +113,10 @@ def main() -> None:
             "frames_with_preexisting_invalid_geometry_outside_roi": preexisting_invalid_outside_roi_frames,
         }
     max_count = max(results["train"]["total"]["max"], results["eval"]["total"]["max"])
-    certified = (not missing and train_start == int(config["train"]["start_index"])
-                 and train_count == int(config["train"]["num_samples"])
-                 and eval_start == int(config["eval"]["start_index"])
-                 and eval_count == int(config["eval"]["num_samples"]))
+    certified = not missing and bool(manifest["validation"]["frames"])
     report = {
         "schema_version": VECTOR_GT_SCHEMA_VERSION, "vector_semantics_version": VECTOR_SEMANTICS_VERSION,
+        "split_sha256": manifest["split_sha256"], "metadata_sha256": manifest["metadata_sha256"],
         "vector_gt_provenance": provenance, "capacity_certified": certified,
         "recommended_map_query_count": recommended_capacity(max_count) if certified else None,
         "splits": results, "missing_count": len(missing), "missing_examples": missing[:20],

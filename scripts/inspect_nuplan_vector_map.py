@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.map_training import load_vector_capacity_audit, validate_vector_record
 from quest.stage3_dataset import load_record
+from quest.stage3_split import load_stage3_split
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES
 from scripts.run_navformer_openscene_teacher import load_infos, select_infos
@@ -150,7 +151,10 @@ def main() -> None:
     print(f"frames_exceeding_instance_limits={exceed}")
     capacity_path = PROJECT_ROOT / stage3["paths"]["vector_capacity_audit_path"]
     if capacity_path.is_file():
-        query_count, _ = load_vector_capacity_audit(capacity_path, stage3)
+        all_infos = load_infos(args.metadata)
+        manifest = load_stage3_split(PROJECT_ROOT / stage3["paths"]["split_manifest_path"],
+                                     all_infos, args.metadata)
+        query_count, _ = load_vector_capacity_audit(capacity_path, stage3, manifest)
         print(f"certified_N_map={query_count}")
         if any(value > query_count for value in counts):
             raise ValueError(f"GT exceeds certified N_map={query_count}")

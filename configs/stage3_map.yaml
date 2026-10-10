@@ -31,6 +31,7 @@ eval:
   confidence_threshold: 0.25
   point_error_thresholds_m: [0.5, 1.0, 1.5]
 paths:
+  split_manifest_path: data/stage3_split.json
   stage2_checkpoint: checkpoints/quest_stage2_agent_5000_e5.pt
   checkpoint_path: checkpoints/quest_stage3_map.pt
   agent_soft_labels_dir: data/soft_labels_navformer

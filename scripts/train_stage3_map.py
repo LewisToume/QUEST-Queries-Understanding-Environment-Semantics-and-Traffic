@@ -23,6 +23,7 @@ from quest.model import QUESTModel
 from quest.stage3_dataset import (
     Stage3JoinedDataset, collate_stage3, load_record, load_teacher_audit,
 )
+from quest.stage3_split import load_stage3_split
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES
 
@@ -33,14 +34,14 @@ def resolve(path: str | Path) -> Path:
 
 
 def build_dataset(model: QUESTModel, config: dict, stage1: dict, audit: dict,
-                  start: int, count: int) -> Stage3JoinedDataset:
+                  source_indices: list[int]) -> Stage3JoinedDataset:
     dataset_config = dict(stage1["dataset"])
     dataset_config["metadata_path"] = resolve(dataset_config["metadata_path"])
     dataset_config["camera_root"] = resolve(dataset_config["camera_root"])
     dataset_config["max_agent_instances"] = 64
     paths = config["paths"]
     return Stage3JoinedDataset(
-        dataset_config, list(range(start, start + count)),
+        dataset_config, source_indices,
         resolve(paths["agent_soft_labels_dir"]), resolve(paths["vector_gt_dir"]),
         resolve(paths["map_teacher_dir"]), audit,
         (model.geometry_lift.x_range[0], model.geometry_lift.y_range[0],
@@ -153,21 +154,30 @@ def main() -> None:
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     stage2 = load_yaml_config(PROJECT_ROOT / "configs/stage2_agent.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
+    metadata_path = resolve(stage1["dataset"]["metadata_path"])
+    from scripts.run_navformer_openscene_teacher import load_infos
+    manifest = load_stage3_split(resolve(config["paths"]["split_manifest_path"]),
+                                 load_infos(metadata_path), metadata_path)
     if config["train"]["missing_teacher"] not in ("error", "skip"):
         raise ValueError("missing_teacher must be error or explicit skip")
     if list(config["map"]["class_names"]) != list(MAP_CLASS_NAMES) or int(config["map"]["num_points"]) != 20:
         raise ValueError("Stage 3 map taxonomy or point count is incompatible")
     query_count, audited_provenance = load_vector_capacity_audit(
-        resolve(config["paths"]["vector_capacity_audit_path"]), config
+        resolve(config["paths"]["vector_capacity_audit_path"]), config, manifest
     )
     model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=query_count, P=20)
     model = QUESTModel(**model_config)
-    audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]))
-    count = args.num_samples if args.num_samples is not None else int(config["train"]["num_samples"])
+    audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]),
+                               expected_split_sha256=manifest["split_sha256"])
+    indices = [row["index"] for row in manifest["train"]["frames"]]
+    if args.num_samples is not None and args.num_samples != len(indices):
+        raise ValueError("formal Stage 3 training must use every manifest training frame")
     epochs = args.epochs if args.epochs is not None else int(config["train"]["epochs"])
-    if count <= 0 or epochs <= 0:
+    if not indices or epochs <= 0:
         raise ValueError("num-samples and epochs must be positive")
-    dataset = build_dataset(model, config, stage1, audit, int(config["train"]["start_index"]), count)
+    dataset = build_dataset(model, config, stage1, audit, indices)
+    if dataset.source_indices != indices:
+        raise ValueError("formal Stage 3 training cannot silently skip manifest frames")
     vector_provenance = preflight_vectors(dataset, query_count)
     if vector_provenance != audited_provenance:
         raise ValueError("training vector GT provenance differs from certified capacity audit")
@@ -182,7 +192,8 @@ def main() -> None:
     optimizer = configure_stage3(model, raster_head, config["train"])
     effective = {**config, "agent_train": stage2["train"], "agent_loss": stage2["agent_loss"],
                  "map_loss": config["map"], "effective_num_samples": len(dataset),
-                 "effective_epochs": epochs, "effective_map_query_count": query_count}
+                 "effective_epochs": epochs, "effective_map_query_count": query_count,
+                 "stage3_split_sha256": manifest["split_sha256"]}
     print("optimizer_groups=" + str([(group["lr"], len(group["params"])) for group in optimizer.param_groups]))
     for epoch in range(1, epochs + 1):
         train_one_epoch(model, raster_head, loader, optimizer, device, effective, audit, epoch)

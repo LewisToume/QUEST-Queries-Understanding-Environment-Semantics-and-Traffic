@@ -18,6 +18,7 @@ from quest.map_teacher import (
     resolve_lidar2ego, validate_teacher_record,
 )
 from quest.stage3_dataset import load_record
+from quest.stage3_split import load_stage3_split, selected_frames
 from run_navformer_openscene_teacher import (
     DEFAULT_IMAGE_ROOT,
     NAVFORMER_ROOT, as_cpu, build_camera_geometry, build_model_and_load_checkpoint,
@@ -54,10 +55,17 @@ def extract_teacher_soft_scores(mapping: dict) -> tuple[torch.Tensor, int]:
     return raw.clamp(0.0, 1.0), lanes.shape[0]
 
 
-def temporal_export_plan(all_infos: list[dict], sample_index: int, num_frames: int) -> list[dict]:
-    targets = select_infos(all_infos, sample_index, num_frames)
-    target_indices = set(range(sample_index, sample_index + len(targets)))
-    scenes = {str(info["scene_token"]) for info in targets}
+def temporal_export_plan(all_infos: list[dict], sample_index: int, num_frames: int,
+                         target_indices: list[int] | None = None) -> list[dict]:
+    if target_indices is None:
+        targets = select_infos(all_infos, sample_index, num_frames)
+        target_indices = list(range(sample_index, sample_index + len(targets)))
+    if not target_indices or len(set(target_indices)) != len(target_indices):
+        raise ValueError("temporal export target indices must be nonempty and unique")
+    if any(index < 0 or index >= len(all_infos) for index in target_indices):
+        raise IndexError("temporal export target index outside original metadata")
+    target_indices = set(target_indices)
+    scenes = {str(all_infos[index]["scene_token"]) for index in target_indices}
     by_scene: dict[str, list[tuple[int, dict]]] = {scene: [] for scene in scenes}
     for index, info in enumerate(all_infos):
         scene = str(info.get("scene_token"))
@@ -83,7 +91,7 @@ def temporal_export_plan(all_infos: list[dict], sample_index: int, num_frames: i
                 "scene_start_token": first_token, "temporal_history_sha256": history.hexdigest(),
             })
     if {item["sample_index"] for item in plan if item["target"]} != target_indices:
-        raise RuntimeError("temporal plan target indices differ from the original metadata slice")
+        raise RuntimeError("temporal plan target indices differ from the requested original indices")
     return plan
 
 
@@ -100,6 +108,8 @@ def main() -> None:
     parser.add_argument("--teacher-pc-range", nargs=4, type=float, required=True,
                         metavar=("XMIN", "YMIN", "XMAX", "YMAX"))
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
     args = parser.parse_args()
     navformer_root = require_directory(args.navformer_root, "Navformer root")
     config_path = require_file(
@@ -136,7 +146,12 @@ def main() -> None:
     for module_name in cfg.get("custom_imports", {}).get("imports", ["mmdet3d_plugin"]):
         importlib.import_module(module_name)
     transforms, _ = build_preprocess_transforms(cfg, build_from_cfg, PIPELINES)
-    plan = temporal_export_plan(load_infos(metadata_path), args.sample_index, args.num_frames)
+    all_infos = load_infos(metadata_path)
+    target_indices = None
+    if args.split_manifest is not None:
+        manifest = load_stage3_split(args.split_manifest, all_infos, metadata_path)
+        target_indices = [row["index"] for row in selected_frames(manifest, args.split)]
+    plan = temporal_export_plan(all_infos, args.sample_index, args.num_frames, target_indices)
     for item in plan:
         if item["target"]:
             item["lidar2ego"] = resolve_lidar2ego(item["info"])

@@ -14,6 +14,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from quest.teachers import navformer_output_to_quest  # noqa: E402
+from quest.stage3_split import load_stage3_split, selected_frames  # noqa: E402
+from quest.stage3_dataset import load_record  # noqa: E402
+from export_navformer_map_soft import temporal_export_plan  # noqa: E402
 from run_navformer_openscene_teacher import (  # noqa: E402
     DEFAULT_CHECKPOINT,
     DEFAULT_CONFIG,
@@ -53,6 +56,9 @@ def parse_args():
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--metadata", type=Path, default=DEFAULT_METADATA)
     parser.add_argument("--image-root", type=Path, default=DEFAULT_IMAGE_ROOT)
+    parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
+    parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
 
@@ -115,7 +121,15 @@ def main():
     for module_name in custom_imports.get("imports", ["mmdet3d_plugin"]):
         importlib.import_module(module_name)
     transforms, _ = build_preprocess_transforms(cfg, build_from_cfg, PIPELINES)
-    infos = select_infos(load_infos(metadata_path), args.sample_index, args.num_frames)
+    all_infos = load_infos(metadata_path)
+    if args.split_manifest is not None:
+        manifest = load_stage3_split(args.split_manifest, all_infos, metadata_path)
+        indices = [row["index"] for row in selected_frames(manifest, args.split)]
+        plan = temporal_export_plan(all_infos, args.sample_index, args.num_frames, indices)
+    else:
+        infos = select_infos(all_infos, args.sample_index, args.num_frames)
+        plan = [{"sample_index": index, "info": info, "target": True}
+                for index, info in enumerate(infos, start=args.sample_index)]
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for Navformer pseudo-label export")
@@ -129,14 +143,21 @@ def main():
         raise ValueError("max-distance must be positive")
 
     previous_scene = None
+    previous_timestamp = None
     saved = 0
     total_labels = 0
     total_vehicle = 0
     total_pedestrian = 0
-    for offset, info in enumerate(infos, start=1):
+    warmup = skipped = 0
+    targets = sum(item["target"] for item in plan)
+    for offset, item in enumerate(plan, start=1):
+        info = item["info"]
+        source_index = item["sample_index"]
         token = str(info["token"])
         scene_token = str(info.get("scene_token"))
-        new_scene = previous_scene is None or scene_token != previous_scene
+        timestamp = float(info["timestamp"])
+        new_scene = (previous_scene is None or scene_token != previous_scene
+                     or (previous_timestamp is not None and timestamp - previous_timestamp > 1.1e6))
         if new_scene:
             reset_tracking_state(model)
 
@@ -149,6 +170,11 @@ def main():
         with torch.no_grad():
             track = run_track_only(model, model_inputs)
         boxes, scores, labels, _track_ids = track_output_tensors(track)
+        if not item["target"]:
+            warmup += 1
+            previous_scene = scene_token
+            previous_timestamp = timestamp
+            continue
         payload = build_payload(
             token,
             boxes,
@@ -159,6 +185,17 @@ def main():
             score_threshold=args.score_threshold,
             max_distance=args.max_distance,
         )
+        payload["sample_index"] = source_index
+        output_path = output_dir / "{}.pt".format(token)
+        if output_path.exists() and not args.overwrite:
+            existing = load_record(output_path)
+            if existing.get("token") != token or ("sample_index" in existing
+                    and existing["sample_index"] != source_index):
+                raise ValueError("existing Agent label does not match original index/token: {}".format(output_path))
+            skipped += 1
+            previous_scene = scene_token
+            previous_timestamp = timestamp
+            continue
         output_path = save_payload(payload, output_dir)
         output_labels = payload["agent"]["labels"]
         valid_count = int((output_labels >= 0).sum())
@@ -173,7 +210,7 @@ def main():
             "continuous={} tracks={} valid_total={} vehicle_count={} "
             "pedestrian_count={} output={}".format(
                 offset,
-                len(infos),
+                len(plan),
                 info["frame_idx"],
                 token,
                 scene_token,
@@ -187,8 +224,10 @@ def main():
             )
         )
         previous_scene = scene_token
+        previous_timestamp = timestamp
 
-    print("attempted: {}".format(len(infos)))
+    print("attempted inference frames: {}".format(len(plan)))
+    print("target frames: {} warmup frames: {} skipped existing: {}".format(targets, warmup, skipped))
     print("saved: {}".format(saved))
     print("total labels: {}".format(total_labels))
     print("vehicle labels: {}".format(total_vehicle))

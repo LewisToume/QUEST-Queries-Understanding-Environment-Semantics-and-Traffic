@@ -110,18 +110,33 @@ def validate_vector_record(record: Mapping[str, Any], token: str, sample_index: 
         raise ValueError("nuPlan vector GT contains points outside ROI")
 
 
-def load_vector_capacity_audit(path: str | Path, config: Mapping[str, Any]) -> tuple[int, dict]:
+def load_vector_capacity_audit(path: str | Path, config: Mapping[str, Any],
+                               split_manifest: Mapping[str, Any] | None = None) -> tuple[int, dict]:
     with Path(path).open(encoding="utf-8") as stream:
         audit = json.load(stream)
     if (audit.get("capacity_certified") is not True
             or audit.get("schema_version") != VECTOR_GT_SCHEMA_VERSION
             or audit.get("vector_semantics_version") != VECTOR_SEMANTICS_VERSION):
         raise ValueError("full train/validation Vector GT capacity audit is missing or obsolete")
+    if split_manifest is not None:
+        if (audit.get("split_sha256") != split_manifest.get("split_sha256")
+                or audit.get("metadata_sha256") != split_manifest.get("metadata_sha256")):
+            raise ValueError("Vector GT capacity audit was built for a different Stage 3 frame list")
+    elif config.get("paths", {}).get("split_manifest_path"):
+        raise ValueError("Stage 3 split manifest is required to certify Vector GT capacity")
     for split, section in (("train", config["train"]), ("eval", config["eval"])):
         actual = audit.get("splits", {}).get(split, {})
-        if (actual.get("start_index") != section["start_index"]
-                or actual.get("num_samples") != section["num_samples"]
-                or actual.get("available") != section["num_samples"]):
+        if split_manifest is not None:
+            name = "train" if split == "train" else "validation"
+            expected = split_manifest[name]["frames"]
+            if (actual.get("indices") != [row["index"] for row in expected]
+                    or actual.get("tokens") != [row["token"] for row in expected]
+                    or actual.get("num_samples") != len(expected)
+                    or actual.get("available") != len(expected)):
+                raise ValueError(f"Vector GT capacity audit does not cover exact {split} indices/tokens")
+        elif (actual.get("start_index") != section["start_index"]
+              or actual.get("num_samples") != section["num_samples"]
+              or actual.get("available") != section["num_samples"]):
             raise ValueError(f"Vector GT capacity audit does not cover full {split} split")
     provenance = audit.get("vector_gt_provenance")
     if (not isinstance(provenance, dict)
