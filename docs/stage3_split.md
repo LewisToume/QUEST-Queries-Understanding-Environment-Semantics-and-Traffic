@@ -4,10 +4,15 @@
 and chooses three complete, roughly 40-frame held-out scenes from later indices.
 City membership is resolved using the nuPlan map projection; nearest-neighbor
 queries are performed separately for each city. Every selected frame must be at
-least 200 m from training frames in that city. The builder never compares XY
-coordinates across cities or relaxes the threshold. It reports when a reliable
-log identifier is absent. The split includes all original indices, tokens,
-scene tokens, cities, metadata SHA256, and a frame-list SHA256.
+least 200 m from training frames in that city. The three validation scenes
+must all be in one training city, with every pair of scene trajectories at
+least 200 m apart. A complete compatibility-graph search checks for triples,
+preferring three 40-frame scenes with motion extent over 30 m. The builder
+never compares XY coordinates across cities or relaxes either threshold. If
+no triple exists, it reports the maximum compatible group size and candidates
+per city. It reports when a reliable log identifier is absent. The v2 split
+includes all original indices, tokens, scene tokens, cities, metadata SHA256,
+and a schema-versioned frame-list SHA256.
 
 On the server, provide the same metadata file that `configs/stage1.yaml` uses:
 
@@ -16,8 +21,11 @@ python scripts/build_stage3_split.py --metadata /home/user/DataDisk/QUEST_WORK/d
 ```
 
 Set `NUPLAN_MAPS_ROOT` and `NUPLAN_MAP_VERSION` beforehand, or pass `--map-root`
-and `--map-version`. The builder refuses to overwrite a different existing
-split. Inspect the printed scene motion, nearest-training and inter-scene
+and `--map-version`. When replacing an existing v1 `data/stage3_split.json`, the
+builder first preserves its exact bytes as `data/stage3_split.v1.backup.json`.
+It refuses to replace a different v2 split or overwrite a conflicting backup.
+Old v1 manifests and capacity/teacher audits cannot certify a v2 split.
+Inspect the printed scene motion, nearest-training and inter-scene
 distance statistics and missing-label counts before exporting labels. The
 selected metadata file must match the Stage 1 dataset metadata byte-for-byte.
 

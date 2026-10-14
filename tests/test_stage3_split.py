@@ -5,10 +5,40 @@ import unittest
 
 import numpy as np
 
-from quest.stage3_split import SPLIT_SCHEMA_VERSION, file_sha256, load_stage3_split, split_hash, validate_split
+from quest.stage3_split import SPLIT_SCHEMA_VERSION, load_stage3_split, validate_split
 from quest.stage3_dataset import load_teacher_audit
-from scripts.build_stage3_split import build_split, choose_scenes, nearest_same_city
+from scripts.build_stage3_split import (
+    build_split, choose_scenes, find_scene_group, nearest_same_city,
+    save_split_manifest, scene_distance_m,
+)
 from scripts.export_navformer_map_soft import temporal_export_plan
+
+
+def synthetic_split(directory):
+    from pathlib import Path
+
+    class CityLocator:
+        def resolve(self, info):
+            return info["city"]
+
+    infos = []
+    for index in range(5120):
+        if index < 5000:
+            city = "A" if index < 2500 else "B"
+            scene = f"train-{city}"
+            x = 0.0
+        else:
+            scene_number = (index - 5000) // 40
+            city = "A"
+            scene = f"held-{scene_number}"
+            x = 1000.0 * (scene_number + 1) + (index - 5000) % 40
+        matrix = np.eye(4)
+        matrix[0, 3] = x
+        infos.append({"token": f"token-{index}", "scene_token": scene,
+                      "timestamp": index, "city": city, "lidar2global": matrix})
+    path = Path(directory) / "metadata.pkl"
+    path.write_bytes(b"synthetic")
+    return infos, path, build_split(infos, CityLocator(), path)
 
 
 class Stage3SplitTest(unittest.TestCase):
@@ -45,17 +75,7 @@ class Stage3SplitTest(unittest.TestCase):
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as directory:
-            metadata = Path(directory) / "metadata.pkl"
-            metadata.write_bytes(b"test metadata bytes")
-            infos = [{"token": f"t{index}", "scene_token": "train" if index < 5000 else "held"}
-                     for index in range(5001)]
-            train = [{"index": index, "token": f"t{index}", "scene_token": "train", "city": "city"}
-                     for index in range(5000)]
-            validation = [{"index": 5000, "token": "t5000", "scene_token": "held",
-                           "city": "city", "nearest_train_m": 250.0}]
-            manifest = {"schema_version": SPLIT_SCHEMA_VERSION, "metadata_sha256": file_sha256(metadata),
-                        "split_sha256": split_hash(train, validation),
-                        "train": {"frames": train}, "validation": {"frames": validation}}
+            infos, metadata, manifest = synthetic_split(directory)
             validate_split(manifest, infos, metadata)
             split_path = Path(directory) / "split.json"
             split_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -67,41 +87,83 @@ class Stage3SplitTest(unittest.TestCase):
                 validate_split(changed, infos, metadata)
             changed = json.loads(json.dumps(manifest))
             changed["validation"]["frames"][0]["nearest_train_m"] = 199.9
-            with self.assertRaisesRegex(ValueError, "spatially isolated"):
+            with self.assertRaisesRegex(ValueError, "training distance is stale"):
+                validate_split(changed, infos, metadata)
+            changed = json.loads(json.dumps(manifest))
+            changed["validation"]["scenes"][0]["indices"].reverse()
+            with self.assertRaisesRegex(ValueError, "scene description"):
+                validate_split(changed, infos, metadata)
+            changed = json.loads(json.dumps(manifest))
+            changed["validation"]["scenes"][0]["nearest_selected_scene_m"] = 8.0
+            with self.assertRaisesRegex(ValueError, "stale inter-scene distance"):
+                validate_split(changed, infos, metadata)
+            changed = json.loads(json.dumps(manifest))
+            changed["schema_version"] = 1
+            with self.assertRaisesRegex(ValueError, "schema is unsupported"):
                 validate_split(changed, infos, metadata)
 
     def test_builder_keeps_5000_training_indices_and_three_full_scenes(self):
         import tempfile
-        from pathlib import Path
-
-        class CityLocator:
-            def resolve(self, info):
-                return info["city"]
-
-        infos = []
-        for index in range(5120):
-            if index < 5000:
-                city = "A" if index < 2500 else "B"
-                scene = f"train-{city}"
-                x = 0.0
-            else:
-                scene_number = (index - 5000) // 40
-                city = "A" if scene_number != 1 else "B"
-                scene = f"held-{scene_number}"
-                x = 1000.0 * (scene_number + 1) + (index - 5000) % 40
-            matrix = np.eye(4)
-            matrix[0, 3] = x
-            infos.append({"token": f"token-{index}", "scene_token": scene,
-                          "timestamp": index, "city": city, "lidar2global": matrix})
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "metadata.pkl"
-            path.write_bytes(b"synthetic")
-            manifest = build_split(infos, CityLocator(), path)
+            _, _, manifest = synthetic_split(directory)
+            self.assertEqual(manifest["schema_version"], SPLIT_SCHEMA_VERSION)
             self.assertEqual([row["index"] for row in manifest["train"]["frames"]], list(range(5000)))
             self.assertEqual(len(manifest["validation"]["frames"]), 120)
             self.assertEqual(len(manifest["validation"]["scenes"]), 3)
             self.assertTrue(all(row["nearest_train_m"] >= 200
                                 for row in manifest["validation"]["frames"]))
+            self.assertTrue(all(scene["nearest_selected_scene_m"] >= 200
+                                for scene in manifest["validation"]["scenes"]))
+
+    def test_exhaustive_search_finds_triple_after_high_priority_dead_end(self):
+        centers = {"A": (150, 87), "B": (0, 0), "C": (300, 0), "D": (150, 260)}
+        candidates = []
+        for name, center in centers.items():
+            candidates.append({"scene": name, "city": "city", "indices": list(range(40)),
+                               "points": np.asarray([center], dtype=float),
+                               "distances": np.asarray([600.0 if name == "A" else 500.0]),
+                               "motion_m": 40.0,
+                               "log": name})
+        self.assertLess(scene_distance_m(candidates[0], candidates[1]), 200)
+        self.assertLess(scene_distance_m(candidates[0], candidates[2]), 200)
+        self.assertLess(scene_distance_m(candidates[0], candidates[3]), 200)
+        self.assertEqual({item["scene"] for item in choose_scenes(candidates, set())}, {"B", "C", "D"})
+
+    def test_no_same_city_triple_reports_maximum_without_mixing_cities(self):
+        candidates = [
+            {"scene": name, "city": city, "indices": list(range(40)),
+             "points": np.asarray([[x, 0.0]]), "distances": np.asarray([500.0]),
+             "motion_m": 40.0, "log": name}
+            for name, city, x in (("A", "city-1", 0.0), ("B", "city-1", 200.0),
+                                  ("C", "city-2", 1000.0))
+        ]
+        selected, report = find_scene_group(candidates, set())
+        self.assertEqual(selected, [])
+        self.assertEqual(report["city-1"]["maximum_compatible_scenes"], 2)
+        self.assertEqual(report["city-2"]["maximum_compatible_scenes"], 1)
+        with self.assertRaisesRegex(ValueError, "across cities"):
+            scene_distance_m(candidates[0], candidates[2])
+
+    def test_v1_manifest_is_backed_up_and_v2_hash_is_distinct(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, manifest = synthetic_split(directory)
+            output = Path(directory) / "stage3_split.json"
+            old_bytes = b'{"schema_version": 1, "split_sha256": "old-audit-hash"}\n'
+            output.write_bytes(old_bytes)
+            backup = save_split_manifest(output, manifest)
+            self.assertEqual(backup.read_bytes(), old_bytes)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["split_sha256"],
+                             manifest["split_sha256"])
+            self.assertNotEqual(manifest["split_sha256"], "old-audit-hash")
+            self.assertEqual(save_split_manifest(output, manifest), None)
+            output.write_bytes(old_bytes)
+            backup.write_bytes(b"different historical split")
+            with self.assertRaisesRegex(ValueError, "backup differs"):
+                save_split_manifest(output, manifest)
+            self.assertEqual(output.read_bytes(), old_bytes)
 
     def test_teacher_audit_cannot_use_another_split(self):
         import tempfile

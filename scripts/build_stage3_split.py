@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -14,7 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.nuplan_map_locator import NuPlanMapLocator
-from quest.stage3_split import SPLIT_SCHEMA_VERSION, file_sha256, split_hash, validate_split
+from quest.stage3_split import (
+    MINIMUM_SPATIAL_DISTANCE_M, SPLIT_SCHEMA_VERSION, file_sha256, split_hash,
+    validate_split,
+)
 from quest.vector_map_labels import require_lidar2global
 from scripts.run_navformer_openscene_teacher import load_infos
 
@@ -50,40 +55,90 @@ def motion_extent(points: np.ndarray) -> float:
     return float(np.linalg.norm(points[:, None, :] - points[None, :, :], axis=-1).max())
 
 
+def scene_distance_m(left: dict, right: dict) -> float:
+    if left["city"] != right["city"]:
+        raise ValueError("cannot compare scene coordinates across cities")
+    return float(cKDTree(right["points"]).query(left["points"])[0].min())
+
+
+def scene_priority(item: dict, train_logs: set[str], seed: int) -> tuple:
+    count = len(item["indices"])
+    tie = hashlib.sha256(f"{seed}:{item['city']}:{item['scene']}".encode()).hexdigest()
+    return (count == 40 and item["motion_m"] > 30, count == 40,
+            item["motion_m"] > 30, -abs(count - 40),
+            item["log"] is not None and item["log"] not in train_logs,
+            float(item["distances"].min()), item["motion_m"], tie)
+
+
+def _first_triangle(vertices: list[int], edges: dict[int, set[int]]) -> tuple[int, int, int] | None:
+    """Search every compatible pair; a single greedy path cannot prove absence."""
+    for position, first in enumerate(vertices):
+        for second_position in range(position + 1, len(vertices)):
+            second = vertices[second_position]
+            if second not in edges[first]:
+                continue
+            shared = edges[first] & edges[second]
+            for third in vertices[second_position + 1:]:
+                if third in shared:
+                    return first, second, third
+    return None
+
+
+def find_scene_group(candidates: list[dict], train_logs: set[str], seed: int = 42,
+                     minimum_distance_m: float = MINIMUM_SPATIAL_DISTANCE_M,
+                     ) -> tuple[list[dict], dict[str, dict]]:
+    if minimum_distance_m < MINIMUM_SPATIAL_DISTANCE_M:
+        raise ValueError("validation scene separation cannot be below 200 m")
+    by_city: dict[str, list[dict]] = defaultdict(list)
+    for item in candidates:
+        by_city[item["city"]].append(item)
+    city_reports: dict[str, dict] = {}
+    feasible = []
+    for city, items in sorted(by_city.items()):
+        ordered = sorted(items, key=lambda item: scene_priority(item, train_logs, seed), reverse=True)
+        edges = {index: set() for index in range(len(ordered))}
+        for first in range(len(ordered)):
+            for second in range(first + 1, len(ordered)):
+                if scene_distance_m(ordered[first], ordered[second]) >= minimum_distance_m:
+                    edges[first].add(second)
+                    edges[second].add(first)
+        vertices = list(range(len(ordered)))
+        preferred = [index for index in vertices
+                     if len(ordered[index]["indices"]) == 40 and ordered[index]["motion_m"] > 30]
+        triangle = _first_triangle(preferred, edges) or _first_triangle(vertices, edges)
+        pair = next(((first, second) for first in vertices for second in vertices
+                     if second > first and second in edges[first]), None)
+        maximum = 3 if triangle else (2 if pair else (1 if ordered else 0))
+        best_indices = triangle or pair or ((0,) if ordered else ())
+        city_reports[city] = {
+            "eligible_scenes": len(ordered), "maximum_compatible_scenes": maximum,
+            "best_candidate_scenes": [ordered[index]["scene"] for index in best_indices],
+            "top_candidates": [
+                {"scene": item["scene"], "frames": len(item["indices"]),
+                 "motion_extent_m": item["motion_m"],
+                 "nearest_train_min_m": float(item["distances"].min())}
+                for item in ordered[:10]
+            ],
+        }
+        if triangle:
+            group = [ordered[index] for index in triangle]
+            quality = tuple(scene_priority(item, train_logs, seed) for item in group)
+            feasible.append((quality, city, group))
+    if not feasible:
+        return [], city_reports
+    return max(feasible, key=lambda result: (result[0], result[1]))[2], city_reports
+
+
 def choose_scenes(candidates: list[dict], train_logs: set[str], seed: int = 42,
-                  target_frames: int = 120, target_scenes: int = 3) -> list[dict]:
-    selected: list[dict] = []
-    available = list(candidates)
-    while available and len(selected) < target_scenes:
-        ranked = []
-        for item in available:
-            separation = min(
-                float(cKDTree(other["points"]).query(item["points"])[0].min())
-                for other in selected if other["city"] == item["city"]
-            ) if any(other["city"] == item["city"] for other in selected) else float("inf")
-            new_city = item["city"] not in {other["city"] for other in selected}
-            log_clean = item["log"] is not None and item["log"] not in train_logs
-            log_clean &= item["log"] not in {other["log"] for other in selected}
-            # The final component is a fixed-seed, stable tie-breaker, never Python's random hash.
-            import hashlib
-            tie = hashlib.sha256(f"{seed}:{item['scene']}".encode()).hexdigest()
-            key = (len(item["indices"]) == 40, -abs(len(item["indices"]) - 40),
-                   item["motion_m"] > 30,
-                   log_clean, new_city, min(separation, 1000.0),
-                   -abs(target_frames - (sum(len(x["indices"]) for x in selected) + len(item["indices"]))),
-                   item["motion_m"], tie)
-            ranked.append((key, item))
-        chosen = max(ranked, key=lambda pair: pair[0])[1]
-        selected.append(chosen)
-        available.remove(chosen)
-    return selected
+                  minimum_distance_m: float = MINIMUM_SPATIAL_DISTANCE_M) -> list[dict]:
+    return find_scene_group(candidates, train_logs, seed, minimum_distance_m)[0]
 
 
 def build_split(infos: list[dict], locator: NuPlanMapLocator, metadata_path: Path,
                 minimum_distance_m: float = 200.0, seed: int = 42) -> dict:
     if len(infos) <= 5000:
         raise ValueError("OpenScene metadata has no frames beyond Stage 2 train indices 0-4999")
-    if minimum_distance_m < 200:
+    if minimum_distance_m < MINIMUM_SPATIAL_DISTANCE_M:
         raise ValueError("Stage 3 isolation distance cannot be lowered below 200 m")
     cities: list[str] = []
     positions = np.empty((len(infos), 2), dtype=np.float64)
@@ -140,29 +195,22 @@ def build_split(infos: list[dict], locator: NuPlanMapLocator, metadata_path: Pat
                            "points": scene_points, "distances": distances,
                            "motion_m": motion_extent(scene_points),
                            "log": next(iter(logs)) if logs else None})
-    selected = choose_scenes(candidates, train_logs, seed)
+    selected, city_reports = find_scene_group(candidates, train_logs, seed, minimum_distance_m)
     if len(selected) != 3:
-        ranked_candidates = sorted(
-            candidates,
-            key=lambda item: (len(item["indices"]) == 40, item["motion_m"] > 30,
-                              float(item["distances"].min()), item["scene"]), reverse=True,
-        )
-        best = [(item["scene"], item["city"], len(item["indices"]),
-                 round(float(item["distances"].min()), 1)) for item in ranked_candidates[:10]]
         near_misses.sort(key=lambda row: (row["nearest_train_m"] is not None,
                                           row["nearest_train_m"] or -1), reverse=True)
-        raise RuntimeError(f"only {len(selected)} isolated scenes found; rejected={dict(rejected)} "
-                           f"best_eligible={best} nearest_rejected={near_misses[:10]}")
+        maximum = max((report["maximum_compatible_scenes"] for report in city_reports.values()), default=0)
+        raise RuntimeError(f"no same-city triple has pairwise separation >= {minimum_distance_m:g} m; "
+                           f"maximum_compatible_scenes={maximum} city_candidates={city_reports} "
+                           f"rejected={dict(rejected)} nearest_rejected={near_misses[:10]}")
     train = [{"index": index, "token": str(infos[index]["token"]),
               "scene_token": str(infos[index]["scene_token"]), "city": cities[index]}
              for index in range(5000)]
     validation = []
     scenes = []
     for item in selected:
-        other_scene_distance = min(
-            float(cKDTree(other["points"]).query(item["points"])[0].min())
-            for other in selected if other is not item and other["city"] == item["city"]
-        ) if any(other is not item and other["city"] == item["city"] for other in selected) else None
+        other_scene_distance = min(scene_distance_m(item, other)
+                                   for other in selected if other is not item)
         scenes.append({"scene_token": item["scene"], "city": item["city"],
                        "indices": item["indices"], "frame_count": len(item["indices"]),
                        "motion_extent_m": item["motion_m"],
@@ -179,12 +227,36 @@ def build_split(infos: list[dict], locator: NuPlanMapLocator, metadata_path: Pat
     manifest = {"schema_version": SPLIT_SCHEMA_VERSION, "seed": seed,
                 "metadata_sha256": file_sha256(metadata_path), "metadata_frame_count": len(infos),
                 "minimum_train_distance_m": minimum_distance_m,
+                "minimum_validation_scene_distance_m": minimum_distance_m,
                 "train": {"frames": train}, "validation": {"frames": validation, "scenes": scenes},
-                "rejected_scene_counts": dict(rejected),
+                "rejected_scene_counts": dict(rejected), "city_candidate_summary": city_reports,
                 "log_identity_confirmed": all(item["log"] is not None for item in selected)}
     manifest["split_sha256"] = split_hash(train, validation)
     validate_split(manifest, infos, metadata_path)
     return manifest
+
+
+def save_split_manifest(output: Path, manifest: dict) -> Path | None:
+    """Archive an existing v1 split byte-for-byte before replacing it with v2."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    backup = None
+    if output.exists():
+        old_bytes = output.read_bytes()
+        existing = json.loads(old_bytes)
+        if existing == manifest:
+            return None
+        if existing.get("schema_version") != 1:
+            raise ValueError(f"existing non-v1 split differs; refusing to overwrite {output}")
+        backup = output.with_name(f"{output.stem}.v1.backup{output.suffix}")
+        if backup.exists():
+            if backup.read_bytes() != old_bytes:
+                raise ValueError(f"backup differs from existing split; refusing to overwrite {output}")
+        else:
+            shutil.copy2(output, backup)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(output)
+    return backup
 
 
 def main() -> None:
@@ -205,14 +277,7 @@ def main() -> None:
     infos = load_infos(args.metadata)
     db = GPKGMapsDB(map_version=args.map_version, map_root=str(args.map_root))
     manifest = build_split(infos, NuPlanMapLocator(db), args.metadata, seed=args.seed)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    if args.output.exists():
-        with args.output.open(encoding="utf-8") as stream:
-            existing = json.load(stream)
-        if existing != manifest:
-            raise ValueError(f"existing split differs; refusing to overwrite {args.output}")
-    else:
-        args.output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    backup = save_split_manifest(args.output, manifest)
     print(f"train_frames={len(manifest['train']['frames'])} validation_frames={len(manifest['validation']['frames'])}")
     print(f"validation_city_counts={dict(Counter(row['city'] for row in manifest['validation']['frames']))}")
     nearest = np.asarray([row["nearest_train_m"] for row in manifest["validation"]["frames"]])
@@ -227,6 +292,8 @@ def main() -> None:
                        if not (directory / f"{row['token']}.pt").is_file()]
             print(f"missing_{split_name}_{name}={len(missing)} examples={missing[:10]}")
     print(f"split_sha256={manifest['split_sha256']} log_identity_confirmed={manifest['log_identity_confirmed']}")
+    if backup is not None:
+        print(f"previous_split_backup={backup}")
     print(f"saved={args.output}")
 
 
