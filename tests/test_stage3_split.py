@@ -64,6 +64,7 @@ class Stage3SplitTest(unittest.TestCase):
             return {"scene": scene, "city": "city", "indices": list(range(count)),
                     "points": np.column_stack((np.arange(count) + ord(scene) * 1000,
                                                np.zeros(count))),
+                    "distances": np.full(count, 500.0),
                     "motion_m": motion, "log": f"log-{scene}"}
         scenes = [candidate("A", 40, 39), candidate("B", 40, 39),
                   candidate("C", 40, 39), candidate("D", 35, 34)]
