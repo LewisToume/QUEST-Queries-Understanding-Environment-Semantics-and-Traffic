@@ -8,8 +8,7 @@ import numpy as np
 from quest.stage3_split import SPLIT_SCHEMA_VERSION, load_stage3_split, validate_split
 from quest.stage3_dataset import load_teacher_audit
 from scripts.build_stage3_split import (
-    build_split, choose_scenes, find_scene_group, nearest_same_city,
-    save_split_manifest, scene_distance_m,
+    build_split, choose_scenes, save_split_manifest,
 )
 from scripts.export_navformer_map_soft import temporal_export_plan
 
@@ -31,7 +30,7 @@ def synthetic_split(directory):
             scene_number = (index - 5000) // 40
             city = "A"
             scene = f"held-{scene_number}"
-            x = 1000.0 * (scene_number + 1) + (index - 5000) % 40
+            x = scene_number * 2.0 + (index - 5000) % 40
         matrix = np.eye(4)
         matrix[0, 3] = x
         infos.append({"token": f"token-{index}", "scene_token": scene,
@@ -42,15 +41,6 @@ def synthetic_split(directory):
 
 
 class Stage3SplitTest(unittest.TestCase):
-    def test_city_trees_never_compare_foreign_projection_coordinates(self):
-        train = {"las_vegas": np.array([[0.0, 0.0]]),
-                 "pittsburgh": np.array([[1000.0, 1000.0]])}
-        distances = nearest_same_city(train, ["pittsburgh", "las_vegas"],
-                                      np.array([[0.0, 0.0], [10.0, 0.0]]))
-        self.assertGreater(distances[0], 1000)
-        self.assertAlmostEqual(distances[1], 10)
-
-
     def test_noncontiguous_temporal_targets_keep_original_indices(self):
         infos = [{"token": f"a{n}", "scene_token": "A", "timestamp": n}
                  for n in range(5)]
@@ -59,16 +49,30 @@ class Stage3SplitTest(unittest.TestCase):
         self.assertEqual([item["sample_index"] for item in plan if not item["target"]], [0, 2, 3])
 
 
-    def test_scene_selection_prefers_full_moving_scenes(self):
-        def candidate(scene, count, motion):
-            return {"scene": scene, "city": "city", "indices": list(range(count)),
-                    "points": np.column_stack((np.arange(count) + ord(scene) * 1000,
-                                               np.zeros(count))),
-                    "distances": np.full(count, 500.0),
-                    "motion_m": motion, "log": f"log-{scene}"}
-        scenes = [candidate("A", 40, 39), candidate("B", 40, 39),
-                  candidate("C", 40, 39), candidate("D", 35, 34)]
-        self.assertEqual({item["scene"] for item in choose_scenes(scenes, set())}, {"A", "B", "C"})
+    def test_scene_selection_is_seeded_and_prefers_training_cities(self):
+        scenes = [{"scene": name, "city": city, "motion_m": motion}
+                  for name, city, motion in (("A", "train", 0.0), ("B", "train", 10.0),
+                                             ("C", "train", 20.0), ("D", "other", 5.0))]
+        selected = choose_scenes(scenes, {"train"}, seed=42)
+        self.assertEqual({item["scene"] for item in selected}, {"A", "B", "C"})
+        self.assertEqual([item["scene"] for item in selected],
+                         [item["scene"] for item in choose_scenes(list(reversed(scenes)), {"train"}, seed=42)])
+        self.assertIn("C", {item["scene"] for item in selected})
+
+    def test_one_high_motion_scene_even_when_training_city_scenes_are_static(self):
+        scenes = [{"scene": name, "city": city, "motion_m": motion}
+                  for name, city, motion in (("A", "train", 0.0), ("B", "train", 0.0),
+                                             ("C", "train", 0.0), ("D", "other", 100.0))]
+        self.assertIn("D", {item["scene"] for item in choose_scenes(scenes, {"train"})})
+
+    def test_scene_selection_falls_back_to_other_cities(self):
+        scenes = [{"scene": name, "city": city, "motion_m": motion}
+                  for name, city, motion in (("A", "train", 10.0), ("B", "other", 0.0),
+                                             ("C", "other", 20.0))]
+        self.assertEqual({item["scene"] for item in choose_scenes(scenes, {"train"})},
+                         {"A", "B", "C"})
+        with self.assertRaisesRegex(ValueError, "three complete"):
+            choose_scenes(scenes[:2], {"train"})
 
 
     def test_split_hash_and_metadata_token_checks(self):
@@ -87,20 +91,41 @@ class Stage3SplitTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "index/token/scene"):
                 validate_split(changed, infos, metadata)
             changed = json.loads(json.dumps(manifest))
-            changed["validation"]["frames"][0]["nearest_train_m"] = 199.9
-            with self.assertRaisesRegex(ValueError, "training distance is stale"):
+            changed["validation"]["frames"][0]["scene_token"] = "train-A"
+            with self.assertRaisesRegex(ValueError, "index/token/scene"):
                 validate_split(changed, infos, metadata)
             changed = json.loads(json.dumps(manifest))
             changed["validation"]["scenes"][0]["indices"].reverse()
             with self.assertRaisesRegex(ValueError, "scene description"):
                 validate_split(changed, infos, metadata)
             changed = json.loads(json.dumps(manifest))
-            changed["validation"]["scenes"][0]["nearest_selected_scene_m"] = 8.0
-            with self.assertRaisesRegex(ValueError, "stale inter-scene distance"):
+            changed["validation"]["scenes"][0]["motion_extent_m"] = -1.0
+            with self.assertRaisesRegex(ValueError, "stale motion_extent_m"):
                 validate_split(changed, infos, metadata)
+            changed = json.loads(json.dumps(manifest))
+            changed["validation"]["frames"][0]["token"] = changed["train"]["frames"][0]["token"]
+            with self.assertRaisesRegex(ValueError, "index/token/scene"):
+                validate_split(changed, infos, metadata)
+            changed = json.loads(json.dumps(manifest))
+            index = changed["validation"]["frames"][0]["index"]
+            infos[index]["token"] = changed["train"]["frames"][0]["token"]
+            changed["validation"]["frames"][0]["token"] = infos[index]["token"]
+            with self.assertRaisesRegex(ValueError, "duplicate token"):
+                validate_split(changed, infos, metadata)
+            infos[index]["token"] = f"token-{index}"
+            changed = json.loads(json.dumps(manifest))
+            infos[index]["scene_token"] = "train-A"
+            changed["validation"]["frames"][0]["scene_token"] = "train-A"
+            with self.assertRaisesRegex(ValueError, "overlaps training scene"):
+                validate_split(changed, infos, metadata)
+            infos[index]["scene_token"] = f"held-{(index - 5000) // 40}"
             changed = json.loads(json.dumps(manifest))
             changed["schema_version"] = 1
             with self.assertRaisesRegex(ValueError, "schema is unsupported"):
+                validate_split(changed, infos, metadata)
+            changed = json.loads(json.dumps(manifest))
+            changed["split_sha256"] = "old-audit-hash"
+            with self.assertRaisesRegex(ValueError, "frame-list hash mismatch"):
                 validate_split(changed, infos, metadata)
 
     def test_builder_keeps_5000_training_indices_and_three_full_scenes(self):
@@ -111,50 +136,40 @@ class Stage3SplitTest(unittest.TestCase):
             self.assertEqual([row["index"] for row in manifest["train"]["frames"]], list(range(5000)))
             self.assertEqual(len(manifest["validation"]["frames"]), 120)
             self.assertEqual(len(manifest["validation"]["scenes"]), 3)
-            self.assertTrue(all(row["nearest_train_m"] >= 200
-                                for row in manifest["validation"]["frames"]))
-            self.assertTrue(all(scene["nearest_selected_scene_m"] >= 200
+            self.assertEqual(manifest["validation"]["frames"][0]["index"], 5000)
+            self.assertTrue(all(scene["frame_count"] == 40
                                 for scene in manifest["validation"]["scenes"]))
+            self.assertEqual({row["city"] for row in manifest["validation"]["frames"]}, {"A"})
+            self.assertEqual({row["token"] for row in manifest["train"]["frames"]}
+                             & {row["token"] for row in manifest["validation"]["frames"]}, set())
+            self.assertEqual({row["scene_token"] for row in manifest["train"]["frames"]}
+                             & {row["scene_token"] for row in manifest["validation"]["frames"]}, set())
 
-    def test_exhaustive_search_finds_triple_after_high_priority_dead_end(self):
-        centers = {"A": (150, 87), "B": (0, 0), "C": (300, 0), "D": (150, 260)}
-        candidates = []
-        for name, center in centers.items():
-            candidates.append({"scene": name, "city": "city", "indices": list(range(40)),
-                               "points": np.asarray([center], dtype=float),
-                               "distances": np.asarray([600.0 if name == "A" else 500.0]),
-                               "motion_m": 40.0,
-                               "log": name})
-        self.assertLess(scene_distance_m(candidates[0], candidates[1]), 200)
-        self.assertLess(scene_distance_m(candidates[0], candidates[2]), 200)
-        self.assertLess(scene_distance_m(candidates[0], candidates[3]), 200)
-        self.assertEqual({item["scene"] for item in choose_scenes(candidates, set())}, {"B", "C", "D"})
+    def test_incomplete_scene_is_not_selected(self):
+        import tempfile
 
-    def test_no_same_city_triple_reports_maximum_without_mixing_cities(self):
-        candidates = [
-            {"scene": name, "city": city, "indices": list(range(40)),
-             "points": np.asarray([[x, 0.0]]), "distances": np.asarray([500.0]),
-             "motion_m": 40.0, "log": name}
-            for name, city, x in (("A", "city-1", 0.0), ("B", "city-1", 200.0),
-                                  ("C", "city-2", 1000.0))
-        ]
-        selected, report = find_scene_group(candidates, set())
-        self.assertEqual(selected, [])
-        self.assertEqual(report["city-1"]["maximum_compatible_scenes"], 2)
-        self.assertEqual(report["city-2"]["maximum_compatible_scenes"], 1)
-        with self.assertRaisesRegex(ValueError, "across cities"):
-            scene_distance_m(candidates[0], candidates[2])
+        with tempfile.TemporaryDirectory() as directory:
+            infos, metadata, _ = synthetic_split(directory)
+            infos[-1]["scene_token"] = "incomplete-single-frame-scene"
 
-    def test_v1_manifest_is_backed_up_and_v2_hash_is_distinct(self):
+            class CityLocator:
+                def resolve(self, info):
+                    return info["city"]
+
+            with self.assertRaisesRegex(RuntimeError, "need three complete 40-frame scenes"):
+                build_split(infos, CityLocator(), metadata)
+
+    def test_v2_manifest_is_backed_up_and_v3_hash_is_distinct(self):
         import tempfile
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as directory:
             _, _, manifest = synthetic_split(directory)
             output = Path(directory) / "stage3_split.json"
-            old_bytes = b'{"schema_version": 1, "split_sha256": "old-audit-hash"}\n'
+            old_bytes = b'{"schema_version": 2, "split_sha256": "old-audit-hash"}\n'
             output.write_bytes(old_bytes)
             backup = save_split_manifest(output, manifest)
+            self.assertEqual(backup.name, "stage3_split.v2.backup.json")
             self.assertEqual(backup.read_bytes(), old_bytes)
             self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["split_sha256"],
                              manifest["split_sha256"])
