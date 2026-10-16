@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import torch
 from torch.utils.data import Dataset
 
+from .label_io import load_record
 from .map_teacher import (
     TEACHER_ALIGNMENT_VERSION, TEACHER_COORDINATE_FRAME, TEACHER_MAP_SCHEMA_VERSION,
     TEACHER_SCORE_KIND, align_teacher_map_to_quest_bev, resolve_lidar2ego,
@@ -17,16 +18,6 @@ from .nuplan_map_locator import MAP_LAYER_AUDIT_VERSION
 from .nuplan_relation_audit import BASELINE_RELATION_AUDIT_VERSION
 from .openscene_dataset import OpenSceneMetadataDataset
 from .vector_map_labels import MAP_CLASS_NAMES, MAP_HEIGHT_REFERENCE, VECTOR_SEMANTICS_VERSION
-
-
-def load_record(path: Path) -> Mapping[str, Any]:
-    try:
-        record = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        record = torch.load(path, map_location="cpu")
-    if not isinstance(record, Mapping):
-        raise ValueError(f"label file must contain a mapping: {path}")
-    return record
 
 
 def load_teacher_audit(path: str | Path, expected_split_sha256: str | None = None) -> dict[str, Any]:

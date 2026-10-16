@@ -15,7 +15,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from quest.teachers import navformer_output_to_quest  # noqa: E402
 from quest.stage3_split import load_stage3_split, selected_frames  # noqa: E402
-from quest.stage3_dataset import load_record  # noqa: E402
+from quest.label_io import load_record  # noqa: E402
 from export_navformer_map_soft import temporal_export_plan  # noqa: E402
 from run_navformer_openscene_teacher import (  # noqa: E402
     DEFAULT_CHECKPOINT,

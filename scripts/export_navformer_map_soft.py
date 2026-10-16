@@ -17,7 +17,7 @@ from quest.map_teacher import (
     TEACHER_RAW_SCORE_SEMANTICS, TEACHER_SCORE_KIND, TEACHER_SCORE_TRANSFORM,
     resolve_lidar2ego, validate_teacher_record,
 )
-from quest.stage3_dataset import load_record
+from quest.label_io import load_record
 from quest.stage3_split import load_stage3_split, selected_frames
 from run_navformer_openscene_teacher import (
     DEFAULT_IMAGE_ROOT,
