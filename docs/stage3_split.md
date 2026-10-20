@@ -42,4 +42,5 @@ certifies query capacity when every Vector GT label is present and matches the
 original index/token. Teacher-channel human verification remains a separate
 gate. Run the Map Teacher audit with the same `--split-manifest` and an explicit
 new `--output`; it records the split hash and starts with `verified=false`.
-The formal trainer rejects an old teacher audit or missing Map Teacher labels.
+The hybrid trainer rejects an old teacher audit or missing Map Teacher labels.
+GT-only training does not use or require them.

@@ -16,14 +16,14 @@ from quest.map_teacher import MapRasterDistillHead, soft_map_distillation_loss
 from quest.map_training import (
     class_aware_vector_matches, denormalize_points, load_stage3_checkpoint,
     load_vector_capacity_audit,
-    stage3_forward,
+    stage3_forward, stage3_kd_enabled,
 )
 from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3, load_teacher_audit
 from quest.stage3_split import load_stage3_split
 from quest.utils import load_yaml_config
 from quest.vector_map_labels import MAP_CLASS_NAMES
-from scripts.train_stage3_map import build_dataset, preflight_vectors, resolve
+from scripts.train_stage3_map import build_dataset, preflight_agents, preflight_vectors, resolve
 
 
 def ratio(numerator: float, denominator: float) -> float:
@@ -37,6 +37,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args()
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
+    kd_enabled = stage3_kd_enabled(config)
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
     from scripts.run_navformer_openscene_teacher import load_infos
@@ -47,21 +48,24 @@ def main() -> None:
         resolve(config["paths"]["vector_capacity_audit_path"]), config, manifest
     )
     model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=query_count, P=20)
-    model = QUESTModel(**model_config)
-    audit = load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]),
-                               expected_split_sha256=manifest["split_sha256"])
+    audit = (load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]),
+                                expected_split_sha256=manifest["split_sha256"])
+             if kd_enabled else None)
     indices = [row["index"] for row in manifest["validation"]["frames"]]
     if args.start is not None or (args.count is not None and args.count != len(indices)):
         raise ValueError("formal Stage 3 evaluation uses the complete validation manifest")
-    dataset = build_dataset(model, config, stage1, audit, indices)
+    dataset = build_dataset(model_config, config, stage1, audit, indices, audited_provenance)
     if dataset.source_indices != indices:
         raise ValueError("formal Stage 3 evaluation cannot silently skip manifest frames")
     vector_provenance = preflight_vectors(dataset, query_count)
     if vector_provenance != audited_provenance:
         raise ValueError("evaluation vector GT provenance differs from certified capacity audit")
+    preflight_agents(dataset)
     loader = DataLoader(dataset, batch_size=int(config["eval"]["batch_size"]),
                         shuffle=False, num_workers=0, collate_fn=collate_stage3)
-    raster_head = MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
+    model = QUESTModel(**model_config)
+    raster_head = (MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
+                   if kd_enabled else None)
     checkpoint_path = resolve(args.checkpoint or config["paths"]["checkpoint_path"])
     checkpoint = load_checkpoint_cpu(checkpoint_path)
     if checkpoint.get("training_config", {}).get("stage3_split_sha256") != manifest["split_sha256"]:
@@ -70,28 +74,33 @@ def main() -> None:
         raise ValueError("evaluation vector GT export provenance differs from Stage 3 checkpoint")
     if tuple(checkpoint.get("map_class_names", ())) != MAP_CLASS_NAMES:
         raise ValueError("checkpoint map taxonomy differs from direct GT")
-    teacher_metadata = checkpoint.get("teacher_channel_metadata")
-    if not isinstance(teacher_metadata, dict):
-        raise ValueError("Stage 3 checkpoint has no teacher channel metadata")
-    if teacher_metadata.get("teacher_checkpoint") != audit["teacher_checkpoint"]:
-        raise ValueError("teacher audit/checkpoint identity differs from Stage 3 checkpoint")
-    if list(checkpoint.get("teacher_channel_support_mask", [])) != audit["teacher_channel_support_mask"]:
-        raise ValueError("teacher support mask differs from Stage 3 checkpoint")
-    for key in ("teacher_alignment_version", "teacher_coordinate_frame",
-                "row_axis", "row_direction", "col_direction", "teacher_pc_range"):
-        if teacher_metadata.get(key) != audit[key]:
-            raise ValueError(f"teacher {key} differs from Stage 3 checkpoint")
-    epoch = load_stage3_checkpoint(model, raster_head, checkpoint)
+    if kd_enabled:
+        teacher_metadata = checkpoint.get("teacher_channel_metadata")
+        if not isinstance(teacher_metadata, dict):
+            raise ValueError("Stage 3 checkpoint has no teacher channel metadata")
+        if teacher_metadata.get("teacher_checkpoint") != audit["teacher_checkpoint"]:
+            raise ValueError("teacher audit/checkpoint identity differs from Stage 3 checkpoint")
+        if list(checkpoint.get("teacher_channel_support_mask", [])) != audit["teacher_channel_support_mask"]:
+            raise ValueError("teacher support mask differs from Stage 3 checkpoint")
+        for key in ("teacher_alignment_version", "teacher_coordinate_frame",
+                    "row_axis", "row_direction", "col_direction", "teacher_pc_range"):
+            if teacher_metadata.get(key) != audit[key]:
+                raise ValueError(f"teacher {key} differs from Stage 3 checkpoint")
+    epoch = load_stage3_checkpoint(model, raster_head, checkpoint,
+                                   expected_map_kd_enabled=kd_enabled)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
-    raster_head.to(device).eval()
+    if raster_head is not None:
+        raster_head.to(device).eval()
     thresholds = tuple(float(v) for v in config["eval"]["point_error_thresholds_m"])
     primary = max(thresholds)
     metrics = {name: {"gt": 0, "predictions": 0, "hits": {d: 0 for d in thresholds},
                       "point_error_sum": 0.0, "chamfer_sum": 0.0}
                for name in MAP_CLASS_NAMES}
-    support = torch.tensor(audit["teacher_channel_support_mask"], device=device, dtype=torch.bool)
-    weights = torch.tensor(audit["teacher_channel_weights"], device=device, dtype=torch.float32)
+    support = (torch.tensor(audit["teacher_channel_support_mask"], device=device, dtype=torch.bool)
+               if kd_enabled else None)
+    weights = (torch.tensor(audit["teacher_channel_weights"], device=device, dtype=torch.float32)
+               if kd_enabled else None)
     kd_sum = 0.0
     raster_intersection = raster_union = 0
     frames = 0
@@ -100,14 +109,15 @@ def main() -> None:
     with torch.no_grad():
         for batch in loader:
             predictions = stage3_forward(model, raster_head, batch, device)
-            logits = predictions["student_map_raster_logits"]
-            teacher = batch["teacher_map_aligned"].to(device)
-            valid = batch["teacher_map_valid"].to(device)
-            kd_sum += float(soft_map_distillation_loss(logits, teacher, valid, support, weights))
-            student_binary = (logits.sigmoid()[:, support] >= 0.5) & valid[:, None]
-            teacher_binary = (teacher[:, support] >= 0.5) & valid[:, None]
-            raster_intersection += int((student_binary & teacher_binary).sum())
-            raster_union += int((student_binary | teacher_binary).sum())
+            if kd_enabled:
+                logits = predictions["student_map_raster_logits"]
+                teacher = batch["teacher_map_aligned"].to(device)
+                valid = batch["teacher_map_valid"].to(device)
+                kd_sum += float(soft_map_distillation_loss(logits, teacher, valid, support, weights))
+                student_binary = (logits.sigmoid()[:, support] >= 0.5) & valid[:, None]
+                teacher_binary = (teacher[:, support] >= 0.5) & valid[:, None]
+                raster_intersection += int((student_binary & teacher_binary).sum())
+                raster_union += int((student_binary | teacher_binary).sum())
             for batch_index, record in enumerate(batch["vector_targets"]):
                 class_probabilities = predictions["map_cls_logits"][batch_index].softmax(-1)
                 scores, labels = class_probabilities.max(-1)
@@ -129,7 +139,8 @@ def main() -> None:
                 frames += 1
     if not frames:
         raise RuntimeError("Stage 3 map evaluation received no frames")
-    print(f"checkpoint={checkpoint_path} epoch={epoch} evaluated_frames={frames} vector_GT=nuPlan")
+    print(f"checkpoint={checkpoint_path} epoch={epoch} evaluated_frames={frames} "
+          f"vector_GT=nuPlan map_kd={'ON' if kd_enabled else 'OFF'}")
     for name in MAP_CLASS_NAMES:
         item = metrics[name]
         print(f"{name} gt_count={item['gt']} prediction_count={item['predictions']}")
@@ -141,8 +152,11 @@ def main() -> None:
         point_error = ratio(item["point_error_sum"], matched) if matched else math.nan
         chamfer = ratio(item["chamfer_sum"], matched) if matched else math.nan
         print(f"{name} matched_mean_point_error_m={point_error:.6f} matched_chamfer_m={chamfer:.6f}")
-    print(f"teacher_student_raster_kd_bce={kd_sum / len(loader):.6f} "
-          f"teacher_student_raster_iou_at_0.5={ratio(raster_intersection, raster_union):.6f}")
+    if kd_enabled:
+        print(f"teacher_student_raster_kd_bce={kd_sum / len(loader):.6f} "
+              f"teacher_student_raster_iou_at_0.5={ratio(raster_intersection, raster_union):.6f}")
+    else:
+        print("teacher_student_raster_kd_bce=N/A teacher_student_raster_iou_at_0.5=N/A")
 
 
 if __name__ == "__main__":

@@ -167,7 +167,7 @@ def load_agent_stage2_checkpoint(
 
     if checkpoint.get("architecture_version") != QUEST_ARCHITECTURE_VERSION:
         raise ValueError("Stage 2 Agent checkpoint architecture version mismatch")
-    if checkpoint.get("stage") not in (AGENT_END_TO_END_STAGE, "map_hybrid_distillation"):
+    if checkpoint.get("stage") not in (AGENT_END_TO_END_STAGE, "map_hybrid_distillation", "map_gt_agent"):
         raise ValueError("checkpoint has no compatible end-to-end Agent modules")
     if checkpoint.get("bev_use_ego_state") is not False:
         raise ValueError("Stage 2 Agent checkpoint must disable absolute ego state")

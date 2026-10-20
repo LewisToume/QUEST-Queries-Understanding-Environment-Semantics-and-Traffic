@@ -70,12 +70,24 @@ class Stage3JoinedDataset(Dataset):
     """Metadata raw indices are authoritative; filenames are joined by token."""
 
     def __init__(self, stage1_dataset_config: Mapping[str, Any], source_indices: list[int],
-                 agent_dir: str | Path, vector_dir: str | Path, teacher_dir: str | Path,
-                 audit: Mapping[str, Any], quest_range: tuple[float, float, float, float],
-                 bev_h: int, bev_w: int, skip_missing_teacher: bool = False) -> None:
+                 agent_dir: str | Path, vector_dir: str | Path, teacher_dir: str | Path | None,
+                 audit: Mapping[str, Any] | None, quest_range: tuple[float, float, float, float],
+                 bev_h: int, bev_w: int, skip_missing_teacher: bool = False,
+                 vector_provenance: Mapping[str, Any] | None = None) -> None:
         self.vector_dir = Path(vector_dir)
-        self.teacher_dir = Path(teacher_dir)
+        if (teacher_dir is None) != (audit is None):
+            raise ValueError("map teacher directory and verified audit must be provided together")
+        if skip_missing_teacher and teacher_dir is None:
+            raise ValueError("skip_missing_teacher requires map KD")
+        self.teacher_dir = Path(teacher_dir) if teacher_dir is not None else None
         self.audit = audit
+        self.vector_provenance = vector_provenance if vector_provenance is not None else (
+            audit.get("vector_gt_provenance") if audit is not None else None
+        )
+        if self.vector_provenance is None:
+            raise ValueError("certified Vector GT provenance is required")
+        if audit is not None and audit.get("vector_gt_provenance") != self.vector_provenance:
+            raise ValueError("teacher audit and capacity audit disagree on Vector GT provenance")
         self.quest_range = quest_range
         self.bev_h, self.bev_w = bev_h, bev_w
         self.source_indices = list(source_indices)
@@ -95,9 +107,10 @@ class Stage3JoinedDataset(Dataset):
             raise ValueError("duplicate OpenScene tokens make Stage 3 index joining ambiguous")
         for source_index, info in zip(self.source_indices, self.images.infos):
             token = str(info["token"])
-            for directory, label in ((Path(agent_dir), "Agent pseudo"),
-                                     (self.vector_dir, "nuPlan vector GT"),
-                                     (self.teacher_dir, "Navformer map teacher")):
+            required = [(Path(agent_dir), "Agent pseudo"), (self.vector_dir, "nuPlan vector GT")]
+            if self.teacher_dir is not None:
+                required.append((self.teacher_dir, "Navformer map teacher"))
+            for directory, label in required:
                 if not (directory / f"{token}.pt").is_file():
                     raise FileNotFoundError(f"{label} missing for metadata index={source_index} token={token}")
 
@@ -111,43 +124,46 @@ class Stage3JoinedDataset(Dataset):
         if "agent" not in sample.get("soft_labels", {}):
             raise ValueError(f"Agent pseudo label missing for {token}")
         agent_payload = load_record(self.images.soft_labels_root / f"{token}.pt")
-        if "sample_index" in agent_payload and agent_payload["sample_index"] != source_index:
+        if str(agent_payload.get("token")) != token or (
+            "sample_index" in agent_payload and agent_payload["sample_index"] != source_index
+        ):
             raise ValueError(f"Agent pseudo label index/token mismatch for {token}")
         vector = load_record(self.vector_dir / f"{token}.pt")
         validate_vector_record(vector, token, source_index, self.quest_range,
                                expected_info=self.images.infos[position])
-        for key, expected in self.audit["vector_gt_provenance"].items():
+        for key, expected in self.vector_provenance.items():
             if vector.get(key) != expected:
                 raise ValueError(f"vector GT {key} differs from audited labels for {token}")
-        teacher = load_record(self.teacher_dir / f"{token}.pt")
-        soft = validate_teacher_record(teacher, token, source_index)
-        lidar2ego = resolve_lidar2ego(self.images.infos[position])
-        if not torch.allclose(teacher["teacher_lidar2ego"], lidar2ego, atol=1e-4, rtol=1e-4):
-            raise ValueError(f"teacher lidar2ego differs from OpenScene metadata for {token}")
-        if list(teacher["teacher_channel_names_or_ids"]) != self.audit["teacher_channel_names_or_ids"]:
-            raise ValueError(f"teacher channels differ from audit for {token}")
-        if tuple(teacher["teacher_pc_range"]) != tuple(self.audit["teacher_pc_range"]):
-            raise ValueError(f"teacher pc_range differs from audit for {token}")
-        if str(teacher["teacher_checkpoint"]) != self.audit["teacher_checkpoint"]:
-            raise ValueError(f"teacher checkpoint differs from audit for {token}")
-        if teacher["teacher_score_kind"] != self.audit["teacher_score_kind"]:
-            raise ValueError(f"teacher score semantics differ from audit for {token}")
-        for key in ("teacher_coordinate_frame", "teacher_alignment_version"):
-            if teacher[key] != self.audit[key]:
-                raise ValueError(f"teacher {key} differs from audit for {token}")
-        for key in ("teacher_config_sha256", "teacher_checkpoint_size_bytes",
-                    "teacher_checkpoint_mtime_ns"):
-            if teacher[key] != self.audit[key]:
-                raise ValueError(f"teacher {key} differs from audit for {token}")
         sample["source_index"] = torch.tensor(source_index, dtype=torch.int64)
         sample["vector_target"] = vector
-        aligned, valid = align_teacher_map_to_quest_bev(
-            soft, teacher["teacher_pc_range"], self.quest_range, self.bev_h, self.bev_w,
-            self.audit["row_axis"], self.audit["row_direction"], self.audit["col_direction"],
-            lidar2ego=lidar2ego,
-        )
-        sample["teacher_map_aligned"] = aligned
-        sample["teacher_map_valid"] = valid
+        if self.teacher_dir is not None:
+            teacher = load_record(self.teacher_dir / f"{token}.pt")
+            soft = validate_teacher_record(teacher, token, source_index)
+            lidar2ego = resolve_lidar2ego(self.images.infos[position])
+            if not torch.allclose(teacher["teacher_lidar2ego"], lidar2ego, atol=1e-4, rtol=1e-4):
+                raise ValueError(f"teacher lidar2ego differs from OpenScene metadata for {token}")
+            if list(teacher["teacher_channel_names_or_ids"]) != self.audit["teacher_channel_names_or_ids"]:
+                raise ValueError(f"teacher channels differ from audit for {token}")
+            if tuple(teacher["teacher_pc_range"]) != tuple(self.audit["teacher_pc_range"]):
+                raise ValueError(f"teacher pc_range differs from audit for {token}")
+            if str(teacher["teacher_checkpoint"]) != self.audit["teacher_checkpoint"]:
+                raise ValueError(f"teacher checkpoint differs from audit for {token}")
+            if teacher["teacher_score_kind"] != self.audit["teacher_score_kind"]:
+                raise ValueError(f"teacher score semantics differ from audit for {token}")
+            for key in ("teacher_coordinate_frame", "teacher_alignment_version"):
+                if teacher[key] != self.audit[key]:
+                    raise ValueError(f"teacher {key} differs from audit for {token}")
+            for key in ("teacher_config_sha256", "teacher_checkpoint_size_bytes",
+                        "teacher_checkpoint_mtime_ns"):
+                if teacher[key] != self.audit[key]:
+                    raise ValueError(f"teacher {key} differs from audit for {token}")
+            aligned, valid = align_teacher_map_to_quest_bev(
+                soft, teacher["teacher_pc_range"], self.quest_range, self.bev_h, self.bev_w,
+                self.audit["row_axis"], self.audit["row_direction"], self.audit["col_direction"],
+                lidar2ego=lidar2ego,
+            )
+            sample["teacher_map_aligned"] = aligned
+            sample["teacher_map_valid"] = valid
         return sample
 
 

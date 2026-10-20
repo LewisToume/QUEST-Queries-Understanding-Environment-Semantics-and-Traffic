@@ -26,6 +26,7 @@ from .vector_map_labels import (
 
 
 STAGE3_NAME = "map_hybrid_distillation"
+STAGE3_GT_ONLY_NAME = "map_gt_agent"
 VECTOR_PROVENANCE_KEYS = (
     "num_points", "min_length_m", "map_version", "vector_semantics_version",
     "map_height_reference",
@@ -36,6 +37,21 @@ STAGE3_MODULES = (
     "geometry_lift", "bev_encoder", "agent_proposal_head", "agent_decoder",
     "agent_head", "map_decoder", "map_head",
 )
+
+
+def stage3_kd_enabled(config: Mapping[str, Any]) -> bool:
+    weights = config["loss_weights"]
+    for name in ("lambda_map_gt", "lambda_map_kd", "lambda_agent"):
+        value = float(weights[name])
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Stage 3 {name} must be finite and nonnegative")
+    if float(weights["lambda_map_gt"]) <= 0 or float(weights["lambda_agent"]) <= 0:
+        raise ValueError("Stage 3 requires both vector GT and Agent supervision")
+    enabled = float(weights["lambda_map_kd"]) > 0
+    expected_stage = STAGE3_NAME if enabled else STAGE3_GT_ONLY_NAME
+    if config.get("stage") != expected_stage:
+        raise ValueError(f"Stage 3 stage/lambda_map_kd mismatch: expected {expected_stage}")
+    return enabled
 
 
 def validate_vector_record(record: Mapping[str, Any], token: str, sample_index: int,
@@ -293,10 +309,11 @@ def class_aware_vector_matches(pred_labels: torch.Tensor, pred_points_m: torch.T
     return matches
 
 
-def configure_stage3(model: nn.Module, raster_head: MapRasterDistillHead,
+def configure_stage3(model: nn.Module, raster_head: MapRasterDistillHead | None,
                      config: Mapping[str, Any]) -> torch.optim.Optimizer:
     model.requires_grad_(False)
-    raster_head.requires_grad_(True)
+    if raster_head is not None:
+        raster_head.requires_grad_(True)
     for name in STAGE3_MODULES:
         getattr(model, name).requires_grad_(True)
     model.geometry_lift.ego_mlp.requires_grad_(False)
@@ -309,11 +326,12 @@ def configure_stage3(model: nn.Module, raster_head: MapRasterDistillHead,
         if not params:
             raise ValueError(f"empty Stage 3 optimizer group: {names}")
         groups.append({"params": params, "lr": float(config[lr])})
-    groups.append({"params": list(raster_head.parameters()), "lr": float(config["map_lr"])})
+    if raster_head is not None:
+        groups.append({"params": list(raster_head.parameters()), "lr": float(config["map_lr"])})
     return torch.optim.AdamW(groups, weight_decay=float(config["weight_decay"]))
 
 
-def stage3_forward(model: nn.Module, raster_head: MapRasterDistillHead,
+def stage3_forward(model: nn.Module, raster_head: MapRasterDistillHead | None,
                    batch: Mapping[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     encoded = model.encode_image(
         batch["images"].to(device), batch["intrinsics"].to(device),
@@ -323,23 +341,37 @@ def stage3_forward(model: nn.Module, raster_head: MapRasterDistillHead,
     predictions = model.forward_agent(encoded["bev_tokens"], encoded["bev_features"])
     queries = model.map_decoder(encoded["bev_tokens"])
     predictions["map_cls_logits"], predictions["map_points"] = model.map_head(queries)
-    predictions["student_map_raster_logits"] = raster_head(encoded["bev_features"])
+    if raster_head is not None:
+        predictions["student_map_raster_logits"] = raster_head(encoded["bev_features"])
     return predictions
 
 
 def mixed_stage3_loss(model: nn.Module, predictions: Mapping[str, torch.Tensor],
-                      vector_targets: list[Mapping[str, Any]], teacher_soft_scores: torch.Tensor,
-                      teacher_valid_spatial: torch.Tensor,
-                      support_mask: torch.Tensor, channel_weights: torch.Tensor,
+                      vector_targets: list[Mapping[str, Any]], teacher_soft_scores: torch.Tensor | None,
+                      teacher_valid_spatial: torch.Tensor | None,
+                      support_mask: torch.Tensor | None, channel_weights: torch.Tensor | None,
                       agent_target: Mapping[str, torch.Tensor], config: Mapping[str, Any]
                       ) -> dict[str, torch.Tensor]:
     xy_range = (*model.geometry_lift.x_range[:1], *model.geometry_lift.y_range[:1],
                 model.geometry_lift.x_range[1], model.geometry_lift.y_range[1])
     vector = vector_map_loss(predictions["map_cls_logits"], predictions["map_points"],
                              vector_targets, config["map_loss"], xy_range)
-    kd = soft_map_distillation_loss(predictions["student_map_raster_logits"],
-                                    teacher_soft_scores, teacher_valid_spatial,
-                                    support_mask, channel_weights)
+    kd_enabled = stage3_kd_enabled(config)
+    if kd_enabled:
+        if (teacher_soft_scores is None or teacher_valid_spatial is None
+                or support_mask is None or channel_weights is None
+                or "student_map_raster_logits" not in predictions):
+            raise ValueError("map KD requires a raster head and audited teacher targets")
+        kd = soft_map_distillation_loss(predictions["student_map_raster_logits"],
+                                        teacher_soft_scores, teacher_valid_spatial,
+                                        support_mask, channel_weights)
+    else:
+        if "student_map_raster_logits" in predictions or any(
+            value is not None for value in (teacher_soft_scores, teacher_valid_spatial,
+                                            support_mask, channel_weights)
+        ):
+            raise ValueError("GT-only Stage 3 must not receive map teacher targets")
+        kd = vector["vector_map_gt_loss"].new_zeros(())
     agent = compute_stage2_agent_loss(model, predictions, agent_target,
                                       config["agent_train"], config["agent_loss"])
     weights = config["loss_weights"]
@@ -356,25 +388,33 @@ def mixed_stage3_loss(model: nn.Module, predictions: Mapping[str, torch.Tensor],
     }
 
 
-def save_stage3_checkpoint(path: str | Path, model: nn.Module, raster_head: MapRasterDistillHead,
+def save_stage3_checkpoint(path: str | Path, model: nn.Module, raster_head: MapRasterDistillHead | None,
                            optimizer: torch.optim.Optimizer, epoch: int, config: Mapping[str, Any],
-                           teacher_metadata: Mapping[str, Any],
+                           teacher_metadata: Mapping[str, Any] | None,
                            vector_metadata: Mapping[str, Any]) -> None:
+    kd_enabled = stage3_kd_enabled(config)
+    if kd_enabled != (raster_head is not None) or kd_enabled != (teacher_metadata is not None):
+        raise ValueError("Stage 3 checkpoint raster head/audit do not match KD mode")
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "architecture_version": QUEST_ARCHITECTURE_VERSION,
-        "stage": STAGE3_NAME, "epoch": int(epoch), "bev_use_ego_state": False,
+        "stage": STAGE3_NAME if kd_enabled else STAGE3_GT_ONLY_NAME,
+        "map_kd_enabled": kd_enabled,
+        "epoch": int(epoch), "bev_use_ego_state": False,
         "trained_class_support_mask": torch.tensor([True, True, False, False]),
         "training_config": dict(config), "map_class_names": MAP_CLASS_NAMES,
-        "teacher_channel_metadata": dict(teacher_metadata),
-        "teacher_channel_support_mask": list(teacher_metadata["teacher_channel_support_mask"]),
         "vector_gt_schema_version": VECTOR_GT_SCHEMA_VERSION,
         "vector_gt_provenance": dict(vector_metadata),
-        "teacher_schema_version": teacher_metadata["teacher_schema_version"],
         "optimizer_state_dict": optimizer.state_dict(),
-        "map_raster_distill_head_state_dict": raster_head.state_dict(),
     }
+    if kd_enabled:
+        checkpoint.update({
+            "teacher_channel_metadata": dict(teacher_metadata),
+            "teacher_channel_support_mask": list(teacher_metadata["teacher_channel_support_mask"]),
+            "teacher_schema_version": teacher_metadata["teacher_schema_version"],
+            "map_raster_distill_head_state_dict": raster_head.state_dict(),
+        })
     keys = {
         "geometry_lift": "geometry_aware_bev_lift_state_dict", "bev_encoder": "bev_encoder_state_dict",
         "agent_proposal_head": "agent_proposal_head_state_dict", "agent_decoder": "agent_decoder_state_dict",
@@ -387,10 +427,19 @@ def save_stage3_checkpoint(path: str | Path, model: nn.Module, raster_head: MapR
     temporary.replace(output)
 
 
-def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead,
-                           checkpoint: Mapping[str, Any]) -> int:
-    if checkpoint.get("stage") != STAGE3_NAME or checkpoint.get("architecture_version") != QUEST_ARCHITECTURE_VERSION:
+def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead | None,
+                           checkpoint: Mapping[str, Any], *,
+                           expected_map_kd_enabled: bool | None = None) -> int:
+    stage = checkpoint.get("stage")
+    if stage not in (STAGE3_NAME, STAGE3_GT_ONLY_NAME) or checkpoint.get("architecture_version") != QUEST_ARCHITECTURE_VERSION:
         raise ValueError("not a compatible QUEST Stage 3 checkpoint")
+    kd_enabled = stage == STAGE3_NAME
+    if checkpoint.get("map_kd_enabled", kd_enabled) is not kd_enabled:
+        raise ValueError("Stage 3 checkpoint KD mode metadata is inconsistent")
+    if expected_map_kd_enabled is not None and kd_enabled != expected_map_kd_enabled:
+        raise ValueError("Stage 3 checkpoint KD mode differs from evaluation config")
+    if kd_enabled != (raster_head is not None):
+        raise ValueError("Stage 3 checkpoint raster head differs from KD mode")
     if checkpoint.get("bev_use_ego_state") is not False:
         raise ValueError("Stage 3 checkpoint must disable absolute ego state")
     if tuple(checkpoint.get("map_class_names", ())) != MAP_CLASS_NAMES:
@@ -406,13 +455,17 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead,
             or provenance.get("map_layer_audit_version") != MAP_LAYER_AUDIT_VERSION
             or not isinstance(provenance.get("min_length_m"), (float, int))):
         raise ValueError("Stage 3 checkpoint vector GT provenance is incomplete")
-    if checkpoint.get("teacher_schema_version") != TEACHER_MAP_SCHEMA_VERSION:
-        raise ValueError("Stage 3 checkpoint teacher schema mismatch")
-    teacher_metadata = checkpoint.get("teacher_channel_metadata")
-    if (not isinstance(teacher_metadata, Mapping)
-            or teacher_metadata.get("teacher_alignment_version") != TEACHER_ALIGNMENT_VERSION
-            or teacher_metadata.get("teacher_coordinate_frame") != TEACHER_COORDINATE_FRAME):
-        raise ValueError("Stage 3 checkpoint teacher coordinate alignment mismatch")
+    if kd_enabled:
+        if checkpoint.get("teacher_schema_version") != TEACHER_MAP_SCHEMA_VERSION:
+            raise ValueError("Stage 3 checkpoint teacher schema mismatch")
+        teacher_metadata = checkpoint.get("teacher_channel_metadata")
+        if (not isinstance(teacher_metadata, Mapping)
+                or teacher_metadata.get("teacher_alignment_version") != TEACHER_ALIGNMENT_VERSION
+                or teacher_metadata.get("teacher_coordinate_frame") != TEACHER_COORDINATE_FRAME):
+            raise ValueError("Stage 3 checkpoint teacher coordinate alignment mismatch")
+    elif any(key in checkpoint for key in ("teacher_schema_version", "teacher_channel_metadata",
+                                           "map_raster_distill_head_state_dict")):
+        raise ValueError("GT-only Stage 3 checkpoint unexpectedly contains map teacher state")
     support = checkpoint.get("trained_class_support_mask")
     if not torch.is_tensor(support) or not torch.equal(
         support.cpu().bool(), torch.tensor([True, True, False, False]),
@@ -426,7 +479,8 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead,
     }
     for name, key in keys.items():
         getattr(model, name).load_state_dict(checkpoint[key], strict=True)
-    raster_head.load_state_dict(checkpoint["map_raster_distill_head_state_dict"], strict=True)
+    if kd_enabled:
+        raster_head.load_state_dict(checkpoint["map_raster_distill_head_state_dict"], strict=True)
     return int(checkpoint["epoch"])
 
 

@@ -1,4 +1,4 @@
-# Stage 3 hybrid vector-map training
+# Stage 3 vector-map training
 
 Stage 3 starts from the Stage 2 Agent checkpoint. The production prediction is
 `MapDecoder -> MapHead -> [B,N_map,4]` class logits (three map classes and
@@ -12,10 +12,20 @@ are an error, never silently truncated.
 8 cameras -> frozen DINOv2 -> GeometryAwareBEVLift -> shared BEV
                                                    |-> Agent branch -> Agent loss
                                                    |-> MapDecoder/MapHead -> vector GT loss
-                                                   `-> MapRasterDistillHead -> raster teacher KD
+                                                   `-> optional MapRasterDistillHead -> raster teacher KD
 ```
 
-`MapRasterDistillHead` is training-only. It consumes `[B,384,32,32]` BEV features
+By default `configs/stage3_map.yaml` selects `stage: map_gt_agent` with
+`lambda_map_kd: 0`. This mode trains only on nuPlan vector GT and the existing
+Navformer Agent labels. It does not read Navformer map labels, load a teacher
+audit, instantiate a raster head, or calculate a map KD loss. The teacher's
+lane channels are currently unusable as supervision. The original hybrid mode
+remains available by setting `stage: map_hybrid_distillation` and a positive
+`lambda_map_kd`; its verified teacher audit and full label checks still apply.
+Use a distinct `--checkpoint` path for a hybrid run so it cannot share the
+default GT-only checkpoint filename.
+
+When hybrid KD is enabled, `MapRasterDistillHead` is training-only. It consumes `[B,384,32,32]` BEV features
 and produces `[B,K,32,32]` logits. The Navformer/Pansegformer teacher provides
 **bounded raster soft mask scores**, not calibrated probabilities or vector instances. Its output is only an auxiliary
 KD target; inference needs neither that head nor raster post-processing.
@@ -172,8 +182,9 @@ stop export. This does not replace visual inspection on the server.
 ## Loss and checkpoint
 
 `L = lambda_map_gt * L_vector + lambda_map_kd * L_soft_raster +
-lambda_agent * L_stage2_agent`. Initial weights are `1.0, 1.0, 0.5` in
-`configs/stage3_map.yaml`. Vector queries use class/point Hungarian cost;
+lambda_agent * L_stage2_agent`. Default weights are `1.0, 0.0, 0.5` in
+`configs/stage3_map.yaml`; the raster term is not evaluated in GT-only mode.
+Vector queries use class/point Hungarian cost;
 open polylines compare forward/reverse point order, closed contours compare
 all cyclic and reverse-cyclic orders. Matched point loss uses the selected
 ordering; a small neighboring-segment direction loss includes the closing
@@ -186,38 +197,43 @@ AdamW groups: shared BEV `1e-5`, new Map decoder/head/raster head `1e-4`,
 Agent proposal/decoder/head `3e-5`. DINO and ego MLP stay frozen;
 `use_ego_state=False` is explicit. Gradients are clipped at norm 1.0.
 
-The Stage 3 checkpoint records seven model submodule state dicts, the raster
-head, optimizer, epoch, effective config, map classes, teacher channel metadata
-and support mask, both schema versions, Agent support mask and
-`bev_use_ego_state=False`. Existing Stage 1/2 checkpoint formats are unchanged.
+The Stage 3 checkpoint records seven model submodule state dicts, optimizer,
+epoch, effective config and split hash, map classes, vector GT provenance,
+Agent support mask, `map_kd_enabled` and `bev_use_ego_state=False`. A GT-only
+checkpoint has no raster or teacher fields; a hybrid checkpoint has the
+audited teacher fields and raster head. The loader also accepts existing hybrid
+checkpoints without `map_kd_enabled`, inferring their mode from the stage name.
+Existing Stage 1/2 checkpoint formats are unchanged.
 The Stage 2 Agent evaluator accepts the shared BEV and Agent modules from a
 Stage 3 checkpoint for regression comparison.
 
 ## Server workflow
 
-The formal split is raw metadata indices **0-4999 for training** and
-**5000-5099 for held-out evaluation**. The preferred initialization remains
+The formal split is raw metadata indices **0-4999 for training** and three
+complete 40-frame scenes selected by `data/stage3_split.json` for held-out
+evaluation. The preferred initialization remains
 `checkpoints/quest_stage2_agent_5000_e5.pt`.
 
-1. Export the requested raw-index train and evaluation ranges with
-   `scripts/export_nuplan_vector_map.py` and
-   `scripts/export_navformer_map_soft.py`. Specify the real nuPlan map root,
-   teacher config/checkpoint and metric range. Request both 0-4999 and
-   5000-5099; the exporters accept repeated runs with validated existing files.
+1. Export missing Vector GT and Agent labels using the manifest's original
+   indices and tokens. GT-only mode does not require a map teacher export.
 2. Inspect `scripts/inspect_nuplan_vector_map.py` and run
-   `scripts/audit_vector_gt_capacity.py` over all 5000 train and 100 validation
+   `scripts/audit_vector_gt_capacity.py` over all 5000 train and 120 validation
    frames. It reports per-class and total P50/P95/P99/max and counts above
    50/64/100/128. Only complete valid split coverage certifies a query count
    for training/evaluation; no GT is truncated.
-3. Run `scripts/audit_navformer_map_teacher.py` with candidate axis settings,
-   review its per-channel JSON and run `scripts/visualize_navformer_map_audit.py`
-   before any training. Explicitly verify only supported channels.
-4. Train with `python scripts/train_stage3_map.py` and evaluate with
-   `python scripts/evaluate_stage3_map.py` on held-out frames. Run
-   `scripts/visualize_stage3_map.py` to inspect the orientation against
-   the vector prediction. Run
-   `python scripts/evaluate_stage2_agent.py --checkpoint checkpoints/quest_stage3_map.pt`
-   to compare Agent quality with the Stage 2 checkpoint.
+3. Run `python scripts/train_stage3_map.py --preflight-only` in the QUEST
+   environment. This checks the complete manifest, capacity audit and all
+   5000 training Agent/Vector records without constructing DINO or running a
+   forward pass. It prints `STAGE3_PREFLIGHT = PASS` only after all checks.
+4. After reviewing preflight and a separately authorized smoke run, train with
+   `python scripts/train_stage3_map.py`; the default GT-only checkpoint is
+   `checkpoints/quest_stage3_map_gt_only.pt`. The trainer refuses to overwrite
+   a pre-existing checkpoint from another run. Evaluate with
+   `python scripts/evaluate_stage3_map.py` and visualize with
+   `scripts/visualize_stage3_map.py`. GT-only reports raster KD/IoU as `N/A`.
+   Use `python scripts/evaluate_stage2_agent.py --split-manifest data/stage3_split.json --checkpoint checkpoints/quest_stage3_map_gt_only.pt`
+   and run the same command against the Stage 2 checkpoint for an Agent
+   regression comparison on identical validation frames.
 
 No Python, tests, training, evaluation or visualization were executed while
 authoring this implementation locally.

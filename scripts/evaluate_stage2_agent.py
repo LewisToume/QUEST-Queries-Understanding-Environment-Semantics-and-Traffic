@@ -23,7 +23,9 @@ from quest.agent_training import (
 from quest.bev_pretraining import topk_center_hits
 from quest.dataset import collate_fn
 from quest.model import QUESTModel
+from quest.openscene_dataset import OpenSceneMetadataDataset
 from quest.proposal_pretraining import proposal_center_hits, rasterize_proposal_targets
+from quest.stage3_split import load_stage3_split, selected_frames
 from quest.utils import load_yaml_config
 from scripts.train_stage1_bev import build_dataset, resolve_path
 
@@ -36,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=int)
     parser.add_argument("--count", type=int)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--split-manifest", type=Path)
     return parser.parse_args()
 
 
@@ -49,9 +52,27 @@ def main() -> int:
     stage1_config = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     config = load_yaml_config(PROJECT_ROOT / "configs/stage2_agent.yaml")
     eval_config = config["eval"]
-    start = args.start if args.start is not None else int(eval_config["start_index"])
-    count = args.count if args.count is not None else int(eval_config["num_samples"])
-    dataset = build_dataset(stage1_config, config, start, count)
+    manifest = None
+    if args.split_manifest is not None:
+        if args.start is not None or args.count is not None:
+            raise ValueError("--split-manifest cannot be combined with --start/--count")
+        dataset_config = dict(stage1_config["dataset"])
+        dataset_config["metadata_path"] = resolve_path(dataset_config["metadata_path"])
+        dataset_config["camera_root"] = resolve_path(dataset_config["camera_root"])
+        dataset_config["max_agent_instances"] = 64
+        from scripts.run_navformer_openscene_teacher import load_infos
+        metadata_path = dataset_config["metadata_path"]
+        manifest = load_stage3_split(resolve_path(args.split_manifest),
+                                     load_infos(metadata_path), metadata_path)
+        indices = [row["index"] for row in selected_frames(manifest, "validation")]
+        dataset = OpenSceneMetadataDataset(
+            **dataset_config, source_indices=indices,
+            soft_labels_root=resolve_path(config["paths"]["soft_labels_dir"]),
+        )
+    else:
+        start = args.start if args.start is not None else int(eval_config["start_index"])
+        count = args.count if args.count is not None else int(eval_config["num_samples"])
+        dataset = build_dataset(stage1_config, config, start, count)
     loader = DataLoader(
         dataset,
         batch_size=int(eval_config["batch_size"]),
@@ -63,6 +84,9 @@ def main() -> int:
     model = QUESTModel(**model_config).to(device).eval()
     checkpoint_path = resolve_path(args.checkpoint or config["paths"]["checkpoint_path"])
     checkpoint = load_checkpoint_cpu(checkpoint_path)
+    if manifest is not None and checkpoint.get("stage") in ("map_gt_agent", "map_hybrid_distillation"):
+        if checkpoint.get("training_config", {}).get("stage3_split_sha256") != manifest["split_sha256"]:
+            raise ValueError("Stage 3 Agent checkpoint was trained for a different split")
     epoch = load_agent_stage2_checkpoint(model, checkpoint)
     support_mask = checkpoint["trained_class_support_mask"].bool()
     del checkpoint
@@ -186,6 +210,8 @@ def main() -> int:
         raise RuntimeError("Stage 2 Agent evaluation received no frames")
 
     print(f"checkpoint={checkpoint_path} epoch={epoch} evaluated_frames={evaluated}")
+    if manifest is not None:
+        print(f"validation_split_sha256={manifest['split_sha256']}")
     print(f"evaluated_class_support_mask={support_mask.tolist()}")
     print(f"confidence_threshold={confidence:.2f} match_distance_m={match_distance:.1f}")
     print("matched_error_units=center_m,size_m,yaw_rad,velocity_mps")
