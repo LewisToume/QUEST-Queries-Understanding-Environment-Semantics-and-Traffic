@@ -20,6 +20,7 @@ from quest.nuplan_map_locator import MAP_LAYER_AUDIT_VERSION
 from quest.nuplan_relation_audit import BASELINE_RELATION_AUDIT_VERSION
 from quest.queries import MapDecoder
 from quest.vector_map_labels import MAP_HEIGHT_REFERENCE, VECTOR_SEMANTICS_VERSION
+from scripts.diagnose_stage3_map import compare_predictions
 
 
 XY_RANGE = (-50, -50, 50, 50)
@@ -47,6 +48,18 @@ def tiny_model():
 
 
 class Stage3GeometryObjectiveTest(unittest.TestCase):
+    def test_background_queries_cannot_inflate_foreground_feature_dependency(self):
+        real = {"map_cls_logits": torch.tensor([[[9., 0., 0., -9.], [-9., 0., 0., 9.]]]),
+                "map_points": torch.zeros(1, 2, 20, 2)}
+        changed = {key: value.clone() for key, value in real.items()}
+        changed["map_points"][:, 1] = 1
+        changed["map_cls_logits"][:, 1] += 10
+        result = compare_predictions(real, changed, XY_RANGE)
+        self.assertGreater(result["point_mad_m"], 0)
+        self.assertEqual(result["foreground_query_count"], 1)
+        self.assertEqual(result["foreground_point_mad_m"], 0)
+        self.assertEqual(result["foreground_logit_mad"], 0)
+
     def test_sum_cost_can_reject_confident_wrong_geometry(self):
         target = line_target()
         normalized = normalize_points(target["points_xy_m"], XY_RANGE)[0]

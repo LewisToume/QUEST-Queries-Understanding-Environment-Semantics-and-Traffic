@@ -40,12 +40,20 @@ def override_backbone(model, features):
         handle.remove()
 
 
-def compare_predictions(real, changed, xy_range):
+def compare_predictions(real, changed, xy_range, confidence_threshold=0.25):
     if any(not bool(torch.isfinite(changed[key]).all()) for key in ("map_cls_logits", "map_points")):
         raise RuntimeError("non-finite map output during feature-dependency diagnostic")
-    return {"logit_mad": float((real["map_cls_logits"] - changed["map_cls_logits"]).abs().mean()),
-            "point_mad_m": float((denormalize_points(real["map_points"], xy_range)
-                                   - denormalize_points(changed["map_points"], xy_range)).abs().mean())}
+    logit_delta = (real["map_cls_logits"] - changed["map_cls_logits"]).abs()
+    point_delta = (denormalize_points(real["map_points"], xy_range)
+                   - denormalize_points(changed["map_points"], xy_range)).abs()
+    scores, labels = real["map_cls_logits"].softmax(-1).max(-1)
+    foreground = (labels != len(MAP_CLASS_NAMES)) & (scores >= confidence_threshold)
+    count = int(foreground.sum())
+    return {"logit_mad": float(logit_delta.mean()), "point_mad_m": float(point_delta.mean()),
+            "foreground_query_count": count,
+            "foreground_logit_mad": float(logit_delta[foreground].mean()) if count else None,
+            "foreground_point_mad_m": float(point_delta[foreground].mean()) if count else None,
+            "foreground_selection": "same query IDs selected from real predictions"}
 
 
 def save_figure(path, batch, labels, points, record, camera_names):
@@ -141,13 +149,15 @@ def main():
                     capture_hook.remove()
                 with override_backbone(model, None):
                     zero_prediction = stage3_forward(model, None, batch, device)
-                dependency = {"real_vs_zero_feature": compare_predictions(predictions, zero_prediction, dataset.quest_range),
+                dependency = {"real_vs_zero_feature": compare_predictions(
+                    predictions, zero_prediction, dataset.quest_range, float(config["eval"]["confidence_threshold"])),
                               "other_frame_token": previous_token, "real_vs_other_frame_feature": None}
                 del zero_prediction
                 if previous_features is not None:
                     with override_backbone(model, previous_features):
                         other_prediction = stage3_forward(model, None, batch, device)
-                    dependency["real_vs_other_frame_feature"] = compare_predictions(predictions, other_prediction, dataset.quest_range)
+                    dependency["real_vs_other_frame_feature"] = compare_predictions(
+                        predictions, other_prediction, dataset.quest_range, float(config["eval"]["confidence_threshold"]))
                     del other_prediction
                 previous_features, previous_token = captured[0], record["token"]
                 logits = predictions["map_cls_logits"][0]
