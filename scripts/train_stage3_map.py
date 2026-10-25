@@ -18,6 +18,7 @@ from quest.map_training import (
     STAGE3_MODULES, VECTOR_PROVENANCE_KEYS, configure_stage3, load_stage2_for_stage3,
     load_vector_capacity_audit,
     mixed_stage3_loss, save_stage3_checkpoint, stage3_forward, stage3_kd_enabled,
+    stage3_trainable_modules, frozen_agent_fingerprint,
     validate_vector_record,
 )
 from quest.model import QUESTModel, QUEST_ARCHITECTURE_VERSION
@@ -134,7 +135,8 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
                     loader: DataLoader, optimizer: torch.optim.Optimizer,
                     device: torch.device, config: dict, audit: dict | None, epoch: int) -> None:
     model.eval()
-    for name in STAGE3_MODULES:
+    trainable_modules = stage3_trainable_modules(config["train"])
+    for name in trainable_modules:
         getattr(model, name).train()
     model.geometry_lift.ego_mlp.eval()
     if raster_head is not None:
@@ -143,9 +145,10 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
         "total_loss", "raw_map_gt_loss", "raw_map_kd_loss", "raw_agent_loss",
         "weighted_map_gt_loss", "weighted_map_kd_loss", "weighted_agent_loss",
         "map_cls_loss", "map_point_loss", "map_direction_loss",
+        "map_matched_point_error_m",
     )
     sums = {key: 0.0 for key in keys}
-    module_names = (*STAGE3_MODULES, *(("map_raster_distill_head",) if raster_head is not None else ()))
+    module_names = (*trainable_modules, *(("map_raster_distill_head",) if raster_head is not None else ()))
     gradients = {name: 0.0 for name in module_names}
     counts = [0] * len(MAP_CLASS_NAMES)
     raster_probability = 0.0
@@ -186,7 +189,7 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
             + ([p for p in raster_head.parameters() if p.requires_grad] if raster_head is not None else []),
             float(config["train"]["gradient_clip_norm"]),
         )
-        for name in STAGE3_MODULES:
+        for name in trainable_modules:
             gradients[name] += gradient_rms(getattr(model, name))
         if raster_head is not None:
             gradients["map_raster_distill_head"] += gradient_rms(raster_head)
@@ -199,6 +202,12 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
             raster_probability_min = min(raster_probability_min, float(raster_values.min()))
             raster_probability_max = max(raster_probability_max, float(raster_values.max()))
         steps += 1
+        interval = int(config["train"].get("log_interval", 500))
+        if interval > 0 and steps % interval == 0:
+            print(f"epoch={epoch} step={steps}/{len(loader)} "
+                  f"map={sums['raw_map_gt_loss'] / steps:.4f} "
+                  f"agent={sums['raw_agent_loss'] / steps:.4f} "
+                  f"map_point_error_m={sums['map_matched_point_error_m'] / steps:.3f}", flush=True)
     if not steps:
         raise RuntimeError("Stage 3 dataset produced no batches")
     print(f"epoch={epoch} steps={steps} map_kd={'ON' if raster_head is not None else 'OFF'} "
@@ -238,6 +247,9 @@ def main() -> None:
         raise ValueError("missing_teacher must be error or explicit skip")
     if list(config["map"]["class_names"]) != list(MAP_CLASS_NAMES) or int(config["map"]["num_points"]) != 20:
         raise ValueError("Stage 3 map taxonomy or point count is incompatible")
+    auxiliary = config["map"].get("aux_layer_weights")
+    if auxiliary is not None and len(auxiliary) != int(model_config["map_decoder_layers"]):
+        raise ValueError("map auxiliary weights must match configured decoder layer count")
     query_count, audited_provenance = load_vector_capacity_audit(
         resolve(config["paths"]["vector_capacity_audit_path"]), config, manifest
     )
@@ -268,6 +280,8 @@ def main() -> None:
     print(f"MAP_KD_DISABLED={not kd_enabled} stage3_split_sha256={manifest['split_sha256']} "
           f"train_frames={len(indices)} map_queries={query_count} "
           f"stage2_checkpoint={stage2_path} dinov2={backbone_path}")
+    print(f"trainable_modules={stage3_trainable_modules(config['train'])} "
+          f"map_objective={config['map'].get('objective_version', 'legacy_v1')}")
     if args.preflight_only:
         eval_indices = [row["index"] for row in manifest["validation"]["frames"]]
         eval_dataset = build_dataset(model_config, config, stage1, audit, eval_indices, audited_provenance)
@@ -284,6 +298,7 @@ def main() -> None:
     loader = DataLoader(dataset, batch_size=int(config["train"]["batch_size"]),
                         shuffle=True, num_workers=0, collate_fn=collate_stage3)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(int(config["train"].get("seed", 42)))
     model = QUESTModel(**model_config)
     stage2_epoch = load_stage2_for_stage3(model, load_checkpoint_cpu(stage2_path))
     print(f"loaded_stage2_agent={stage2_path} epoch={stage2_epoch}")
@@ -295,12 +310,16 @@ def main() -> None:
                  "map_loss": config["map"], "effective_num_samples": len(dataset),
                  "effective_epochs": epochs, "effective_map_query_count": query_count,
                  "stage3_split_sha256": manifest["split_sha256"], "map_kd_enabled": kd_enabled}
+    if config["train"].get("freeze_agent_and_bev", False):
+        effective["agent_baseline_sha256"] = frozen_agent_fingerprint(model)
     print("optimizer_groups=" + str([(group["lr"], len(group["params"])) for group in optimizer.param_groups]))
     for epoch in range(1, epochs + 1):
         train_one_epoch(model, raster_head, loader, optimizer, device, effective, audit, epoch)
         save_stage3_checkpoint(
             output_path, model, raster_head, optimizer, epoch, effective, audit, vector_provenance
         )
+        if effective.get("agent_baseline_sha256"):
+            print("frozen_shared_BEV_and_Agent=UNCHANGED")
         print(f"checkpoint_saved={output_path}")
 
 

@@ -1,5 +1,10 @@
 # Stage 3 vector-map training
 
+See [stage3_geometry_review.md](stage3_geometry_review.md) for the current
+recovery config, primary-source review, diagnostic commands and unresolved
+risks. The recovery freezes BEV/Agent and uses summed L1 map geometry with
+intermediate supervision. Its output is `quest_stage3_map_geometry_v2.pt`.
+
 Stage 3 starts from the Stage 2 Agent checkpoint. The production prediction is
 `MapDecoder -> MapHead -> [B,N_map,4]` class logits (three map classes and
 background) and `[B,N_map,20,2]` normalized local XY points. The existing
@@ -16,8 +21,10 @@ are an error, never silently truncated.
 ```
 
 By default `configs/stage3_map.yaml` selects `stage: map_gt_agent` with
-`lambda_map_kd: 0`. This mode trains only on nuPlan vector GT and the existing
-Navformer Agent labels. It does not read Navformer map labels, load a teacher
+`lambda_map_kd: 0`. The recovery config trains Map on nuPlan Vector GT and
+retains Agent labels for reference loss logging with shared BEV/Agent frozen.
+Joint GT + Agent training remains available by disabling `freeze_agent_and_bev`
+and restoring a positive Agent weight. This mode does not read map labels, load a teacher
 audit, instantiate a raster head, or calculate a map KD loss. The teacher's
 lane channels are currently unusable as supervision. The original hybrid mode
 remains available by setting `stage: map_hybrid_distillation` and a positive
@@ -182,7 +189,7 @@ stop export. This does not replace visual inspection on the server.
 ## Loss and checkpoint
 
 `L = lambda_map_gt * L_vector + lambda_map_kd * L_soft_raster +
-lambda_agent * L_stage2_agent`. Default weights are `1.0, 0.0, 0.5` in
+lambda_agent * L_stage2_agent`. Recovery weights are `1.0, 0.0, 0.0` in
 `configs/stage3_map.yaml`; the raster term is not evaluated in GT-only mode.
 Vector queries use class/point Hungarian cost;
 open polylines compare forward/reverse point order, closed contours compare
@@ -193,7 +200,7 @@ soft mask scores**, restricted to audited channels and teacher-valid spatial
 cells,
 with configurable weights. Stage 2 Agent loss remains unchanged.
 
-AdamW groups: shared BEV `1e-5`, new Map decoder/head/raster head `1e-4`,
+Joint-mode AdamW groups: shared BEV `1e-5`, new Map decoder/head/raster head `1e-4`,
 Agent proposal/decoder/head `3e-5`. DINO and ego MLP stay frozen;
 `use_ego_state=False` is explicit. Gradients are clipped at norm 1.0.
 
@@ -239,11 +246,11 @@ evaluation. The preferred initialization remains
    This is a single-frame execution check, not full-dataset capacity or quality
    certification. After reviewing this smoke run, train with
    `python scripts/train_stage3_map.py`; the default GT-only checkpoint is
-   `checkpoints/quest_stage3_map_gt_only.pt`. The trainer refuses to overwrite
+   `checkpoints/quest_stage3_map_geometry_v2.pt`. The trainer refuses to overwrite
    a pre-existing checkpoint from another run. Evaluate with
    `python scripts/evaluate_stage3_map.py` and visualize with
    `scripts/visualize_stage3_map.py`. GT-only reports raster KD/IoU as `N/A`.
-   Use `python scripts/evaluate_stage2_agent.py --split-manifest data/stage3_split.json --checkpoint checkpoints/quest_stage3_map_gt_only.pt`
+   Use `python scripts/evaluate_stage2_agent.py --split-manifest data/stage3_split.json --checkpoint checkpoints/quest_stage3_map_geometry_v2.pt`
    and run the same command against the Stage 2 checkpoint for an Agent
    regression comparison on identical validation frames.
 

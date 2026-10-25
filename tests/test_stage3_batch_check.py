@@ -44,10 +44,10 @@ class Stage3BatchCheckTest(unittest.TestCase):
         with torch.no_grad():
             for name in STAGE3_MODULES:
                 getattr(model, name).weight.add_(1)
-        check_parameter_updates(model, before)
+        check_parameter_updates(model, before, verbose=False)
         before["map_head"]["weight"] = model.map_head.weight.detach().clone()
         with self.assertRaisesRegex(RuntimeError, "did not change any parameter in map_head"):
-            check_parameter_updates(model, before)
+            check_parameter_updates(model, before, verbose=False)
 
     def test_nonfinite_parameter_cannot_pass_update_check(self):
         model = tiny_model()
@@ -55,7 +55,7 @@ class Stage3BatchCheckTest(unittest.TestCase):
         with torch.no_grad():
             model.geometry_lift.weight.fill_(float("nan"))
         with self.assertRaisesRegex(RuntimeError, "non-finite parameter"):
-            check_parameter_updates(model, before)
+            check_parameter_updates(model, before, verbose=False)
 
 
 if __name__ == "__main__":

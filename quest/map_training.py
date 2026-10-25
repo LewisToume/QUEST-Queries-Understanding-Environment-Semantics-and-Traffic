@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -27,6 +28,7 @@ from .vector_map_labels import (
 
 STAGE3_NAME = "map_hybrid_distillation"
 STAGE3_GT_ONLY_NAME = "map_gt_agent"
+MAP_OBJECTIVE_VERSION = "ordered_l1_sum_v2"
 VECTOR_PROVENANCE_KEYS = (
     "num_points", "min_length_m", "map_version", "vector_semantics_version",
     "map_height_reference",
@@ -45,12 +47,22 @@ def stage3_kd_enabled(config: Mapping[str, Any]) -> bool:
         value = float(weights[name])
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"Stage 3 {name} must be finite and nonnegative")
-    if float(weights["lambda_map_gt"]) <= 0 or float(weights["lambda_agent"]) <= 0:
-        raise ValueError("Stage 3 requires both vector GT and Agent supervision")
+    if float(weights["lambda_map_gt"]) <= 0:
+        raise ValueError("Stage 3 requires vector GT supervision")
+    frozen_agent = bool(config.get("train", {}).get("freeze_agent_and_bev", False))
+    if frozen_agent != (float(weights["lambda_agent"]) == 0):
+        raise ValueError("lambda_agent must be zero only when Agent and shared BEV are frozen")
     enabled = float(weights["lambda_map_kd"]) > 0
     expected_stage = STAGE3_NAME if enabled else STAGE3_GT_ONLY_NAME
     if config.get("stage") != expected_stage:
         raise ValueError(f"Stage 3 stage/lambda_map_kd mismatch: expected {expected_stage}")
+    objective = config.get("map", {}).get("objective_version", "legacy_v1")
+    if objective not in ("legacy_v1", MAP_OBJECTIVE_VERSION):
+        raise ValueError("unknown Stage 3 map objective version")
+    if objective == MAP_OBJECTIVE_VERSION:
+        settings = config["map"]
+        if settings.get("point_cost_reduction") != "sum" or settings.get("point_loss_type") != "l1_sum":
+            raise ValueError("ordered_l1_sum_v2 requires sum matching and L1 sum-per-instance loss")
     return enabled
 
 
@@ -198,7 +210,8 @@ def denormalize_points(points: torch.Tensor, xy_range: tuple[float, float, float
 
 def match_vector_queries(pred_logits: torch.Tensor, pred_points: torch.Tensor,
                          target: Mapping[str, Any], xy_range: tuple[float, float, float, float],
-                         cls_cost_weight: float, point_cost_weight: float
+                         cls_cost_weight: float, point_cost_weight: float,
+                         point_cost_reduction: str = "mean",
                          ) -> list[tuple[int, int, torch.Tensor]]:
     labels = target["class_ids"]
     if not labels.numel():
@@ -208,8 +221,12 @@ def match_vector_queries(pred_logits: torch.Tensor, pred_points: torch.Tensor,
     normalized = normalize_points(target["points_xy_m"].to(pred_points), xy_range)
     orders = [equivalent_point_orders(normalized[index], bool(target["is_closed"][index]))
               for index in range(len(labels))]
+    if point_cost_reduction not in ("mean", "sum"):
+        raise ValueError("point_cost_reduction must be mean or sum")
     geometry = torch.stack([
-        (pred_points[:, None] - variants[None]).abs().mean(dim=(-1, -2)).min(dim=1).values
+        ((pred_points[:, None] - variants[None]).abs().sum(dim=(-1, -2))
+         / (pred_points.shape[-2] * pred_points.shape[-1] if point_cost_reduction == "mean" else 1)
+         ).min(dim=1).values
         for variants in orders
     ], dim=1)
     cls_cost = -pred_logits.softmax(-1)[:, labels.long().to(pred_logits.device)]
@@ -230,13 +247,14 @@ def vector_map_loss(pred_logits: torch.Tensor, pred_points: torch.Tensor,
         raise ValueError("MapHead must produce [B,Q,C+1] and [B,Q,20,2]")
     if pred_logits.shape[-1] != len(MAP_CLASS_NAMES) + 1 or len(targets) != pred_logits.shape[0]:
         raise ValueError("MapHead class count or map target batch differs")
-    cls_losses, point_losses, direction_losses = [], [], []
+    cls_losses, point_losses, direction_losses, metric_errors = [], [], [], []
     background = len(MAP_CLASS_NAMES)
     for batch_index, target in enumerate(targets):
         logits, points = pred_logits[batch_index], pred_points[batch_index]
         matches = match_vector_queries(
             logits, points, target, xy_range,
             float(config["map_cls_cost_weight"]), float(config["map_point_cost_weight"]),
+            point_cost_reduction=config.get("point_cost_reduction", "mean"),
         )
         cls_target = torch.full((logits.shape[0],), background, dtype=torch.long, device=logits.device)
         weights = logits.new_ones(background + 1)
@@ -247,11 +265,20 @@ def vector_map_loss(pred_logits: torch.Tensor, pred_points: torch.Tensor,
             cls_target[pred_indices] = target["class_ids"][gt_indices].to(logits.device)
             chosen = torch.stack([variant for _, _, variant in matches])
             selected = points[pred_indices]
-            point_losses.append(F.smooth_l1_loss(selected, chosen))
+            point_type = config.get("point_loss_type", "smooth_l1_mean")
+            if point_type == "l1_sum":
+                point_losses.append((selected - chosen).abs().sum(dim=(-1, -2)).mean())
+            elif point_type == "smooth_l1_mean":
+                point_losses.append(F.smooth_l1_loss(selected, chosen))
+            else:
+                raise ValueError("unknown map point_loss_type")
+            selected_m = denormalize_points(selected, xy_range)
+            chosen_m = denormalize_points(chosen, xy_range)
+            metric_errors.append(torch.linalg.vector_norm(selected_m - chosen_m, dim=-1).mean().detach())
             per_instance_direction = []
             for match_index, gt_index in enumerate(gt_indices):
-                predicted = selected[match_index]
-                expected = chosen[match_index]
+                predicted = selected_m[match_index]
+                expected = chosen_m[match_index]
                 if bool(target["is_closed"][gt_index]):
                     predicted = torch.cat((predicted, predicted[:1]), dim=0)
                     expected = torch.cat((expected, expected[:1]), dim=0)
@@ -264,6 +291,7 @@ def vector_map_loss(pred_logits: torch.Tensor, pred_points: torch.Tensor,
         else:
             point_losses.append(points.sum() * 0)
             direction_losses.append(points.sum() * 0)
+            metric_errors.append(points.detach().sum() * 0)
         cls_losses.append(F.cross_entropy(logits, cls_target, weight=weights))
     classification = torch.stack(cls_losses).mean()
     point = torch.stack(point_losses).mean()
@@ -272,11 +300,33 @@ def vector_map_loss(pred_logits: torch.Tensor, pred_points: torch.Tensor,
              + float(config["map_point_loss_weight"]) * point
              + float(config["map_direction_loss_weight"]) * direction)
     return {"vector_map_gt_loss": total, "map_cls_loss": classification,
-            "map_point_loss": point, "map_direction_loss": direction}
+            "map_point_loss": point, "map_direction_loss": direction,
+            "map_matched_point_error_m": torch.stack(metric_errors).mean()}
+
+
+def pairwise_vector_distances(pred_points_m: torch.Tensor, target: Mapping[str, Any],
+                              metric: str = "ordered") -> torch.Tensor:
+    """Custom instance distances in meters; Chamfer is separate from ordered error."""
+    if metric not in ("ordered", "chamfer"):
+        raise ValueError("vector distance metric must be ordered or chamfer")
+    if not pred_points_m.shape[0] or not target["class_ids"].numel():
+        return pred_points_m.new_empty((pred_points_m.shape[0], target["class_ids"].numel()))
+    columns = []
+    for gt_index, points in enumerate(target["points_xy_m"]):
+        points = points.to(pred_points_m)
+        if metric == "ordered":
+            orders = equivalent_point_orders(points, bool(target["is_closed"][gt_index]))
+            distance = torch.linalg.vector_norm(pred_points_m[:, None] - orders[None], dim=-1).mean(-1).min(-1).values
+        else:
+            pairwise = torch.cdist(pred_points_m, points[None].expand(pred_points_m.shape[0], -1, -1))
+            distance = (pairwise.min(-1).values.mean(-1) + pairwise.min(-2).values.mean(-1)) / 2
+        columns.append(distance)
+    return torch.stack(columns, dim=1)
 
 
 def class_aware_vector_matches(pred_labels: torch.Tensor, pred_points_m: torch.Tensor,
-                               target: Mapping[str, Any], distance_threshold_m: float
+                               target: Mapping[str, Any], distance_threshold_m: float,
+                               distance_metric: str = "ordered",
                                ) -> list[tuple[int, int, float, float]]:
     matches = []
     for class_id in range(len(MAP_CLASS_NAMES)):
@@ -284,18 +334,10 @@ def class_aware_vector_matches(pred_labels: torch.Tensor, pred_points_m: torch.T
         gt_indices = torch.nonzero(target["class_ids"] == class_id).flatten()
         if not pred_indices.numel() or not gt_indices.numel():
             continue
-        costs = torch.stack([
-            torch.stack([
-                torch.linalg.vector_norm(
-                    pred_points_m[pred_index][None] - variant, dim=-1
-                ).mean(dim=-1).min()
-                for gt_index in gt_indices
-                for variant in [equivalent_point_orders(
-                    target["points_xy_m"][gt_index].to(pred_points_m),
-                    bool(target["is_closed"][gt_index]),
-                )]
-            ]) for pred_index in pred_indices
-        ])
+        subset = {"class_ids": target["class_ids"][gt_indices],
+                  "points_xy_m": target["points_xy_m"][gt_indices],
+                  "is_closed": target["is_closed"][gt_indices]}
+        costs = pairwise_vector_distances(pred_points_m[pred_indices], subset, distance_metric)
         gated = costs.masked_fill(costs > distance_threshold_m, 1e6)
         rows, columns = linear_sum_assignment(gated.detach().cpu().numpy())
         for row, column in zip(rows, columns):
@@ -309,23 +351,39 @@ def class_aware_vector_matches(pred_labels: torch.Tensor, pred_points_m: torch.T
     return matches
 
 
+def stage3_trainable_modules(config: Mapping[str, Any]) -> tuple[str, ...]:
+    return ("map_decoder", "map_head") if config.get("freeze_agent_and_bev", False) else STAGE3_MODULES
+
+
+def frozen_agent_fingerprint(model: nn.Module) -> str:
+    digest = hashlib.sha256()
+    for name in STAGE3_MODULES:
+        if name in ("map_decoder", "map_head"):
+            continue
+        for key, value in sorted(getattr(model, name).state_dict().items()):
+            digest.update(f"{name}.{key}:{value.dtype}:{tuple(value.shape)}".encode("ascii"))
+            digest.update(value.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
 def configure_stage3(model: nn.Module, raster_head: MapRasterDistillHead | None,
                      config: Mapping[str, Any]) -> torch.optim.Optimizer:
     model.requires_grad_(False)
     if raster_head is not None:
         raster_head.requires_grad_(True)
-    for name in STAGE3_MODULES:
+    trainable = stage3_trainable_modules(config)
+    for name in trainable:
         getattr(model, name).requires_grad_(True)
     model.geometry_lift.ego_mlp.requires_grad_(False)
     groups = []
     for names, lr in (("geometry_lift bev_encoder", "bev_lr"),
                       ("map_decoder map_head", "map_lr"),
                       ("agent_proposal_head agent_decoder agent_head", "agent_lr")):
-        params = [parameter for name in names.split() for parameter in getattr(model, name).parameters()
+        params = [parameter for name in names.split() if name in trainable
+                  for parameter in getattr(model, name).parameters()
                   if parameter.requires_grad]
-        if not params:
-            raise ValueError(f"empty Stage 3 optimizer group: {names}")
-        groups.append({"params": params, "lr": float(config[lr])})
+        if params:
+            groups.append({"params": params, "lr": float(config[lr])})
     if raster_head is not None:
         groups.append({"params": list(raster_head.parameters()), "lr": float(config["map_lr"])})
     return torch.optim.AdamW(groups, weight_decay=float(config["weight_decay"]))
@@ -339,8 +397,14 @@ def stage3_forward(model: nn.Module, raster_head: MapRasterDistillHead | None,
         use_ego_state=False,
     )
     predictions = model.forward_agent(encoded["bev_tokens"], encoded["bev_features"])
-    queries = model.map_decoder(encoded["bev_tokens"])
-    predictions["map_cls_logits"], predictions["map_points"] = model.map_head(queries)
+    if hasattr(model.map_decoder, "forward_layers"):
+        layers = [model.map_head(query) for query in model.map_decoder.forward_layers(encoded["bev_tokens"])]
+        predictions["map_cls_logits_layers"] = torch.stack([layer[0] for layer in layers])
+        predictions["map_points_layers"] = torch.stack([layer[1] for layer in layers])
+        predictions["map_cls_logits"], predictions["map_points"] = layers[-1]
+    else:
+        queries = model.map_decoder(encoded["bev_tokens"])
+        predictions["map_cls_logits"], predictions["map_points"] = model.map_head(queries)
     if raster_head is not None:
         predictions["student_map_raster_logits"] = raster_head(encoded["bev_features"])
     return predictions
@@ -356,6 +420,21 @@ def mixed_stage3_loss(model: nn.Module, predictions: Mapping[str, torch.Tensor],
                 model.geometry_lift.x_range[1], model.geometry_lift.y_range[1])
     vector = vector_map_loss(predictions["map_cls_logits"], predictions["map_points"],
                              vector_targets, config["map_loss"], xy_range)
+    auxiliary_weights = config["map_loss"].get("aux_layer_weights")
+    if auxiliary_weights is not None:
+        logits_layers, point_layers = predictions["map_cls_logits_layers"], predictions["map_points_layers"]
+        if len(auxiliary_weights) != logits_layers.shape[0] or float(auxiliary_weights[-1]) != 1.0:
+            raise ValueError("map auxiliary weights must cover decoder layers and end in 1.0")
+        auxiliary = vector["vector_map_gt_loss"].new_zeros(())
+        for index, weight in enumerate(auxiliary_weights[:-1]):
+            if not math.isfinite(float(weight)) or float(weight) < 0:
+                raise ValueError("invalid map auxiliary layer weight")
+            auxiliary = auxiliary + float(weight) * vector_map_loss(
+                logits_layers[index], point_layers[index], vector_targets, config["map_loss"], xy_range
+            )["vector_map_gt_loss"]
+        vector["map_final_gt_loss"] = vector["vector_map_gt_loss"]
+        vector["map_aux_loss"] = auxiliary
+        vector["vector_map_gt_loss"] = vector["vector_map_gt_loss"] + auxiliary
     kd_enabled = stage3_kd_enabled(config)
     if kd_enabled:
         if (teacher_soft_scores is None or teacher_valid_spatial is None
@@ -395,12 +474,19 @@ def save_stage3_checkpoint(path: str | Path, model: nn.Module, raster_head: MapR
     kd_enabled = stage3_kd_enabled(config)
     if kd_enabled != (raster_head is not None) or kd_enabled != (teacher_metadata is not None):
         raise ValueError("Stage 3 checkpoint raster head/audit do not match KD mode")
+    frozen_agent = bool(config.get("train", {}).get("freeze_agent_and_bev", False))
+    if frozen_agent and config.get("agent_baseline_sha256") != frozen_agent_fingerprint(model):
+        raise ValueError("frozen shared BEV/Agent differs from Stage 2 initialization; refusing checkpoint")
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "architecture_version": QUEST_ARCHITECTURE_VERSION,
         "stage": STAGE3_NAME if kd_enabled else STAGE3_GT_ONLY_NAME,
         "map_kd_enabled": kd_enabled,
+        "map_objective_version": config.get("map", {}).get("objective_version", "legacy_v1"),
+        "agent_and_bev_frozen": bool(config.get("train", {}).get("freeze_agent_and_bev", False)),
+        "agent_baseline_sha256": config.get("agent_baseline_sha256"),
+        "agent_preservation_verified": frozen_agent,
         "epoch": int(epoch), "bev_use_ego_state": False,
         "trained_class_support_mask": torch.tensor([True, True, False, False]),
         "training_config": dict(config), "map_class_names": MAP_CLASS_NAMES,
@@ -442,6 +528,8 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead |
         raise ValueError("Stage 3 checkpoint raster head differs from KD mode")
     if checkpoint.get("bev_use_ego_state") is not False:
         raise ValueError("Stage 3 checkpoint must disable absolute ego state")
+    if checkpoint.get("map_objective_version", "legacy_v1") not in ("legacy_v1", MAP_OBJECTIVE_VERSION):
+        raise ValueError("unknown Stage 3 checkpoint map objective version")
     if tuple(checkpoint.get("map_class_names", ())) != MAP_CLASS_NAMES:
         raise ValueError("Stage 3 checkpoint map taxonomy mismatch")
     if checkpoint.get("vector_gt_schema_version") != VECTOR_GT_SCHEMA_VERSION:
@@ -481,6 +569,10 @@ def load_stage3_checkpoint(model: nn.Module, raster_head: MapRasterDistillHead |
         getattr(model, name).load_state_dict(checkpoint[key], strict=True)
     if kd_enabled:
         raster_head.load_state_dict(checkpoint["map_raster_distill_head_state_dict"], strict=True)
+    if checkpoint.get("agent_and_bev_frozen", False):
+        if (checkpoint.get("agent_preservation_verified") is not True
+                or checkpoint.get("agent_baseline_sha256") != frozen_agent_fingerprint(model)):
+            raise ValueError("Stage 3 frozen Agent preservation checksum mismatch")
     return int(checkpoint["epoch"])
 
 

@@ -10,6 +10,9 @@ train:
   weight_decay: 1.0e-4
   gradient_clip_norm: 1.0
   missing_teacher: error
+  freeze_agent_and_bev: true  # Map recovery: preserve Stage 2 Agent and shared features exactly.
+  seed: 42
+  log_interval: 500
 map:
   class_names: [centerline, ped_crossing, road_boundary]
   map_query_count: null  # Resolved from the certified full train/validation Vector GT audit.
@@ -20,10 +23,14 @@ map:
   map_point_loss_weight: 5.0
   map_direction_loss_weight: 0.005
   background_weight: 0.5
+  objective_version: ordered_l1_sum_v2
+  point_cost_reduction: sum
+  point_loss_type: l1_sum
+  aux_layer_weights: [0.5, 1.0]
 loss_weights:
   lambda_map_gt: 1.0
   lambda_map_kd: 0.0
-  lambda_agent: 0.5
+  lambda_agent: 0.0  # Agent loss remains logged; frozen modules receive no updates.
 eval:
   start_index: 5000  # Legacy fallback only; formal evaluation uses split_manifest_path.
   num_samples: 120
@@ -33,7 +40,7 @@ eval:
 paths:
   split_manifest_path: data/stage3_split.json
   stage2_checkpoint: checkpoints/quest_stage2_agent_5000_e5.pt
-  checkpoint_path: checkpoints/quest_stage3_map_gt_only.pt
+  checkpoint_path: checkpoints/quest_stage3_map_geometry_v2.pt
   agent_soft_labels_dir: data/soft_labels_navformer
   vector_gt_dir: data/vector_map_gt
   vector_capacity_audit_path: data/vector_map_capacity_audit.json

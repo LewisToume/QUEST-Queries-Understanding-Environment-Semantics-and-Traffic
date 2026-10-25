@@ -109,6 +109,14 @@ class MapDecoder(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, bev_tokens: torch.Tensor) -> torch.Tensor:
+        return self.forward_layers(bev_tokens)[-1]
+
+    def forward_layers(self, bev_tokens: torch.Tensor) -> list[torch.Tensor]:
+        """Expose intermediate outputs without changing parameters or final output."""
         batch_size = bev_tokens.shape[0]
         queries = self.query_embedding.unsqueeze(0).expand(batch_size, -1, -1)
-        return self.norm(self.decoder(tgt=queries, memory=bev_tokens))
+        outputs = []
+        for layer in self.decoder.layers:
+            queries = layer(tgt=queries, memory=bev_tokens)
+            outputs.append(self.norm(queries))
+        return outputs

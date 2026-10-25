@@ -35,6 +35,9 @@ def main() -> None:
     parser.add_argument("--start", type=int)
     parser.add_argument("--count", type=int)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
+    parser.add_argument("--diagnostic", action="store_true", help="Allow an explicit manifest subset; not formal held-out evaluation")
+    parser.add_argument("--distance-metric", choices=("ordered", "chamfer"), default="ordered")
     args = parser.parse_args()
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
     kd_enabled = stage3_kd_enabled(config)
@@ -51,9 +54,15 @@ def main() -> None:
     audit = (load_teacher_audit(resolve(config["paths"]["teacher_audit_path"]),
                                 expected_split_sha256=manifest["split_sha256"])
              if kd_enabled else None)
-    indices = [row["index"] for row in manifest["validation"]["frames"]]
-    if args.start is not None or (args.count is not None and args.count != len(indices)):
-        raise ValueError("formal Stage 3 evaluation uses the complete validation manifest")
+    indices = [row["index"] for row in manifest[args.split]["frames"]]
+    if args.diagnostic:
+        offset = args.start or 0
+        count = args.count if args.count is not None else len(indices) - offset
+        if offset < 0 or count <= 0 or offset + count > len(indices):
+            raise ValueError("diagnostic start/count outside selected manifest split")
+        indices = indices[offset:offset + count]
+    elif args.split != "validation" or args.start is not None or (args.count is not None and args.count != len(indices)):
+        raise ValueError("formal Stage 3 evaluation uses the complete validation manifest; subsets need --diagnostic")
     dataset = build_dataset(model_config, config, stage1, audit, indices, audited_provenance)
     if dataset.source_indices != indices:
         raise ValueError("formal Stage 3 evaluation cannot silently skip manifest frames")
@@ -128,7 +137,7 @@ def main() -> None:
                     metrics[name]["gt"] += int((record["class_ids"] == class_id).sum())
                     metrics[name]["predictions"] += int((pred_labels == class_id).sum())
                 for threshold in thresholds:
-                    matches = class_aware_vector_matches(pred_labels, pred_points, record, threshold)
+                    matches = class_aware_vector_matches(pred_labels, pred_points, record, threshold, args.distance_metric)
                     for _, gt_index, _, _ in matches:
                         metrics[MAP_CLASS_NAMES[int(record["class_ids"][gt_index])]]["hits"][threshold] += 1
                     if threshold == primary:
@@ -140,7 +149,9 @@ def main() -> None:
     if not frames:
         raise RuntimeError("Stage 3 map evaluation received no frames")
     print(f"checkpoint={checkpoint_path} epoch={epoch} evaluated_frames={frames} "
-          f"vector_GT=nuPlan map_kd={'ON' if kd_enabled else 'OFF'}")
+          f"vector_GT=nuPlan map_kd={'ON' if kd_enabled else 'OFF'} split={args.split} "
+          f"scope={'DIAGNOSTIC_SUBSET' if args.diagnostic else 'FULL_VALIDATION'} "
+          f"custom_distance_metric={args.distance_metric} official_mAP=False")
     for name in MAP_CLASS_NAMES:
         item = metrics[name]
         print(f"{name} gt_count={item['gt']} prediction_count={item['predictions']}")
@@ -151,7 +162,8 @@ def main() -> None:
         matched = item["hits"][primary]
         point_error = ratio(item["point_error_sum"], matched) if matched else math.nan
         chamfer = ratio(item["chamfer_sum"], matched) if matched else math.nan
-        print(f"{name} matched_mean_point_error_m={point_error:.6f} matched_chamfer_m={chamfer:.6f}")
+        error_name = "point" if args.distance_metric == "ordered" else args.distance_metric
+        print(f"{name} matched_mean_{error_name}_error_m={point_error:.6f} matched_chamfer_m={chamfer:.6f}")
     if kd_enabled:
         print(f"teacher_student_raster_kd_bce={kd_sum / len(loader):.6f} "
               f"teacher_student_raster_iou_at_0.5={ratio(raster_intersection, raster_union):.6f}")

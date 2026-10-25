@@ -26,6 +26,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize Stage 3 map orientation and vector outputs")
     parser.add_argument("--sample-index", type=int)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data/stage3_map_diagnostic.png")
     args = parser.parse_args()
     import matplotlib
@@ -70,9 +71,9 @@ def main() -> None:
     if raster_head is not None:
         raster_head.to(device).eval()
     sample_index = (args.sample_index if args.sample_index is not None
-                    else manifest["validation"]["frames"][0]["index"])
-    if sample_index not in {row["index"] for row in manifest["validation"]["frames"]}:
-        raise ValueError("visualization sample-index is not in the validation manifest")
+                    else manifest[args.split]["frames"][0]["index"])
+    if sample_index not in {row["index"] for row in manifest[args.split]["frames"]}:
+        raise ValueError("visualization sample-index is not in the selected manifest split")
     dataset = build_dataset(model_config, config, stage1, audit, [sample_index], audited_provenance)
     sample = dataset[0]
     if checkpoint["vector_gt_provenance"] != audited_provenance or audited_provenance != {

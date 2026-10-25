@@ -15,6 +15,7 @@ from quest.bev_pretraining import gradient_rms
 from quest.map_training import (
     STAGE3_MODULES, configure_stage3, load_stage2_for_stage3,
     load_vector_capacity_audit, mixed_stage3_loss, stage3_forward, stage3_kd_enabled,
+    stage3_trainable_modules, frozen_agent_fingerprint,
 )
 from quest.model import QUESTModel, QUEST_ARCHITECTURE_VERSION
 from quest.stage3_dataset import collate_stage3
@@ -37,6 +38,8 @@ def snapshot_trainable(model: torch.nn.Module) -> dict:
 
 def check_parameter_updates(model: torch.nn.Module, before: dict, *, verbose: bool = True) -> None:
     for module_name in STAGE3_MODULES:
+        if not before[module_name]:
+            continue
         changed = False
         for name, parameter in getattr(model, module_name).named_parameters():
             if name not in before[module_name]:
@@ -109,7 +112,8 @@ def main() -> None:
     print(f"stage2_loaded_epoch={epoch}", flush=True)
     model.to(device).eval()
     optimizer = configure_stage3(model, None, config["train"])
-    for name in STAGE3_MODULES:
+    trainable_modules = stage3_trainable_modules(config["train"])
+    for name in trainable_modules:
         getattr(model, name).train()
     model.geometry_lift.ego_mlp.eval()
     for name, module in (("DINOv2", model.backbone), ("ego_mlp", model.geometry_lift.ego_mlp)):
@@ -118,6 +122,8 @@ def main() -> None:
     effective = {**config, "agent_train": stage2["train"], "agent_loss": stage2["agent_loss"],
                  "map_loss": config["map"]}
     before = snapshot_trainable(model)
+    frozen_before = (frozen_agent_fingerprint(model)
+                     if config["train"].get("freeze_agent_and_bev", False) else None)
     sums = {"map": 0.0, "agent": 0.0, "total": 0.0}
     for step, batch in enumerate(loader, 1):
         context = f"step={step} index={selected[step - 1]} token={batch['sample_token'][0]}"
@@ -145,7 +151,7 @@ def main() -> None:
                 print(f"output {key}={tuple(predictions[key].shape)}", flush=True)
             print(" ".join(f"{key}={float(value.detach()):.6f}" for key, value in losses.items()), flush=True)
         losses["total_loss"].backward()
-        for name in STAGE3_MODULES:
+        for name in trainable_modules:
             gradients = [p.grad for p in getattr(model, name).parameters() if p.grad is not None]
             if any(not bool(torch.isfinite(grad).all()) for grad in gradients):
                 raise RuntimeError(f"{context}: non-finite gradient: {name}")
@@ -170,13 +176,16 @@ def main() -> None:
         # Release each step's graph before starting the next forward pass.
         del predictions, losses, vectors, target
     check_parameter_updates(model, before, verbose=args.verbose)
+    if frozen_before is not None and frozen_agent_fingerprint(model) != frozen_before:
+        raise RuntimeError("frozen shared BEV/Agent changed during short check")
     torch.cuda.synchronize(device)
     print("mean_loss " + " ".join(f"{key}={value / args.steps:.5f}" for key, value in sums.items()), flush=True)
     print("final_gradient_RMS " + " ".join(
-        f"{name}={gradient_rms(getattr(model, name)):.3e}" for name in STAGE3_MODULES), flush=True)
+        f"{name}={gradient_rms(getattr(model, name)):.3e}" for name in trainable_modules), flush=True)
     status = "STAGE3_ONE_BATCH" if args.steps == 1 else "STAGE3_SHORT_RUN"
     print(f"{status} = PASS; optimizer_steps={args.steps} gradients=finite_nonzero_all_steps "
-          f"parameter_updates=7/7 checkpoint_saved=False", flush=True)
+          f"parameter_updates={len(trainable_modules)}/{len(trainable_modules)} "
+          f"frozen_agent_unchanged={frozen_before is not None} checkpoint_saved=False", flush=True)
 
 
 if __name__ == "__main__":
