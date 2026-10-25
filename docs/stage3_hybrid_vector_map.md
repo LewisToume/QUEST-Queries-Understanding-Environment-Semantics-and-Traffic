@@ -225,7 +225,15 @@ evaluation. The preferred initialization remains
    environment. This checks the complete manifest, capacity audit and all
    5000 training Agent/Vector records without constructing DINO or running a
    forward pass. It prints `STAGE3_PREFLIGHT = PASS` only after all checks.
-4. After reviewing preflight and a separately authorized smoke run, train with
+4. After preflight, the user can run `CUDA_VISIBLE_DEVICES=0 python scripts/check_stage3_batch.py`
+   on an available server GPU. This uses one training-manifest frame (or an
+   explicit original `--sample-index`), the certified full-split query capacity,
+   and the real Stage 2 initialization. It performs exactly one optimizer step,
+   checks finite losses/gradients and updates in all seven Stage 3 modules,
+   and prints peak allocated/reserved CUDA memory even on failure. Parameter
+   comparison copies are held on CPU. No labels or checkpoints are written.
+   This is a single-frame execution check, not full-dataset capacity or quality
+   certification. After reviewing this smoke run, train with
    `python scripts/train_stage3_map.py`; the default GT-only checkpoint is
    `checkpoints/quest_stage3_map_gt_only.pt`. The trainer refuses to overwrite
    a pre-existing checkpoint from another run. Evaluate with
