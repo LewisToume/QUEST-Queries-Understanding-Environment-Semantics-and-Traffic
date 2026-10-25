@@ -232,6 +232,10 @@ evaluation. The preferred initialization remains
    checks finite losses/gradients and updates in all seven Stage 3 modules,
    and prints peak allocated/reserved CUDA memory even on failure. Parameter
    comparison copies are held on CPU. No labels or checkpoints are written.
+   Add `--steps 20` for 20 consecutive optimizer steps on consecutive training
+   manifest entries, reusing the same model and optimizer. Default logs contain
+   one Map/Agent/total loss line per step and final health/memory summaries;
+   use `--verbose` for shapes and individual losses. No checkpoint is saved.
    This is a single-frame execution check, not full-dataset capacity or quality
    certification. After reviewing this smoke run, train with
    `python scripts/train_stage3_map.py`; the default GT-only checkpoint is

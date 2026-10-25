@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from quest.map_training import STAGE3_MODULES
-from scripts.check_stage3_batch import check_parameter_updates, snapshot_trainable
+from scripts.check_stage3_batch import check_parameter_updates, select_training_indices, snapshot_trainable
 
 
 def tiny_model():
@@ -17,6 +17,16 @@ def tiny_model():
 
 
 class Stage3BatchCheckTest(unittest.TestCase):
+    def test_steps_follow_manifest_indices_without_reindexing(self):
+        self.assertEqual(select_training_indices([0, 5, 11, 20], 5, 2), [5, 11])
+        self.assertEqual(select_training_indices([0, 5, 11], None, 2), [0, 5])
+
+    def test_invalid_step_ranges_never_wrap_or_use_validation(self):
+        for start, steps in ((None, 0), (None, -1), (5, 3), (99, 1)):
+            with self.subTest(start=start, steps=steps):
+                with self.assertRaises(ValueError):
+                    select_training_indices([0, 5, 11], start, steps)
+
     def test_snapshot_is_independent_and_excludes_frozen_parameters(self):
         model = tiny_model()
         before = snapshot_trainable(model)
