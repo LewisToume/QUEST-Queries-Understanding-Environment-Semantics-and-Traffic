@@ -18,7 +18,7 @@ from quest.depth_teacher import (
 )
 from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES
 from scripts.export_metric3d_depth import (
-    build_teacher, save_geometry_preview, select_indices, teacher_dependency_blockers,
+    build_teacher, inference_policy, save_geometry_preview, select_indices, teacher_dependency_blockers,
 )
 
 
@@ -29,6 +29,17 @@ def camera():
 
 
 class Metric3DDepthAdapterTest(unittest.TestCase):
+    def test_unverified_diagnostic_inference_never_enables_training_label_export(self):
+        policy = inference_policy("raw_opencv", "", True)
+        self.assertFalse(policy["write_labels"])
+        self.assertIsNone(policy["blocker"])
+        self.assertIn("NOT_CALIBRATION_APPROVAL", policy["evidence"])
+        with self.assertRaises(ValueError):
+            inference_policy("unverified", "", True)
+        self.assertIsNotNone(inference_policy("raw_opencv", "", False)["blocker"])
+        self.assertIsNotNone(inference_policy("unverified", "", False)["blocker"])
+        self.assertTrue(inference_policy("raw_opencv", "verified source fixture", False)["write_labels"])
+
     def test_mmengine_alone_does_not_satisfy_official_native_imports(self):
         versions = {"cv2_importable_spec": True, "numpy": "1.26.4", "mmengine": "0.10.7",
                     "mmcv": "NOT_INSTALLED", "mmcv-full": "NOT_INSTALLED", "timm": "0.9.16",

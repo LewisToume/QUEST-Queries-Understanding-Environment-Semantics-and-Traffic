@@ -112,6 +112,28 @@ The current BEV lift uses pinhole projection without distortion. This is explici
 reported, not changed mid-training. If the JPEGs are raw and distortion matters,
 BEV alignment needs a separate controlled audit before using depth for BEV fusion.
 
+## Real Teacher Diagnostic Before Geometry Approval
+
+Once assets and the isolated environment are ready, run one real eight-camera
+frame on an available GPU. Raw OpenCV geometry here is an explicit HYPOTHESIS,
+not an assertion based on coefficient count or the CPU preview:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 "$HOME/.venvs/quest_depth_teacher/bin/python" scripts/export_metric3d_depth.py --indices 0 --image-geometry raw_opencv --diagnostic-only
+```
+
+Choose an idle GPU; do not assume GPU 2 is always available. This mode still
+requires native model construction, strict local weights, native preprocessing
+and actual GPU inference. It limits input to three frames, marks the geometry
+unverified in the preview and JSON, and NEVER creates training .pt labels or
+modifies the persistent geometry config. Images/reports go to
+`data/diagnostics/depth_metric3d_v1/diagnostic_raw_opencv/<token>.png|json`.
+Existing reports are not overwritten. Checkpoint key mismatch, missing assets/
+dependencies, unsupported camera models and nonfinite outputs remain errors.
+`--diagnostic-only`, `--preflight-only` and `--geometry-preview-only` are exclusive.
+This separates real model/weight validation from the still-open calibration
+question without pretending either has already passed.
+
 ## Native Export After Geometry/Assets Are Confirmed
 
 For example, ONLY if the source confirms raw OpenCV geometry, set the verified
