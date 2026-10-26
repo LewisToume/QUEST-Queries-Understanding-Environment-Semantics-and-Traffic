@@ -475,7 +475,8 @@ def configure_stage3(model: nn.Module, raster_head: MapRasterDistillHead | None,
 
 
 def stage3_forward(model: nn.Module, raster_head: MapRasterDistillHead | None,
-                   batch: Mapping[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
+                   batch: Mapping[str, torch.Tensor], device: torch.device, *,
+                   include_dense: bool | None = None) -> dict[str, torch.Tensor]:
     encoded = model.encode_image(
         batch["images"].to(device), batch["intrinsics"].to(device),
         batch["extrinsics"].to(device), batch["ego_state"].to(device),
@@ -486,7 +487,8 @@ def stage3_forward(model: nn.Module, raster_head: MapRasterDistillHead | None,
         predictions.update(model.forward_map(
             encoded, batch["intrinsics"].to(device), batch["extrinsics"].to(device),
             batch["ego_state"].to(device), tuple(batch["images"].shape[-2:]),
-            include_dense=getattr(model, "map_spatial", None) is not None and model.map_spatial.training,
+            include_dense=(getattr(model, "map_spatial", None) is not None and model.map_spatial.training
+                           if include_dense is None else include_dense),
         ))
     elif hasattr(model.map_decoder, "forward_layers"):
         layers = [model.map_head(query) for query in model.map_decoder.forward_layers(encoded["bev_tokens"])]

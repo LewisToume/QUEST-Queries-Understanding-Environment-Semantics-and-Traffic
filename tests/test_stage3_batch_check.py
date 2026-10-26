@@ -1,10 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 from torch import nn
 
 from quest.map_training import STAGE3_MODULES
-from scripts.check_stage3_batch import check_parameter_updates, select_training_indices, snapshot_trainable
+from scripts.check_stage3_batch import (
+    check_parameter_updates, evaluate_fit_map, overfit_lr_factor,
+    select_training_indices, set_check_mode, snapshot_trainable,
+)
 
 
 def tiny_model():
@@ -17,6 +21,56 @@ def tiny_model():
 
 
 class Stage3BatchCheckTest(unittest.TestCase):
+    def test_overfit_eval_mode_disables_dropout_without_disabling_gradients(self):
+        model = tiny_model()
+        model.map_decoder = nn.Sequential(nn.Linear(2, 2), nn.Dropout(0.9))
+        set_check_mode(model, ("map_decoder", "map_head"), overfit=True)
+        self.assertFalse(model.map_decoder[1].training)
+        self.assertFalse(model.map_head.training)
+        self.assertTrue(model.map_decoder[0].weight.requires_grad)
+        model.map_decoder(torch.ones(1, 2)).sum().backward()
+        self.assertIsNotNone(model.map_decoder[0].weight.grad)
+        set_check_mode(model, ("map_decoder", "map_head"), overfit=False)
+        self.assertTrue(model.map_decoder[1].training)
+        self.assertFalse(model.geometry_lift.training)
+
+    def test_overfit_cosine_lr_decays_to_explicit_minimum(self):
+        factors = [overfit_lr_factor(step, 100, 0.05) for step in (0, 10, 50, 100)]
+        self.assertAlmostEqual(factors[0], 1.)
+        self.assertAlmostEqual(factors[-1], 0.05)
+        self.assertTrue(all(a >= b for a, b in zip(factors, factors[1:])))
+        with self.assertRaises(ValueError):
+            overfit_lr_factor(0, 0, 0.05)
+
+    def test_fit_eval_is_strict_class_aware_and_preserves_modes_and_gradients(self):
+        model = tiny_model()
+        model.geometry_lift.x_range = model.geometry_lift.y_range = (-50., 50.)
+        model.map_decoder.eval()
+        modes = [module.training for module in model.modules()]
+        model.map_head.weight.grad = torch.ones_like(model.map_head.weight)
+        gradient = model.map_head.weight.grad.clone()
+        line = torch.stack((torch.linspace(-10, 10, 20), torch.zeros(20)), -1)
+        target_points = torch.stack((line, line + torch.tensor([0., 10.])))
+        target = {"class_ids": torch.tensor([0, 1]), "points_xy_m": target_points,
+                  "is_closed": torch.tensor([False, False])}
+        predictions = {"map_cls_logits": torch.tensor([[[8., 0., 0., -8.], [8., 0., 0., -8.]]]),
+                       "map_points": ((target_points + 50) / 100)[None]}
+        loss = {"map_cls_cost_weight": 2., "map_point_cost_weight": 5.,
+                "map_cls_loss_weight": 2., "map_point_loss_weight": 5.,
+                "map_direction_loss_weight": 0.005, "background_weight": 0.5,
+                "point_cost_reduction": "sum", "point_loss_type": "l1_sum"}
+        config = {"map": loss, "eval": {"point_error_thresholds_m": [0.5, 1., 1.5],
+                                         "confidence_threshold": 0.25}}
+        with patch("scripts.check_stage3_batch.stage3_forward", return_value=predictions) as forward:
+            result = evaluate_fit_map(model, [{"vector_targets": [target]}], torch.device("cpu"), config)
+        self.assertFalse(forward.call_args.kwargs["include_dense"])
+        self.assertEqual(result["classes"]["centerline"]["matched"], 1)
+        self.assertEqual(result["classes"]["ped_crossing"]["gt"], 1)
+        self.assertEqual(result["classes"]["ped_crossing"]["matched"], 0)
+        self.assertAlmostEqual(result["point_error_m"], 0., places=4)
+        self.assertEqual(modes, [module.training for module in model.modules()])
+        self.assertTrue(torch.equal(gradient, model.map_head.weight.grad))
+
     def test_steps_follow_manifest_indices_without_reindexing(self):
         self.assertEqual(select_training_indices([0, 5, 11, 20], 5, 2), [5, 11])
         self.assertEqual(select_training_indices([0, 5, 11], None, 2), [0, 5])

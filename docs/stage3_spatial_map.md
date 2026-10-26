@@ -143,12 +143,33 @@ Q count, executes 200 optimizer steps and saves no checkpoint or labels:
 CUDA_VISIBLE_DEVICES=0 python -u scripts/check_stage3_batch.py --overfit-samples 1 --steps 200
 ```
 
-Logs are limited to the first step, every 20 steps and the final step, with
-initial/final meter errors, module gradients, frozen Agent preservation, updates
-and peak CUDA memory. `STAGE3_SHORT_RUN=PASS` certifies execution health only,
+In overfit mode, all modules use eval mode (Dropout off) while Map gradients and
+optimizer updates remain enabled. The dense GT head is explicitly requested
+even in eval mode. A diagnostic-only cosine schedule decays LR to the configured
+minimum ratio; formal training behavior is unchanged. Initial and final errors
+are measured with Dropout-disabled eval forwards, with the final forward **after**
+the last optimizer update. Every cached fitting frame is evaluated. Final
+per-class output includes all-GT point error and strict class-aware ordered
+matches at the unchanged evaluation threshold; fitting is not generalization.
+
+Logs are limited to the first/final step and roughly ten intervals, plus
+module gradients, frozen Agent preservation, updates and peak CUDA memory.
+Per-step errors are explicitly labeled pre-update. `STAGE3_SHORT_RUN=PASS` certifies execution health only,
 not fitting quality; inspect meter error rather than treating PASS as accuracy.
 Use `--overfit-samples 4` to check a small varied group. This is not held-out
 evaluation and never samples validation frames.
+
+The first user-run 200-step spatial Map check, before these diagnostic controls,
+reported 28,884,304 trainable parameters, point error 9.868 -> 2.542 m (2.047 m
+at step 180), nonzero visual-lift/encoder gradients, unchanged frozen Agent and
+3216.06 MiB peak allocated CUDA memory. That check used training-mode Dropout,
+constant LR and pre-update error. The late increase does not by itself establish
+which source of noise or optimization behavior caused it. The next controlled
+fitting check can use 1000 steps without another architecture or loss change:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/check_stage3_batch.py --overfit-samples 1 --steps 1000
+```
 
 After server tests and fitting results are satisfactory:
 
