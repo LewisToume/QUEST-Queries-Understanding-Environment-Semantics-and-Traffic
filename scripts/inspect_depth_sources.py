@@ -56,7 +56,13 @@ def source_fields(value, prefix="", depth=0):
                 continue
             if isinstance(item, (Mapping, list, tuple)):
                 yield from source_fields(item, name, depth + 1)
-            elif any(word in name.lower() for word in ("lidar", "depth", "point_cloud")):
+            elif (
+                any(word in name.lower() for word in ("lidar", "depth", "point_cloud"))
+                or ("sweeps[" in name and str(key) in (
+                    "data_path", "lidar_path", "filename", "path", "timestamp", "token",
+                ))
+                or (not prefix and str(key) in ("data_path", "lidar_path", "point_cloud_path"))
+            ):
                 yield name, item
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value[:2]):
@@ -86,6 +92,8 @@ def main():
     parser.add_argument("--data-root", type=Path, default=ROOT / "data/openscene")
     parser.add_argument("--start", type=int, default=0, help="Original metadata index")
     parser.add_argument("--count", type=int, default=3)
+    parser.add_argument("--sources-only", action="store_true",
+                        help="Only print point-cloud/depth source details, omitting camera calibration")
     args = parser.parse_args()
     if args.start < 0 or args.count <= 0:
         parser.error("start must be non-negative and count must be positive")
@@ -109,11 +117,19 @@ def main():
             index, info.get("token"), info.get("scene_token"), info.get("timestamp")))
         if index == args.start:
             print("frame_keys={}".format(list(info)))
+        sweeps = info.get("sweeps", [])
+        print("  sweeps_count={}".format(len(sweeps) if isinstance(sweeps, (list, tuple)) else "UNKNOWN"))
+        if isinstance(sweeps, (list, tuple)):
+            for sweep_index, sweep in enumerate(sweeps[:2]):
+                if isinstance(sweep, Mapping):
+                    print("  sweeps[{}].keys={}".format(sweep_index, list(sweep)))
         fields = list(source_fields(info))
         for name, value in fields:
             print_source(name, value, args.data_root)
         if not fields:
             print("  LIDAR_OR_DEPTH_FIELDS=MISSING")
+        if args.sources_only:
+            continue
         for key in ("lidar2ego", "lidar2global", "ego2global"):
             value = info.get(key)
             print("  {}={}".format(key, "MISSING" if value is None else describe(value)))
