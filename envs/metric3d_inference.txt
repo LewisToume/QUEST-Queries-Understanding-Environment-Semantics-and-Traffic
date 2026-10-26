@@ -1,0 +1,11 @@
+# Install only in the isolated teacher venv, NEVER in quest_env/navformer_env.
+# This is a minimal native inference profile, not the official training environment.
+numpy==1.26.4
+opencv-python==4.10.0.84
+mmcv==1.7.2
+yapf==0.40.1
+timm==0.9.16
+matplotlib==3.9.4
+einops==0.8.0
+pyquaternion==0.9.9
+PyYAML>=6,<7

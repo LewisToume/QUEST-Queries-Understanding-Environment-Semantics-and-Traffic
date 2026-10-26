@@ -104,13 +104,53 @@ def teacher_assets(teacher):
 
 def dependency_versions():
     result = {"python": sys.version.split()[0]}
-    for package in ("torch", "torchvision", "numpy", "Pillow", "PyYAML", "mmcv", "mmcv-full", "mmengine", "xformers"):
+    for package in ("torch", "torchvision", "numpy", "Pillow", "PyYAML", "mmcv", "mmcv-full",
+                    "mmengine", "timm", "matplotlib", "xformers"):
         try:
             result[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             result[package] = "NOT_INSTALLED"
     result["cv2_importable_spec"] = importlib.util.find_spec("cv2") is not None
     return result
+
+
+def teacher_dependency_blockers(versions):
+    blockers = []
+    if not versions["cv2_importable_spec"]:
+        blockers.append("OPENCV_MISSING")
+    # hubconf has an mmengine fallback, but mono/utils/comm.py unconditionally imports mmcv.utils.
+    if not any(versions.get(name, "").startswith("1.") for name in ("mmcv", "mmcv-full")):
+        blockers.append("MMCV1_MISSING: official mono.utils.comm requires mmcv.utils; mmengine alone is insufficient")
+    if versions.get("numpy", "").startswith("2."):
+        blockers.append("LEGACY_NUMPY_PROFILE: use numpy<2 in an isolated teacher environment, not in quest_env")
+    for package in ("timm", "matplotlib"):
+        if versions.get(package, "NOT_INSTALLED") == "NOT_INSTALLED":
+            blockers.append(f"TEACHER_DEPENDENCY_MISSING: {package}")
+    return blockers
+
+
+def save_geometry_preview(cameras, output_path):
+    """CPU-only comparison of hypotheses, not automatic calibration verification."""
+    width, height = 448, 252
+    tile_w, tile_h = width * 2 + 12, height + 28
+    canvas = Image.new("RGB", (tile_w * 2, tile_h * 4 + 48), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.text((4, 4), "LEFT: original JPEG | RIGHT: metadata OpenCV undistortion HYPOTHESIS", fill="black")
+    draw.text((4, 20), "Compare building/pole straightness. This does NOT prove calibration or image provenance.", fill="black")
+    for index, camera in enumerate(cameras):
+        validate_image_geometry({"distortion": camera["distortion"]}, "raw_opencv")
+        with Image.open(camera["path"]) as image:
+            original = image.convert("RGB")
+            rectified, _ = rectified_teacher_image(np.asarray(original), camera["intrinsic"],
+                                                    camera["distortion"], "raw_opencv")
+            left, top = (index % 2) * tile_w, (index // 2) * tile_h + 48
+            canvas.paste(original.resize((width, height), Image.Resampling.BILINEAR), (left, top + 24))
+            canvas.paste(Image.fromarray(rectified).resize((width, height), Image.Resampling.BILINEAR),
+                         (left + width + 4, top + 24))
+        draw.text((left + 4, top + 4), camera["name"], fill="black")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("xb") as handle:
+        canvas.save(handle, format="PNG")
 
 
 def build_teacher(repo, checkpoint, device):
@@ -211,7 +251,11 @@ def main():
     parser.add_argument("--image-geometry", choices=IMAGE_GEOMETRIES)
     parser.add_argument("--geometry-evidence", help="Source/pipeline evidence for the image geometry declaration")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--geometry-preview-only", action="store_true",
+                        help="CPU original/undistortion comparison; no teacher, labels, or geometry approval")
     args = parser.parse_args()
+    if args.preflight_only and args.geometry_preview_only:
+        parser.error("Choose --preflight-only or --geometry-preview-only, not both")
     if args.indices is not None and (args.sample_index != 0 or args.num_frames != 1):
         parser.error("--indices cannot be combined with --sample-index/--num-frames")
     with args.config.open(encoding="utf-8") as handle:
@@ -221,6 +265,8 @@ def main():
         if value is not None:
             teacher[key] = str(value)
     geometry = args.image_geometry or dataset["image_geometry"]
+    if args.geometry_preview_only:
+        geometry = "unverified"
     evidence = args.geometry_evidence or dataset.get("geometry_evidence", "")
     output_dir = local_path(args.output_dir or settings["output_dir"])
     audit_dir = local_path(args.audit_dir or settings["audit_dir"])
@@ -252,11 +298,9 @@ def main():
         if not path.is_file():
             blockers.append(f"{label}_MISSING: {path}")
     versions = dependency_versions()
-    if not versions["cv2_importable_spec"]:
-        blockers.append("OPENCV_MISSING: no environment changes were made")
-    if versions["mmcv"] == versions["mmcv-full"] == versions["mmengine"] == "NOT_INSTALLED":
-        blockers.append("TEACHER_CONFIG_DEPENDENCY_MISSING: official hub needs mmcv or mmengine")
-    print(f"preflight_only={args.preflight_only} no_student_model=True no_training=True")
+    blockers.extend(teacher_dependency_blockers(versions))
+    print(f"preflight_only={args.preflight_only} geometry_preview_only={args.geometry_preview_only} "
+          "no_student_model=True no_training=True")
     print(f"versions={json.dumps(versions, sort_keys=True)}")
     print(f"camera_order={','.join(OPENSCENE_CAMERA_NAMES)} image_geometry={geometry}")
     metadata_hash = file_sha256(metadata_path)
@@ -271,12 +315,20 @@ def main():
                       f"fx_fy_cx_cy={matrix[[0,1,0,1],[0,1,2,2]].round(3).tolist()} "
                       f"distortion={camera['distortion'].round(7).tolist()}")
         token = str(infos[index]["token"])
+        if args.geometry_preview_only:
+            path = audit_dir / "geometry" / f"{token}.png"
+            save_geometry_preview(cameras, path)
+            print(f"geometry_preview={path}")
+            continue
         for path in (output_dir / f"{token}.pt", output_dir / f"{token}.pt.tmp",
                      audit_dir / f"{token}.png", audit_dir / f"{token}.json"):
             if path.exists():
                 blockers.append(f"OUTPUT_EXISTS: will not overwrite {path}; choose new output/audit directories")
     print("student_geometry_note=existing_BEV_uses_pinhole_projection_without_distortion; not modified")
     print("depth_confidence_note=teacher_confidence_is_not_used_as_calibrated_probability; valid_mask_is_not_sky_detection")
+    if args.geometry_preview_only:
+        print("GEOMETRY_STATUS=UNVERIFIED; CPU previews only, teacher_not_loaded=True depth_labels_saved=False")
+        return 0
     if blockers:
         for blocker in blockers:
             print(f"BLOCKER {blocker}")

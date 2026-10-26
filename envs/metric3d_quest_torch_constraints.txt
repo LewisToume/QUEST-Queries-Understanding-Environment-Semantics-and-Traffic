@@ -1,0 +1,4 @@
+# Match the user's reported base QUEST installation, inherited read-only by venv.
+# Prevent dependency resolution from upgrading/replacing Torch or torchvision.
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128

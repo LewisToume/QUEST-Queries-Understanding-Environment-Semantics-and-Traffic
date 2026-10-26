@@ -40,6 +40,52 @@ Use `--repo` and `--checkpoint` if already stored elsewhere. Do not install the
 teacher into a running QUEST/Navformer environment without reviewing dependency
 compatibility. Preflight package availability is not a successful import check.
 
+## Asset And Environment Preparation
+
+User-run Linux command, downloads official source/checkpoint only (no installation
+or GPU usage, no overwriting existing assets):
+
+```bash
+bash scripts/prepare_metric3d_assets.sh
+```
+
+The native import chain needs **mmcv 1.x** even though hubconf itself has an
+mmengine fallback: [mono/utils/comm.py](https://github.com/YvanYin/Metric3D/blob/main/mono/utils/comm.py)
+unconditionally imports `mmcv.utils.collect_env`. mmengine alone is insufficient.
+Use pure-Python `mmcv==1.7.2`, not mmcv-full/CUDA ops. xformers is optional in the
+native ViT backbone; start with its built-in Torch attention fallback rather than
+replacing the working Torch/CUDA installation to install an old xformers binary.
+
+The user's reported quest_env has Torch 2.7.0+cu128 and NumPy 2.2.6. The upstream
+legacy requirements use NumPy 1.x. The following optional USER-EXECUTED setup makes
+a new teacher venv outside the repository, inherits Torch/torchvision read-only,
+and installs isolated inference dependencies. It does NOT change quest_env or
+navformer_env. It is a proposed compatibility profile, NOT a tested official
+Torch-2.7 environment. Do not apply the upstream full requirements to quest_env.
+
+```bash
+conda activate quest_env && python -m venv --system-site-packages "$HOME/.venvs/quest_depth_teacher" && "$HOME/.venvs/quest_depth_teacher/bin/python" -m pip install -c envs/metric3d_quest_torch_constraints.txt -r envs/metric3d_inference.txt
+```
+
+Run teacher commands using `$HOME/.venvs/quest_depth_teacher/bin/python` explicitly.
+The constraint file matches the reported Torch/torchvision versions so pip cannot
+silently upgrade them. Review any installation error instead of changing the
+parent environment. None of this setup was run by Codex.
+
+Meanwhile, generate the geometry comparison on CPU in the existing quest_env:
+
+```bash
+python scripts/export_metric3d_depth.py --indices 0 --geometry-preview-only
+```
+
+This writes only `data/diagnostics/depth_metric3d_v1/geometry/<token>.png`, showing
+all eight original JPEGs next to the metadata OpenCV-undistortion HYPOTHESIS.
+No teacher weights or mmcv are needed. No image-geometry gate is bypassed: status
+remains UNVERIFIED, no depth .pt is generated, and neither metadata nor original
+images are modified. Compare building/pole straightness and corroborate the result
+with image provenance; visual appearance alone is not proof. Previews are not
+overwritten. Do not run this mode on all 5,000 frames.
+
 ## Geometry Gate
 
 `image_geometry=unverified` is intentionally the default. The metadata having

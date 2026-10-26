@@ -1,12 +1,14 @@
 """CPU test sources for server execution; no real teacher/DINO weights are needed."""
 
 import copy
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import torch
+from PIL import Image
 
 from quest.depth_teacher import (
     DEPTH_ALIGNMENT_VERSION, DEPTH_SCHEMA_VERSION, cross_view_audit,
@@ -15,7 +17,9 @@ from quest.depth_teacher import (
     scale_intrinsic, sensor_to_lidar, validate_depth_record, validate_image_geometry,
 )
 from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES
-from scripts.export_metric3d_depth import build_teacher, select_indices
+from scripts.export_metric3d_depth import (
+    build_teacher, save_geometry_preview, select_indices, teacher_dependency_blockers,
+)
 
 
 def camera():
@@ -25,6 +29,31 @@ def camera():
 
 
 class Metric3DDepthAdapterTest(unittest.TestCase):
+    def test_mmengine_alone_does_not_satisfy_official_native_imports(self):
+        versions = {"cv2_importable_spec": True, "numpy": "1.26.4", "mmengine": "0.10.7",
+                    "mmcv": "NOT_INSTALLED", "mmcv-full": "NOT_INSTALLED", "timm": "0.9.16",
+                    "matplotlib": "3.9.4"}
+        self.assertTrue(any("MMCV1_MISSING" in item for item in teacher_dependency_blockers(versions)))
+        versions["mmcv"] = "1.7.2"
+        self.assertEqual(teacher_dependency_blockers(versions), [])
+        versions["numpy"] = "2.2.6"
+        self.assertTrue(any("LEGACY_NUMPY_PROFILE" in item for item in teacher_dependency_blockers(versions)))
+
+    def test_geometry_preview_never_saves_depth_labels_or_overwrites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "original.jpg"
+            Image.fromarray(np.full((28, 56, 3), 100, np.uint8)).save(source)
+            item = camera()
+            cameras = [{"name": name, "path": source, "intrinsic": item["cam_intrinsic"],
+                        "distortion": item["distortion"]} for name in OPENSCENE_CAMERA_NAMES]
+            output = root / "preview.png"
+            save_geometry_preview(cameras, output)
+            self.assertTrue(output.is_file())
+            self.assertEqual(list(root.glob("*.pt")), [])
+            with self.assertRaises(FileExistsError):
+                save_geometry_preview(cameras, output)
+
     def test_original_index_selection_and_noncontiguous_split(self):
         infos = [{"token": f"token{index}"} for index in range(30)]
         manifest = {"validation": {"frames": [{"index": 21}, {"index": 7}]}}
