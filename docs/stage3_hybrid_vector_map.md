@@ -1,9 +1,12 @@
 # Stage 3 vector-map training
 
-See [stage3_geometry_review.md](stage3_geometry_review.md) for the current
-recovery config, primary-source review, diagnostic commands and unresolved
-risks. The recovery freezes BEV/Agent and uses summed L1 map geometry with
-intermediate supervision. Its output is `quest_stage3_map_geometry_v2.pt`.
+The current default is the [spatial Map redesign](stage3_spatial_map.md):
+an independent trainable 64x64 lift/encoder, six-layer instance/point decoder,
+metric Focal/vector loss and real-GT dense auxiliary supervision. Its output is
+`quest_stage3_map_spatial_v1.pt`. Shared 32x32 BEV/Agent remain frozen.
+The [previous recovery](stage3_geometry_review.md) and its
+`quest_stage3_map_geometry_v2.pt` checkpoint remain historical baselines,
+not the current default.
 
 Stage 3 starts from the Stage 2 Agent checkpoint. The production prediction is
 `MapDecoder -> MapHead -> [B,N_map,4]` class logits (three map classes and
@@ -14,21 +17,25 @@ unchanged. `N_map` comes from the certified full train/validation capacity audit
 are an error, never silently truncated.
 
 ```
-8 cameras -> frozen DINOv2 -> GeometryAwareBEVLift -> shared BEV
-                                                   |-> Agent branch -> Agent loss
-                                                   |-> MapDecoder/MapHead -> vector GT loss
-                                                   `-> optional MapRasterDistillHead -> raster teacher KD
+8 cameras -> frozen DINOv2
+                 |-> frozen 32x32 shared BEV -> frozen Agent branch
+                 `-> trainable 64x64 Map lift + frozen coarse context
+                       -> window BEV encoder + 3-scale pyramid
+                       -> 6-layer point decoder/heads -> vector GT loss
+                       `-> training-only dense Map GT head
 ```
 
 By default `configs/stage3_map.yaml` selects `stage: map_gt_agent` with
-`lambda_map_kd: 0`. The recovery config trains Map on nuPlan Vector GT and
+`lambda_map_kd: 0`. The spatial config trains Map on nuPlan Vector GT and
 retains Agent labels for reference loss logging with shared BEV/Agent frozen.
-Joint GT + Agent training remains available by disabling `freeze_agent_and_bev`
-and restoring a positive Agent weight. This mode does not read map labels, load a teacher
+This mode does not read map teacher labels, load a teacher
 audit, instantiate a raster head, or calculate a map KD loss. The teacher's
 lane channels are currently unusable as supervision. The original hybrid mode
-remains available by setting `stage: map_hybrid_distillation` and a positive
-`lambda_map_kd`; its verified teacher audit and full label checks still apply.
+remains available for the legacy Map architecture: remove `map_architecture`,
+disable `train.map_spatial_enabled`, restore legacy loss/auxiliary settings,
+set `stage: map_hybrid_distillation` and a positive `lambda_map_kd`.
+Its verified teacher audit and full label checks still apply. Legacy joint
+Agent training also requires a positive Agent weight and disabled freeze flag.
 Use a distinct `--checkpoint` path for a hybrid run so it cannot share the
 default GT-only checkpoint filename.
 
@@ -191,7 +198,9 @@ stop export. This does not replace visual inspection on the server.
 `L = lambda_map_gt * L_vector + lambda_map_kd * L_soft_raster +
 lambda_agent * L_stage2_agent`. Recovery weights are `1.0, 0.0, 0.0` in
 `configs/stage3_map.yaml`; the raster term is not evaluated in GT-only mode.
-Vector queries use class/point Hungarian cost;
+The spatial default includes six-layer deep supervision and a dense GT term
+inside `L_vector`; see [stage3_spatial_map.md](stage3_spatial_map.md) for exact
+metric units and coefficients. Vector queries use class/point Hungarian cost;
 open polylines compare forward/reverse point order, closed contours compare
 all cyclic and reverse-cyclic orders. Matched point loss uses the selected
 ordering; a small neighboring-segment direction loss includes the closing
@@ -204,13 +213,16 @@ Joint-mode AdamW groups: shared BEV `1e-5`, new Map decoder/head/raster head `1e
 Agent proposal/decoder/head `3e-5`. DINO and ego MLP stay frozen;
 `use_ego_state=False` is explicit. Gradients are clipped at norm 1.0.
 
-The Stage 3 checkpoint records seven model submodule state dicts, optimizer,
+The Stage 3 checkpoint records shared/Agent/Map submodule state dicts, optimizer,
 epoch, effective config and split hash, map classes, vector GT provenance,
 Agent support mask, `map_kd_enabled` and `bev_use_ego_state=False`. A GT-only
 checkpoint has no raster or teacher fields; a hybrid checkpoint has the
 audited teacher fields and raster head. The loader also accepts existing hybrid
 checkpoints without `map_kd_enabled`, inferring their mode from the stage name.
 Existing Stage 1/2 checkpoint formats are unchanged.
+Spatial Map checkpoints additionally save architecture metadata, independent
+Map spatial state and scheduler state. Evaluation reconstructs the saved Map
+architecture rather than assuming the current YAML architecture.
 The Stage 2 Agent evaluator accepts the shared BEV and Agent modules from a
 Stage 3 checkpoint for regression comparison.
 
@@ -236,7 +248,7 @@ evaluation. The preferred initialization remains
    on an available server GPU. This uses one training-manifest frame (or an
    explicit original `--sample-index`), the certified full-split query capacity,
    and the real Stage 2 initialization. It performs exactly one optimizer step,
-   checks finite losses/gradients and updates in all seven Stage 3 modules,
+   checks finite losses/gradients and updates in every enabled trainable module,
    and prints peak allocated/reserved CUDA memory even on failure. Parameter
    comparison copies are held on CPU. No labels or checkpoints are written.
    Add `--steps 20` for 20 consecutive optimizer steps on consecutive training
@@ -244,13 +256,15 @@ evaluation. The preferred initialization remains
    one Map/Agent/total loss line per step and final health/memory summaries;
    use `--verbose` for shapes and individual losses. No checkpoint is saved.
    This is a single-frame execution check, not full-dataset capacity or quality
-   certification. After reviewing this smoke run, train with
+   certification. For the spatial redesign, first use
+   `--overfit-samples 1 --steps 200` and inspect fitting accuracy, not only PASS.
+   After reviewing this smoke run, train with
    `python scripts/train_stage3_map.py`; the default GT-only checkpoint is
-   `checkpoints/quest_stage3_map_geometry_v2.pt`. The trainer refuses to overwrite
+   `checkpoints/quest_stage3_map_spatial_v1.pt`. The trainer refuses to overwrite
    a pre-existing checkpoint from another run. Evaluate with
    `python scripts/evaluate_stage3_map.py` and visualize with
    `scripts/visualize_stage3_map.py`. GT-only reports raster KD/IoU as `N/A`.
-   Use `python scripts/evaluate_stage2_agent.py --split-manifest data/stage3_split.json --checkpoint checkpoints/quest_stage3_map_geometry_v2.pt`
+   Use `python scripts/evaluate_stage2_agent.py --split-manifest data/stage3_split.json --checkpoint checkpoints/quest_stage3_map_spatial_v1.pt`
    and run the same command against the Stage 2 checkpoint for an Agent
    regression comparison on identical validation frames.
 

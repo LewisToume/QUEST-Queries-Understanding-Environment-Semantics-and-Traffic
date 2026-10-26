@@ -2,7 +2,7 @@ stage: map_gt_agent
 train:
   start_index: 0
   num_samples: 5000
-  epochs: 5
+  epochs: 12
   batch_size: 1
   bev_lr: 1.0e-5
   map_lr: 1.0e-4
@@ -11,22 +11,44 @@ train:
   gradient_clip_norm: 1.0
   missing_teacher: error
   freeze_agent_and_bev: true  # Map recovery: preserve Stage 2 Agent and shared features exactly.
+  map_spatial_enabled: true
+  warmup_steps: 500
+  min_lr_ratio: 0.05
   seed: 42
   log_interval: 500
+map_architecture:
+  version: spatial_map_v1
+  bev_h: 64
+  bev_w: 64
+  encoder_layers: 4
+  window_size: 8
+  decoder_layers: 6
+  num_heads: 8
+  ffn_dim: 1536
+  num_levels: 3
+  sampling_points: 4
+  dropout: 0.1
 map:
   class_names: [centerline, ped_crossing, road_boundary]
   map_query_count: null  # Resolved from the certified full train/validation Vector GT audit.
   num_points: 20
   map_cls_cost_weight: 2.0
-  map_point_cost_weight: 5.0
+  map_point_cost_weight: 1.0  # L1 meters per point, not normalized 40-coordinate sum.
   map_cls_loss_weight: 2.0
-  map_point_loss_weight: 5.0
-  map_direction_loss_weight: 0.005
+  map_point_loss_weight: 1.0
+  map_direction_loss_weight: 0.1
   background_weight: 0.5
-  objective_version: ordered_l1_sum_v2
+  objective_version: metric_focal_dense_v3
+  classification_loss: softmax_focal
+  focal_gamma: 2.0
+  class_weights: [1.0, 3.0, 2.0]  # centerline / ped_crossing / road_boundary.
   point_cost_reduction: sum
-  point_loss_type: l1_sum
-  aux_layer_weights: [0.5, 1.0]
+  point_loss_type: metric_l1
+  aux_layer_weights: [0.5, 0.5, 0.5, 0.5, 0.5, 1.0]
+  dense_focal_weight: 1.0
+  dense_dice_weight: 1.0
+  dense_negative_weight: 1.0
+  dense_line_width_m: 1.5
 loss_weights:
   lambda_map_gt: 1.0
   lambda_map_kd: 0.0
@@ -40,7 +62,7 @@ eval:
 paths:
   split_manifest_path: data/stage3_split.json
   stage2_checkpoint: checkpoints/quest_stage2_agent_5000_e5.pt
-  checkpoint_path: checkpoints/quest_stage3_map_geometry_v2.pt
+  checkpoint_path: checkpoints/quest_stage3_map_spatial_v1.pt
   agent_soft_labels_dir: data/soft_labels_navformer
   vector_gt_dir: data/vector_map_gt
   vector_capacity_audit_path: data/vector_map_capacity_audit.json

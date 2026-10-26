@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from quest.bev_pretraining import gradient_rms
 from quest.map_training import (
     STAGE3_MODULES, configure_stage3, load_stage2_for_stage3,
     load_vector_capacity_audit, mixed_stage3_loss, stage3_forward, stage3_kd_enabled,
-    stage3_trainable_modules, frozen_agent_fingerprint,
+    stage3_trainable_modules, frozen_agent_fingerprint, stage3_model_config,
 )
 from quest.model import QUESTModel, QUEST_ARCHITECTURE_VERSION
 from quest.stage3_dataset import collate_stage3
@@ -32,12 +33,12 @@ def snapshot_trainable(model: torch.nn.Module) -> dict:
         module_name: {name: parameter.detach().cpu().clone()
                       for name, parameter in getattr(model, module_name).named_parameters()
                       if parameter.requires_grad}
-        for module_name in STAGE3_MODULES
+        for module_name in (*STAGE3_MODULES, *(("map_spatial",) if getattr(model, "map_spatial", None) is not None else ()))
     }
 
 
 def check_parameter_updates(model: torch.nn.Module, before: dict, *, verbose: bool = True) -> None:
-    for module_name in STAGE3_MODULES:
+    for module_name in before:
         if not before[module_name]:
             continue
         changed = False
@@ -70,6 +71,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Short real CUDA Stage 3 GT-only check; no files saved")
     parser.add_argument("--sample-index", type=int, help="Original training metadata index; default first manifest frame")
     parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--overfit-samples", type=int,
+                        help="Repeat this many real training frames for --steps; no checkpoint is saved")
     parser.add_argument("--verbose", action="store_true", help="Also print shapes and individual losses")
     args = parser.parse_args()
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
@@ -78,6 +81,7 @@ def main() -> None:
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
     if stage3_kd_enabled(config):
         raise ValueError("this check requires GT-only Stage 3 (map KD disabled)")
+    model_config = stage3_model_config(model_config, config)
     if (tuple(stage1["dataset"]["camera_names"]) != tuple(model_config["camera_names"])
             or len(model_config["camera_names"]) != 8
             or int(model_config["architecture_version"]) != QUEST_ARCHITECTURE_VERSION
@@ -98,7 +102,9 @@ def main() -> None:
     query_count, provenance = load_vector_capacity_audit(
         resolve(config["paths"]["vector_capacity_audit_path"]), config, manifest)
     indices = [row["index"] for row in manifest["train"]["frames"]]
-    selected = select_training_indices(indices, args.sample_index, args.steps)
+    if args.overfit_samples is not None and not 1 <= args.overfit_samples <= args.steps:
+        raise ValueError("overfit-samples must be between 1 and steps")
+    selected = select_training_indices(indices, args.sample_index, args.overfit_samples or args.steps)
     model_config.update(C_map=len(MAP_CLASS_NAMES), N_map=query_count, P=20)
     dataset = build_dataset(model_config, config, stage1, None, selected, provenance)
     if preflight_vectors(dataset, query_count) != provenance:
@@ -112,10 +118,14 @@ def main() -> None:
     print(f"stage2_loaded_epoch={epoch}", flush=True)
     model.to(device).eval()
     optimizer = configure_stage3(model, None, config["train"])
+    print(f"map_architecture={(model.map_architecture or {}).get('version', 'legacy_instance_v1')} "
+          f"parameters={model.parameter_summary()}", flush=True)
     trainable_modules = stage3_trainable_modules(config["train"])
     for name in trainable_modules:
         getattr(model, name).train()
     model.geometry_lift.ego_mlp.eval()
+    if model.map_spatial is not None:
+        model.map_spatial.geometry_lift.ego_mlp.eval()
     for name, module in (("DINOv2", model.backbone), ("ego_mlp", model.geometry_lift.ego_mlp)):
         if any(parameter.requires_grad for parameter in module.parameters()):
             raise RuntimeError(f"{name} must remain frozen")
@@ -125,8 +135,11 @@ def main() -> None:
     frozen_before = (frozen_agent_fingerprint(model)
                      if config["train"].get("freeze_agent_and_bev", False) else None)
     sums = {"map": 0.0, "agent": 0.0, "total": 0.0}
-    for step, batch in enumerate(loader, 1):
-        context = f"step={step} index={selected[step - 1]} token={batch['sample_token'][0]}"
+    batches = itertools.islice(itertools.cycle(loader), args.steps) if args.overfit_samples else loader
+    initial_error = final_error = None
+    for step, batch in enumerate(batches, 1):
+        sample_index = selected[(step - 1) % len(selected)]
+        context = f"step={step} index={sample_index} token={batch['sample_token'][0]}"
         if tuple(batch["images"].shape) != (1, 8, 3, 252, 448):
             raise ValueError(f"{context}: unexpected image shape: {tuple(batch['images'].shape)}")
         for key in ("images", "intrinsics", "extrinsics", "ego_state"):
@@ -157,7 +170,10 @@ def main() -> None:
                 raise RuntimeError(f"{context}: non-finite gradient: {name}")
             if not any(bool(torch.count_nonzero(grad)) for grad in gradients):
                 raise RuntimeError(f"{context}: missing or zero gradient: {name}")
-        for module in (model.backbone, model.geometry_lift.ego_mlp):
+        frozen_modules = [model.backbone, model.geometry_lift.ego_mlp]
+        if model.map_spatial is not None:
+            frozen_modules.append(model.map_spatial.geometry_lift.ego_mlp)
+        for module in frozen_modules:
             if any(p.grad is not None for p in module.parameters()):
                 raise RuntimeError(f"{context}: frozen DINOv2/ego_mlp unexpectedly received gradients")
         gradient_norm = torch.nn.utils.clip_grad_norm_(
@@ -171,8 +187,13 @@ def main() -> None:
                   "total": float(losses["total_loss"].detach())}
         for key, value in values.items():
             sums[key] += value
-        print(f"step={step}/{args.steps} index={selected[step - 1]} "
-              + " ".join(f"{key}={value:.5f}" for key, value in values.items()), flush=True)
+        final_error = float(losses["map_matched_point_error_m"])
+        if initial_error is None:
+            initial_error = final_error
+        if step == 1 or step == args.steps or step % (20 if args.overfit_samples else 1) == 0:
+            print(f"step={step}/{args.steps} index={sample_index} "
+                  + " ".join(f"{key}={value:.5f}" for key, value in values.items())
+                  + f" point_error_m={final_error:.3f}", flush=True)
         # Release each step's graph before starting the next forward pass.
         del predictions, losses, vectors, target
     check_parameter_updates(model, before, verbose=args.verbose)
@@ -182,7 +203,15 @@ def main() -> None:
     print("mean_loss " + " ".join(f"{key}={value / args.steps:.5f}" for key, value in sums.items()), flush=True)
     print("final_gradient_RMS " + " ".join(
         f"{name}={gradient_rms(getattr(model, name)):.3e}" for name in trainable_modules), flush=True)
+    if model.map_spatial is not None:
+        print(f"map_visual_lift_gradient_RMS={gradient_rms(model.map_spatial.geometry_lift):.3e} "
+              f"map_bev_encoder_gradient_RMS={gradient_rms(model.map_spatial.layers):.3e} "
+              f"map_dense_head_gradient_RMS={gradient_rms(model.map_spatial.dense_head):.3e}", flush=True)
     status = "STAGE3_ONE_BATCH" if args.steps == 1 else "STAGE3_SHORT_RUN"
+    if args.overfit_samples:
+        print(f"overfit_frames={len(selected)} initial_point_error_m={initial_error:.3f} "
+              f"final_point_error_m={final_error:.3f} "
+              "fit_quality_requires_manual_review=True", flush=True)
     print(f"{status} = PASS; optimizer_steps={args.steps} gradients=finite_nonzero_all_steps "
           f"parameter_updates={len(trainable_modules)}/{len(trainable_modules)} "
           f"frozen_agent_unchanged={frozen_before is not None} checkpoint_saved=False", flush=True)

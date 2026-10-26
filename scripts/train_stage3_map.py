@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,6 +20,7 @@ from quest.map_training import (
     load_vector_capacity_audit,
     mixed_stage3_loss, save_stage3_checkpoint, stage3_forward, stage3_kd_enabled,
     stage3_trainable_modules, frozen_agent_fingerprint,
+    stage3_model_config,
     validate_vector_record,
 )
 from quest.model import QUESTModel, QUEST_ARCHITECTURE_VERSION
@@ -133,12 +135,15 @@ def preflight_stage2_checkpoint(path: Path) -> None:
 
 def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
                     loader: DataLoader, optimizer: torch.optim.Optimizer,
-                    device: torch.device, config: dict, audit: dict | None, epoch: int) -> None:
+                    device: torch.device, config: dict, audit: dict | None, epoch: int,
+                    scheduler=None) -> None:
     model.eval()
     trainable_modules = stage3_trainable_modules(config["train"])
     for name in trainable_modules:
         getattr(model, name).train()
     model.geometry_lift.ego_mlp.eval()
+    if model.map_spatial is not None:
+        model.map_spatial.geometry_lift.ego_mlp.eval()
     if raster_head is not None:
         raster_head.train()
     keys = (
@@ -147,14 +152,25 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
         "map_cls_loss", "map_point_loss", "map_direction_loss",
         "map_matched_point_error_m",
     )
+    if model.map_spatial is not None:
+        keys += ("map_dense_focal_loss", "map_dense_dice_loss", "map_dense_gt_loss")
+    class_errors, class_matches = [0.] * len(MAP_CLASS_NAMES), [0] * len(MAP_CLASS_NAMES)
     sums = {key: 0.0 for key in keys}
     module_names = (*trainable_modules, *(("map_raster_distill_head",) if raster_head is not None else ()))
-    gradients = {name: 0.0 for name in module_names}
+    gradient_modules = {name: (raster_head if name == "map_raster_distill_head" else getattr(model, name))
+                        for name in module_names}
+    if model.map_spatial is not None:
+        gradient_modules.update(map_visual_lift=model.map_spatial.geometry_lift,
+                                 map_bev_encoder=model.map_spatial.layers,
+                                 map_dense_head=model.map_spatial.dense_head)
+    gradients = {name: 0.0 for name in gradient_modules}
     counts = [0] * len(MAP_CLASS_NAMES)
     raster_probability = 0.0
     raster_probability_min = 1.0
     raster_probability_max = 0.0
     steps = 0
+    window_map = window_error = 0.0
+    window_steps = 0
     support = (torch.tensor(audit["teacher_channel_support_mask"], device=device, dtype=torch.bool)
                if audit is not None else None)
     weights = (torch.tensor(audit["teacher_channel_weights"], device=device, dtype=torch.float32)
@@ -189,25 +205,33 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
             + ([p for p in raster_head.parameters() if p.requires_grad] if raster_head is not None else []),
             float(config["train"]["gradient_clip_norm"]),
         )
-        for name in trainable_modules:
-            gradients[name] += gradient_rms(getattr(model, name))
-        if raster_head is not None:
-            gradients["map_raster_distill_head"] += gradient_rms(raster_head)
+        for name, module in gradient_modules.items():
+            gradients[name] += gradient_rms(module)
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         for key in keys:
             sums[key] += float(losses[key].detach())
+        for class_id, name in enumerate(MAP_CLASS_NAMES):
+            class_errors[class_id] += float(losses[f"map_{name}_point_error_sum_m"])
+            class_matches[class_id] += int(losses[f"map_{name}_matched_count"])
         if raster_head is not None:
             raster_values = predictions["student_map_raster_logits"].sigmoid().detach()
             raster_probability += float(raster_values.mean())
             raster_probability_min = min(raster_probability_min, float(raster_values.min()))
             raster_probability_max = max(raster_probability_max, float(raster_values.max()))
         steps += 1
+        window_map += float(losses["raw_map_gt_loss"].detach())
+        window_error += float(losses["map_matched_point_error_m"].detach())
+        window_steps += 1
         interval = int(config["train"].get("log_interval", 500))
         if interval > 0 and steps % interval == 0:
             print(f"epoch={epoch} step={steps}/{len(loader)} "
-                  f"map={sums['raw_map_gt_loss'] / steps:.4f} "
-                  f"agent={sums['raw_agent_loss'] / steps:.4f} "
-                  f"map_point_error_m={sums['map_matched_point_error_m'] / steps:.3f}", flush=True)
+                  f"window_map={window_map / window_steps:.4f} "
+                  f"window_point_error_m={window_error / window_steps:.3f} "
+                  f"lr={optimizer.param_groups[0]['lr']:.2e}", flush=True)
+            window_map = window_error = 0.0
+            window_steps = 0
     if not steps:
         raise RuntimeError("Stage 3 dataset produced no batches")
     print(f"epoch={epoch} steps={steps} map_kd={'ON' if raster_head is not None else 'OFF'} "
@@ -220,7 +244,10 @@ def train_one_epoch(model: QUESTModel, raster_head: MapRasterDistillHead | None,
               f"student_raster_max_probability={raster_probability_max:.6f}")
     print(" ".join(f"{key}={sums[key] / steps:.6f}" for key in keys))
     print("map_gt_class_counts=" + str(dict(zip(MAP_CLASS_NAMES, counts))))
-    print("gradient_RMS " + " ".join(f"{name}={gradients[name] / steps:.9e}" for name in module_names))
+    print("matched_training_point_error_m " + " ".join(
+        f"{name}={class_errors[i] / class_matches[i]:.3f}" if class_matches[i] else f"{name}=N/A"
+        for i, name in enumerate(MAP_CLASS_NAMES)))
+    print("gradient_RMS " + " ".join(f"{name}={gradients[name] / steps:.3e}" for name in gradients))
 
 
 def main() -> None:
@@ -235,6 +262,7 @@ def main() -> None:
     stage2 = load_yaml_config(PROJECT_ROOT / "configs/stage2_agent.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
     kd_enabled = stage3_kd_enabled(config)
+    model_config = stage3_model_config(model_config, config)
     if (tuple(stage1["dataset"]["camera_names"]) != tuple(model_config["camera_names"])
             or len(model_config["camera_names"]) != 8
             or int(model_config["architecture_version"]) != QUEST_ARCHITECTURE_VERSION):
@@ -281,7 +309,8 @@ def main() -> None:
           f"train_frames={len(indices)} map_queries={query_count} "
           f"stage2_checkpoint={stage2_path} dinov2={backbone_path}")
     print(f"trainable_modules={stage3_trainable_modules(config['train'])} "
-          f"map_objective={config['map'].get('objective_version', 'legacy_v1')}")
+          f"map_objective={config['map'].get('objective_version', 'legacy_v1')} "
+          f"map_architecture={(config.get('map_architecture') or {}).get('version', 'legacy_instance_v1')}")
     if args.preflight_only:
         eval_indices = [row["index"] for row in manifest["validation"]["frames"]]
         eval_dataset = build_dataset(model_config, config, stage1, audit, eval_indices, audited_provenance)
@@ -306,6 +335,19 @@ def main() -> None:
     raster_head = (MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"])).to(device)
                    if kd_enabled else None)
     optimizer = configure_stage3(model, raster_head, config["train"])
+    total_steps = epochs * len(loader)
+    warmup = int(config["train"].get("warmup_steps", 0))
+    minimum = float(config["train"].get("min_lr_ratio", 1.0))
+    if warmup < 0 or not 0 < minimum <= 1:
+        raise ValueError("invalid learning-rate warmup/min_lr_ratio")
+
+    def lr_factor(step):
+        if step < warmup:
+            return max(1e-3, (step + 1) / max(warmup, 1))
+        progress = min(1.0, (step - warmup) / max(total_steps - warmup, 1))
+        return minimum + (1 - minimum) * (1 + math.cos(math.pi * progress)) / 2
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     effective = {**config, "agent_train": stage2["train"], "agent_loss": stage2["agent_loss"],
                  "map_loss": config["map"], "effective_num_samples": len(dataset),
                  "effective_epochs": epochs, "effective_map_query_count": query_count,
@@ -313,10 +355,12 @@ def main() -> None:
     if config["train"].get("freeze_agent_and_bev", False):
         effective["agent_baseline_sha256"] = frozen_agent_fingerprint(model)
     print("optimizer_groups=" + str([(group["lr"], len(group["params"])) for group in optimizer.param_groups]))
+    print("parameters=" + str(model.parameter_summary()))
     for epoch in range(1, epochs + 1):
-        train_one_epoch(model, raster_head, loader, optimizer, device, effective, audit, epoch)
+        train_one_epoch(model, raster_head, loader, optimizer, device, effective, audit, epoch, scheduler)
         save_stage3_checkpoint(
-            output_path, model, raster_head, optimizer, epoch, effective, audit, vector_provenance
+            output_path, model, raster_head, optimizer, epoch, effective, audit, vector_provenance,
+            scheduler=scheduler,
         )
         if effective.get("agent_baseline_sha256"):
             print("frozen_shared_BEV_and_Agent=UNCHANGED")

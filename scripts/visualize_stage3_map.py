@@ -13,7 +13,7 @@ from quest.agent_training import load_checkpoint_cpu
 from quest.map_teacher import MapRasterDistillHead
 from quest.map_training import (VECTOR_PROVENANCE_KEYS, denormalize_points,
                                 load_stage3_checkpoint, load_vector_capacity_audit,
-                                stage3_forward, stage3_kd_enabled)
+                                stage3_forward, stage3_kd_enabled, stage3_model_config)
 from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3, load_teacher_audit
 from quest.stage3_split import load_stage3_split
@@ -35,9 +35,11 @@ def main() -> None:
     import numpy as np
 
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
+    checkpoint = load_checkpoint_cpu(resolve(args.checkpoint or config["paths"]["checkpoint_path"]))
     kd_enabled = stage3_kd_enabled(config)
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
+    model_config = stage3_model_config(model_config, config, checkpoint)
     from scripts.run_navformer_openscene_teacher import load_infos
     metadata_path = resolve(stage1["dataset"]["metadata_path"])
     manifest = load_stage3_split(resolve(config["paths"]["split_manifest_path"]),
@@ -52,7 +54,6 @@ def main() -> None:
     model = QUESTModel(**model_config)
     raster_head = (MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
                    if kd_enabled else None)
-    checkpoint = load_checkpoint_cpu(resolve(args.checkpoint or config["paths"]["checkpoint_path"]))
     if checkpoint.get("training_config", {}).get("stage3_split_sha256") != manifest["split_sha256"]:
         raise ValueError("visualization checkpoint was trained for a different Stage 3 split")
     if kd_enabled:

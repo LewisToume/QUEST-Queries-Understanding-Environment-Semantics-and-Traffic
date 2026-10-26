@@ -10,6 +10,7 @@ from .bev import BEVEncoder
 from .geometry import GeometryAwareBEVLift
 from .heads import AgentHead, AgentProposalHead, DepthHead, MapHead, SegHead
 from .queries import AgentDecoder, MapDecoder
+from .spatial_map import SPATIAL_MAP_VERSION, MapSpatialBranch, SpatialMapDecoder, SpatialMapHead
 from .utils import load_yaml_config, project_root
 
 
@@ -58,6 +59,7 @@ class QUESTModel(nn.Module):
         D_box: int = 8,
         C_map: int = 4,
         P: int = 20,
+        map_architecture: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
         if architecture_version != QUEST_ARCHITECTURE_VERSION:
@@ -107,18 +109,23 @@ class QUESTModel(nn.Module):
             ffn_dim=decoder_ffn_dim,
             dropout=dropout,
         )
-        self.map_decoder = MapDecoder(
-            hidden_dim=hidden_dim,
-            num_queries=N_map,
-            num_layers=map_decoder_layers,
-            num_heads=decoder_attention_heads,
-            ffn_dim=decoder_ffn_dim,
-            dropout=dropout,
-        )
+        self.map_architecture = dict(map_architecture) if map_architecture is not None else None
+        self.map_spatial = None
+        if self.map_architecture is not None:
+            if self.map_architecture.get("version") != SPATIAL_MAP_VERSION or C_map != 3 or P != 20:
+                raise ValueError("unsupported spatial Map architecture/taxonomy")
+            self.map_spatial = MapSpatialBranch(hidden_dim, self.map_architecture, x_range, y_range, z_anchors)
+            self.map_decoder = SpatialMapDecoder(hidden_dim, N_map, P, self.map_architecture)
+        else:
+            self.map_decoder = MapDecoder(
+                hidden_dim=hidden_dim, num_queries=N_map, num_layers=map_decoder_layers,
+                num_heads=decoder_attention_heads, ffn_dim=decoder_ffn_dim, dropout=dropout,
+            )
         self.seg_head = SegHead(self.backbone.hidden_dim, C_seg, seg_size)
         self.depth_head = DepthHead(self.backbone.hidden_dim, depth_size)
         self.agent_head = AgentHead(hidden_dim, C_agent, D_box)
-        self.map_head = MapHead(hidden_dim, C_map, P)
+        self.map_head = (SpatialMapHead(hidden_dim, C_map, int(self.map_architecture["decoder_layers"]))
+                         if self.map_architecture is not None else MapHead(hidden_dim, C_map, P))
         self.register_buffer(
             "proposal_cell_centers",
             self._make_cell_centers(bev_h, bev_w),
@@ -264,6 +271,22 @@ class QUESTModel(nn.Module):
             "encoded_bev_std": bev_tokens.std(dim=(1, 2)),
         }
 
+    def forward_map(self, encoded: Mapping, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
+                    ego_state: torch.Tensor, image_size: tuple[int, int], *,
+                    include_dense: bool = True) -> Dict[str, torch.Tensor]:
+        if self.map_spatial is not None:
+            spatial = self.map_spatial(encoded["backbone_feature_maps"], encoded["bev_features"],
+                                       intrinsics, extrinsics, ego_state, image_size,
+                                       include_dense=include_dense)
+            result = self.map_decoder(spatial["pyramid"], self.map_head)
+            if include_dense:
+                result["map_dense_gt_logits"] = spatial["dense_logits"]
+            return result
+        layers = [self.map_head(query) for query in self.map_decoder.forward_layers(encoded["bev_tokens"])]
+        return {"map_cls_logits_layers": torch.stack([layer[0] for layer in layers]),
+                "map_points_layers": torch.stack([layer[1] for layer in layers]),
+                "map_cls_logits": layers[-1][0], "map_points": layers[-1][1]}
+
     def forward(
         self,
         images: torch.Tensor,
@@ -273,8 +296,8 @@ class QUESTModel(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         encoded = self.encode_image(images, intrinsics, extrinsics, ego_state)
         output = self.forward_agent(encoded["bev_tokens"], encoded["bev_features"])
-        map_queries = self.map_decoder(encoded["bev_tokens"])
-        map_cls, map_points = self.map_head(map_queries)
+        output.update(self.forward_map(encoded, intrinsics, extrinsics, ego_state,
+                                       tuple(images.shape[-2:]), include_dense=self.training))
         output.update(
             {
                 "seg_logits": self.seg_head(
@@ -283,8 +306,6 @@ class QUESTModel(nn.Module):
                 "depth": self.depth_head(
                     encoded["backbone_patch_tokens"], encoded["patch_grid_size"]
                 ),
-                "map_cls_logits": map_cls,
-                "map_points": map_points,
                 "bev_features": encoded["bev_features"],
                 "bev_visible_ratio": encoded["bev_visible_ratio"],
                 "camera_visible_ratio": encoded["camera_visible_ratio"],

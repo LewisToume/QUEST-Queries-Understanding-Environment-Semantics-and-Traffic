@@ -16,7 +16,7 @@ from quest.map_teacher import MapRasterDistillHead, soft_map_distillation_loss
 from quest.map_training import (
     class_aware_vector_matches, denormalize_points, load_stage3_checkpoint,
     load_vector_capacity_audit,
-    stage3_forward, stage3_kd_enabled,
+    stage3_forward, stage3_kd_enabled, stage3_model_config,
 )
 from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3, load_teacher_audit
@@ -40,9 +40,12 @@ def main() -> None:
     parser.add_argument("--distance-metric", choices=("ordered", "chamfer"), default="ordered")
     args = parser.parse_args()
     config = load_yaml_config(PROJECT_ROOT / "configs/stage3_map.yaml")
+    checkpoint_path = resolve(args.checkpoint or config["paths"]["checkpoint_path"])
+    checkpoint = load_checkpoint_cpu(checkpoint_path)
     kd_enabled = stage3_kd_enabled(config)
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
+    model_config = stage3_model_config(model_config, config, checkpoint)
     from scripts.run_navformer_openscene_teacher import load_infos
     metadata_path = resolve(stage1["dataset"]["metadata_path"])
     manifest = load_stage3_split(resolve(config["paths"]["split_manifest_path"]),
@@ -75,8 +78,6 @@ def main() -> None:
     model = QUESTModel(**model_config)
     raster_head = (MapRasterDistillHead(model.hidden_dim, len(audit["teacher_channel_names_or_ids"]))
                    if kd_enabled else None)
-    checkpoint_path = resolve(args.checkpoint or config["paths"]["checkpoint_path"])
-    checkpoint = load_checkpoint_cpu(checkpoint_path)
     if checkpoint.get("training_config", {}).get("stage3_split_sha256") != manifest["split_sha256"]:
         raise ValueError("Stage 3 checkpoint was trained for a different frame-list split")
     if checkpoint.get("vector_gt_provenance") != vector_provenance:
@@ -152,6 +153,7 @@ def main() -> None:
           f"vector_GT=nuPlan map_kd={'ON' if kd_enabled else 'OFF'} split={args.split} "
           f"scope={'DIAGNOSTIC_SUBSET' if args.diagnostic else 'FULL_VALIDATION'} "
           f"custom_distance_metric={args.distance_metric} official_mAP=False")
+    print(f"map_architecture={(checkpoint.get('map_architecture') or {}).get('version', 'legacy_instance_v1')}")
     for name in MAP_CLASS_NAMES:
         item = metrics[name]
         print(f"{name} gt_count={item['gt']} prediction_count={item['predictions']}")

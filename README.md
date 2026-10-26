@@ -32,6 +32,13 @@ Stage2 is offline-only. Teacher inference and label export run separately, and
 student training reads token-aligned Navformer Agent labels from
 `data/soft_labels_navformer`.
 
+Stage 3 now uses an independent trainable 64x64 Map BEV and six-layer spatial
+instance/point decoder, with metric vector loss and dense supervision from real
+nuPlan vector GT. The original 32x32 BEV/Agent stays frozen. The Stage 3 config
+overrides only the Map architecture; the base Stage 1/2 model remains compatible.
+See [Stage 3 spatial Map](docs/stage3_spatial_map.md) for references, loss details,
+checkpoint versioning and server-only validation commands. Map teacher KD is off.
+
 Stage 1 BEV pretraining can first supervise the Geometry lift and BEV encoder
 directly from rasterized Navformer vehicle/pedestrian centers:
 

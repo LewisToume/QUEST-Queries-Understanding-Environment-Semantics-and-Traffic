@@ -15,7 +15,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from quest.agent_training import load_checkpoint_cpu
 from quest.map_diagnostics import evenly_spaced_indices, frame_geometry_stats, oracle_check
-from quest.map_training import denormalize_points, load_stage3_checkpoint, load_vector_capacity_audit, stage3_forward
+from quest.map_training import (denormalize_points, load_stage3_checkpoint,
+                               load_vector_capacity_audit, stage3_forward, stage3_model_config)
 from quest.model import QUESTModel
 from quest.stage3_dataset import collate_stage3
 from quest.stage3_split import load_stage3_split
@@ -107,6 +108,7 @@ def main():
     stage1 = load_yaml_config(PROJECT_ROOT / "configs/stage1.yaml")
     model_config = load_yaml_config(PROJECT_ROOT / "configs/model.yaml")["model"]
     checkpoint = load_checkpoint_cpu(resolve(args.checkpoint))
+    model_config = stage3_model_config(model_config, config, checkpoint)
     if checkpoint.get("map_kd_enabled", checkpoint.get("stage") == "map_hybrid_distillation"):
         raise ValueError("this diagnostic currently supports GT-only checkpoints")
     config["stage"] = "map_gt_agent"

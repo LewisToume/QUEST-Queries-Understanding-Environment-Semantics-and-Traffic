@@ -1,5 +1,9 @@
 # Stage 3 geometry review and recovery
 
+Historical recovery experiment. The current default is documented in
+[stage3_spatial_map.md](stage3_spatial_map.md); the architecture and output path
+below describe the earlier controlled run, not the latest training defaults.
+
 ## Evidence and primary sources
 
 The first server run completed 5000 frames x 5 epochs. On 120 held-out frames,
