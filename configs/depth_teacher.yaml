@@ -1,0 +1,21 @@
+# Adaptation/export only. This config does not enable any student training.
+teacher:
+  name: Metric3Dv2
+  model: metric3d_vit_large
+  repo_path: third_party/Metric3D
+  checkpoint_path: weights/teachers/metric3d/metric_depth_vit_large_800k.pth
+  input_size: [616, 1064]
+  canonical_focal_px: 1000.0
+dataset:
+  metadata_path: data/openscene/meta_datas/meta_data_mini.pkl
+  camera_root: data/openscene/sensor_blobs_mini
+  image_size: [252, 448]
+  # Never infer image rectification status from distortion coefficient count.
+  image_geometry: unverified
+  geometry_evidence: ""
+export:
+  output_dir: data/soft_labels_depth_metric3d_v1
+  audit_dir: data/diagnostics/depth_metric3d_v1
+  min_depth_m: 0.1
+  max_depth_m: 200.0
+  overlap_stride: 8
