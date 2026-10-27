@@ -1,6 +1,6 @@
 """Shared trainable image pyramid for joint dense/spatial student development.
 
-This component is not enabled in legacy QUEST V3 or its training/checkpoint path.
+Enabled only by the versioned dense_frontend profile; legacy V3 stays unchanged.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ class SharedDensePerception(nn.Module):
         self.bev_adapter = nn.Conv2d(channels, hidden_dim, 1)
         self.bev_gate = nn.Parameter(torch.tensor(0.1))
 
-    def forward(self, feature_levels, intrinsics, image_size):
+    def forward(self, feature_levels, intrinsics, image_size, *, include_spatial=True):
         if len(feature_levels) != 4 or feature_levels[-1].ndim != 5:
             raise ValueError("Need four normalized DINO maps [B,N_camera,C,H_patch,W_patch]")
         batch, cameras, hidden, patch_h, patch_w = feature_levels[-1].shape
@@ -84,13 +84,13 @@ class SharedDensePerception(nn.Module):
         conditioned = dense * (1 + 0.1 * scale.tanh()[..., None, None]) + shift[..., None, None]
         depth = F.interpolate(F.softplus(self.depth_decoder(conditioned)) + self.min_depth_m,
                               self.output_size, mode="bilinear", align_corners=False)
-        residual = self.bev_adapter(F.interpolate(dense, (patch_h, patch_w), mode="bilinear", align_corners=False))
-        # Small but nonzero gate permits shared-neck gradients from spatial tasks.
-        spatial = feature_levels[-1] + (0.1 * self.bev_gate.tanh() * residual).reshape(
-            batch, cameras, hidden, patch_h, patch_w)
-        return {
+        result = {
             "seg_logits": seg.reshape(batch, cameras, 19, *self.output_size),
             "depth": depth.reshape(batch, cameras, 1, *self.output_size),
-            "image_feature_maps": spatial,
             "image_pyramid": tuple(value.reshape(batch, cameras, self.channels, *value.shape[-2:]) for value in pyramid),
         }
+        if include_spatial:
+            residual = self.bev_adapter(F.interpolate(dense, (patch_h, patch_w), mode="bilinear", align_corners=False))
+            result["image_feature_maps"] = feature_levels[-1] + (0.1 * self.bev_gate.tanh() * residual).reshape(
+                batch, cameras, hidden, patch_h, patch_w)
+        return result

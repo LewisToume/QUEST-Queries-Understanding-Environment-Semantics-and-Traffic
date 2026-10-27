@@ -100,6 +100,13 @@ def prepare_metric3d_input(rgb: np.ndarray, intrinsic: np.ndarray,
     return image.unsqueeze(0), metadata
 
 
+def native_depth_valid_mask(prediction: torch.Tensor, ceiling_m: float = 200.0) -> torch.Tensor:
+    """Exclude invalid and saturated canonical outputs BEFORE focal rescaling."""
+    if not np.isfinite(ceiling_m) or ceiling_m <= 0:
+        raise ValueError("Canonical depth ceiling must be finite and positive")
+    return torch.isfinite(prediction) & (prediction > 0) & (prediction < ceiling_m - 1e-3)
+
+
 def restore_metric_depth(prediction: torch.Tensor, resize: Mapping[str, Any]) -> np.ndarray:
     if prediction.ndim != 4 or tuple(prediction.shape[:2]) != (1, 1):
         raise ValueError(f"Unexpected Metric3D depth shape {tuple(prediction.shape)}; expected [1,1,H,W]")

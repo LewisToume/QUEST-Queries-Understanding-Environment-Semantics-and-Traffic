@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 from quest.depth_teacher import (  # noqa: E402
     DEPTH_ALIGNMENT_VERSION, DEPTH_SCHEMA_VERSION, IMAGE_GEOMETRIES,
     cross_view_audit, depth_to_original_pixels, prepare_metric3d_input,
-    rectified_teacher_image, resize_depth_label, restore_metric_depth,
+    rectified_teacher_image, resize_depth_label, restore_metric_depth, native_depth_valid_mask,
     scale_intrinsic, sensor_to_lidar, validate_depth_record,
     validate_image_geometry, validate_intrinsic,
 )
@@ -107,8 +107,13 @@ def teacher_dependency_blockers(versions):
     return blockers
 
 
-def inference_policy(geometry, evidence, diagnostic_only):
-    """An unverified geometry hypothesis is permitted only for non-training diagnostics."""
+def inference_policy(geometry, evidence, diagnostic_only, candidate_labels=False):
+    """Never promote image-plane candidate supervision to verified geometry."""
+    if candidate_labels:
+        if diagnostic_only or geometry not in IMAGE_GEOMETRIES[1:]:
+            raise ValueError("Candidate export needs explicit image geometry and cannot be diagnostic-only")
+        return {"write_labels": True, "blocker": None,
+                "evidence": f"EXPERIMENTAL_IMAGE_PLANE_ONLY:{geometry}; NOT_CALIBRATION_APPROVAL"}
     if diagnostic_only:
         if geometry not in IMAGE_GEOMETRIES[1:]:
             raise ValueError("Diagnostic inference requires an explicit --image-geometry hypothesis")
@@ -204,6 +209,11 @@ def infer_frame(model, cameras, teacher, settings, geometry, device):
         if not isinstance(native, (tuple, list)) or len(native) != 3:
             raise ValueError("Metric3D inference must return depth, confidence, output_dict")
         metric = restore_metric_depth(native[0], resize)
+        # A clipped canonical maximum is not a measured far surface. Require
+        # fully valid interpolation support before remapping to original pixels.
+        native_valid = native_depth_valid_mask(native[0], float(teacher["canonical_depth_ceiling_m"]))
+        coverage = restore_metric_depth(native_valid.float(), resize) / resize["metric_scale"]
+        image_valid &= coverage >= 1.0 - 1e-6
         image_valid &= (np.isfinite(metric) & (metric >= settings["min_depth_m"])
                         & (metric <= settings["max_depth_m"]))
         metric, mask = depth_to_original_pixels(
@@ -244,9 +254,13 @@ def main():
                         help="CPU original/undistortion comparison; no teacher, labels, or geometry approval")
     parser.add_argument("--diagnostic-only", action="store_true",
                         help="Real teacher inference with an unverified geometry hypothesis; PNG/JSON only, never training .pt")
+    parser.add_argument("--export-candidate-labels", action="store_true",
+                        help="Explicit experimental image-plane pseudo labels; NOT geometry-approved depth/BEV supervision")
     args = parser.parse_args()
     if sum((args.preflight_only, args.geometry_preview_only, args.diagnostic_only)) > 1:
         parser.error("Choose only one of preflight, geometry preview or diagnostic inference")
+    if args.export_candidate_labels and (args.geometry_preview_only or args.diagnostic_only):
+        parser.error("Candidate label export cannot be combined with preview/diagnostic-only")
     if args.indices is not None and (args.sample_index != 0 or args.num_frames != 1):
         parser.error("--indices cannot be combined with --sample-index/--num-frames")
     with args.config.open(encoding="utf-8") as handle:
@@ -259,12 +273,16 @@ def main():
     if args.geometry_preview_only:
         geometry = "unverified"
     evidence = args.geometry_evidence or dataset.get("geometry_evidence", "")
-    policy = inference_policy(geometry, evidence, args.diagnostic_only)
+    policy = inference_policy(geometry, evidence, args.diagnostic_only, args.export_candidate_labels)
     evidence = policy["evidence"]
-    output_dir = local_path(args.output_dir or settings["output_dir"])
+    default_output = ("data/soft_labels_depth_metric3d_v1_candidate"
+                      if args.export_candidate_labels else settings["output_dir"])
+    output_dir = local_path(args.output_dir or default_output)
     audit_dir = local_path(args.audit_dir or settings["audit_dir"])
     if args.diagnostic_only:
         audit_dir = audit_dir / f"diagnostic_{geometry}"
+    elif args.export_candidate_labels:
+        audit_dir = audit_dir / f"candidate_{geometry}"
     metadata_path, camera_root = local_path(dataset["metadata_path"]), local_path(dataset["camera_root"])
     if tuple(dataset["image_size"]) != (252, 448):
         raise ValueError("Current QUEST input is [H,W]=[252,448]; do not silently change label geometry")
@@ -285,7 +303,8 @@ def main():
         raise ValueError("Unverified diagnostic inference is limited to at most 3 frames; no bulk unaudited export")
     repo, checkpoint, teacher_config = teacher_assets(teacher)
     if (tuple(teacher["input_size"]) != (616, 1064)
-            or teacher["canonical_focal_px"] != 1000.0):
+            or teacher["canonical_focal_px"] != 1000.0
+            or teacher.get("canonical_depth_ceiling_m") != 200.0):
         raise ValueError("ViT-L adapter requires official [616,1064] input and canonical focal 1000")
     blockers = []
     if policy["blocker"]:
@@ -345,6 +364,10 @@ def main():
                   "hubconf_sha256": file_sha256(repo / "hubconf.py"),
                   "teacher_config_sha256": file_sha256(teacher_config),
                   "checkpoint_sha256": checkpoint_hash, "input_size": teacher["input_size"],
+                  "adapter_sha256": file_sha256(Path(__file__)),
+                  "geometry_adapter_sha256": file_sha256(ROOT / "quest/depth_teacher.py"),
+                  "canonical_depth_ceiling_m": teacher["canonical_depth_ceiling_m"],
+                  "native_saturation_excluded": True,
                   "canonical_focal_px": teacher["canonical_focal_px"], "geometry_evidence": evidence,
                   "versions": versions, "checkpoint_load": "strict", "diagnostic_only": args.diagnostic_only}
     model = build_teacher(repo, checkpoint, device)
@@ -369,6 +392,9 @@ def main():
         distortions = [camera["distortion"] for camera in cameras]
         record = {"schema_version": DEPTH_SCHEMA_VERSION, "alignment_version": DEPTH_ALIGNMENT_VERSION,
                   "adaptation_verified": False,
+                  "training_label_scope": ("image_plane_candidate" if args.export_candidate_labels
+                                           else "diagnostic_only" if args.diagnostic_only else "verified_geometry"),
+                  "geometry_verified": bool(policy["write_labels"] and not args.export_candidate_labels),
                   "token": str(info["token"]), "source_index": index, "scene_token": str(info["scene_token"]),
                   "timestamp": float(info["timestamp"]), "metadata_sha256": metadata_hash,
                   "split_sha256": manifest["split_sha256"] if manifest else None,
@@ -386,7 +412,8 @@ def main():
                                     transforms, distortions, names, geometry, settings["overlap_stride"])
         audit = {"token": record["token"], "source_index": index, "stats": stats, "cross_view": overlaps,
                  "provenance": provenance, "ground_truth_depth_accuracy": "UNVERIFIED",
-                 "image_geometry": geometry, "geometry_verified": False,
+                 "image_geometry": geometry, "geometry_verified": record["geometry_verified"],
+                 "training_label_scope": record["training_label_scope"],
                  "training_label_export_enabled": policy["write_labels"],
                  "notes": ["Cross-view disagreement includes occlusion, moving objects, sampling and timestamp offsets",
                            "Per-camera timestamp offsets are not audited; exact sensor synchronization unverified",

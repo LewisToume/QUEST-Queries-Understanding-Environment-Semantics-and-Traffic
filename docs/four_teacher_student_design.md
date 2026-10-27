@@ -119,17 +119,22 @@ coefficients or an undistortion preview cannot approve calibration.
 ```
 
 This is the proposed destination, NOT current `QUESTModel.forward`.
-`quest/dense_perception.py` now implements the shared image-pyramid/dense-head
-component and a differentiable feature output for spatial branches. The optional
-`FrozenDINOv2Backbone.forward_intermediates()` supplies normalized intermediate
-tokens. These are NOT yet wired into legacy V3 training/checkpoints; doing so
-requires a separately versioned integration and gradient/checkpoint validation.
+`quest/dense_perception.py` implements the shared image-pyramid/dense-head
+component. `QUESTModel` now connects its four-layer DINO features to the actual
+Seg/Depth outputs under a separately versioned `dense_frontend` profile, with
+offline target joins, losses, optimizer, checkpoint and held-out evaluation.
+See [training instructions](seg_depth_training.md). Initially the existing
+Agent/Map receive unchanged final DINO features and stay frozen, not the neck's
+BEV residual. Thus all four outputs coexist in ONE model, but this is not yet
+joint four-task optimization or a depth-guided BEV lift. Those remain separate
+experiments requiring regression checks and verified geometry.
 DINO
 intermediate blocks have different semantic depths at the SAME 18x32 resolution;
 they are not a native MiT pyramid. A trainable neck constructs scales, but
 upsampling cannot restore image detail lost at 252x448/patch14. Record this
 capacity limit rather than promising teacher accuracy from a small fixed input.
-Dense outputs should remain rectangular, e.g. 252x448, not the current 64x64.
+The new dense profile outputs rectangular 252x448; legacy defaults stay 64x64
+only to keep old checkpoints/training entry points intact.
 
 Choose BEV resolution from metric precision and measured memory, not a fixed
 32x32 rule or target parameter count. Fine BEV and a lower-resolution Agent

@@ -8,6 +8,7 @@ import torch.nn as nn
 from .backbone import FrozenDINOv2Backbone
 from .bev import BEVEncoder
 from .geometry import GeometryAwareBEVLift
+from .dense_perception import SHARED_IMAGE_FRONTEND_VERSION, SharedDensePerception
 from .heads import AgentHead, AgentProposalHead, DepthHead, MapHead, SegHead
 from .queries import AgentDecoder, MapDecoder
 from .spatial_map import SPATIAL_MAP_VERSION, MapSpatialBranch, SpatialMapDecoder, SpatialMapHead
@@ -60,6 +61,7 @@ class QUESTModel(nn.Module):
         C_map: int = 4,
         P: int = 20,
         map_architecture: Mapping[str, Any] | None = None,
+        dense_frontend: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
         if architecture_version != QUEST_ARCHITECTURE_VERSION:
@@ -72,6 +74,14 @@ class QUESTModel(nn.Module):
             raise ValueError("N_agent cannot exceed the number of BEV cells")
         self.architecture_version = architecture_version
         self.hidden_dim = hidden_dim
+        self.dense_frontend_config = dict(dense_frontend) if dense_frontend is not None else None
+        if self.dense_frontend_config is not None:
+            settings = self.dense_frontend_config
+            if (settings.get("version") != SHARED_IMAGE_FRONTEND_VERSION
+                    or settings.get("preserve_spatial_features") is not True
+                    or C_seg != 19 or tuple(seg_size) != tuple(settings["output_size"])
+                    or tuple(depth_size) != tuple(settings["output_size"])):
+                raise ValueError("Dense profile requires Cityscapes19, rectangular output and preserved Agent/Map features")
         self.camera_names = tuple(camera_names)
         self.num_cameras = len(self.camera_names)
         self.bev_h = int(bev_h)
@@ -121,8 +131,12 @@ class QUESTModel(nn.Module):
                 hidden_dim=hidden_dim, num_queries=N_map, num_layers=map_decoder_layers,
                 num_heads=decoder_attention_heads, ffn_dim=decoder_ffn_dim, dropout=dropout,
             )
-        self.seg_head = SegHead(self.backbone.hidden_dim, C_seg, seg_size)
-        self.depth_head = DepthHead(self.backbone.hidden_dim, depth_size)
+        self.seg_head = SegHead(self.backbone.hidden_dim, C_seg, seg_size) if dense_frontend is None else None
+        self.depth_head = DepthHead(self.backbone.hidden_dim, depth_size) if dense_frontend is None else None
+        self.dense_frontend = (SharedDensePerception(
+            hidden_dim=hidden_dim, channels=int(dense_frontend["channels"]), num_classes=C_seg,
+            output_size=tuple(dense_frontend["output_size"]), min_depth_m=float(dense_frontend["min_depth_m"]),
+        ) if dense_frontend is not None else None)
         self.agent_head = AgentHead(hidden_dim, C_agent, D_box)
         self.map_head = (SpatialMapHead(hidden_dim, C_map, int(self.map_architecture["decoder_layers"]))
                          if self.map_architecture is not None else MapHead(hidden_dim, C_map, P))
@@ -227,8 +241,36 @@ class QUESTModel(nn.Module):
         if ego_state.shape != (batch_size, 9):
             raise ValueError(f"invalid ego_state shape: {tuple(ego_state.shape)}")
 
+        features = self.extract_camera_features(images)
+        camera_features = features["backbone_feature_maps"]
+        lifted_tokens, lift_diagnostics = self.geometry_lift(
+            camera_features, intrinsics, extrinsics, ego_state,
+            image_size=(height, width), return_diagnostics=True, use_ego_state=use_ego_state,
+        )
+        bev_tokens, bev_features = self.bev_encoder(lifted_tokens)
+        return {
+            **features,
+            "lifted_bev_tokens": lifted_tokens, "bev_tokens": bev_tokens, "bev_features": bev_features,
+            "bev_visible_ratio": lift_diagnostics["bev_visible_ratio"],
+            "camera_visible_ratio": lift_diagnostics["camera_visible_ratio"],
+            "lifted_bev_std": lifted_tokens.std(dim=(1, 2)),
+            "encoded_bev_std": bev_tokens.std(dim=(1, 2)),
+        }
+
+    def extract_camera_features(self, images: torch.Tensor) -> dict:
+        if images.ndim != 5:
+            raise ValueError("images must be [B,N_camera,3,H,W]")
+        batch_size, num_cameras, channels, height, width = images.shape
+        if (num_cameras != self.num_cameras or channels != 3 or min(images.shape) <= 0
+                or height % self.backbone.patch_size or width % self.backbone.patch_size):
+            raise ValueError("Invalid camera count/RGB/patch-aligned image size")
         flat_images = images.reshape(batch_size * num_cameras, channels, height, width)
-        backbone_output = self.backbone(flat_images)
+        levels = None
+        if self.dense_frontend is not None:
+            backbone_output, levels = self.backbone.forward_intermediates(
+                flat_images, tuple(self.dense_frontend_config["layer_indices"]))
+        else:
+            backbone_output = self.backbone(flat_images)
         patch_grid_size = (
             height // self.backbone.patch_size,
             width // self.backbone.patch_size,
@@ -248,28 +290,25 @@ class QUESTModel(nn.Module):
             patch_grid_size[0],
             patch_grid_size[1],
         )
-        lifted_tokens, lift_diagnostics = self.geometry_lift(
-            camera_features,
-            intrinsics,
-            extrinsics,
-            ego_state,
-            image_size=(height, width),
-            return_diagnostics=True,
-            use_ego_state=use_ego_state,
-        )
-        bev_tokens, bev_features = self.bev_encoder(lifted_tokens)
-        return {
+        result = {
             "backbone_patch_tokens": patch_tokens,
             "backbone_feature_maps": camera_features,
             "patch_grid_size": patch_grid_size,
-            "lifted_bev_tokens": lifted_tokens,
-            "bev_tokens": bev_tokens,
-            "bev_features": bev_features,
-            "bev_visible_ratio": lift_diagnostics["bev_visible_ratio"],
-            "camera_visible_ratio": lift_diagnostics["camera_visible_ratio"],
-            "lifted_bev_std": lifted_tokens.std(dim=(1, 2)),
-            "encoded_bev_std": bev_tokens.std(dim=(1, 2)),
         }
+        if levels is not None:
+            result["dense_feature_levels"] = tuple(
+                value[:, 1:, :].transpose(1, 2).reshape(batch_size, num_cameras, self.hidden_dim, *patch_grid_size)
+                for value in levels)
+        return result
+
+    def forward_dense(self, images: torch.Tensor, intrinsics: torch.Tensor) -> dict:
+        if self.dense_frontend is None:
+            raise ValueError("Seg/Depth training requires the versioned dense_frontend profile")
+        return self._decode_dense(self.extract_camera_features(images), intrinsics, tuple(images.shape[-2:]))
+
+    def _decode_dense(self, features: Mapping, intrinsics: torch.Tensor, image_size: tuple[int, int]) -> dict:
+        dense = self.dense_frontend(features["dense_feature_levels"], intrinsics, image_size, include_spatial=False)
+        return {"seg_logits": dense["seg_logits"], "depth": dense["depth"]}
 
     def forward_map(self, encoded: Mapping, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
                     ego_state: torch.Tensor, image_size: tuple[int, int], *,
@@ -294,25 +333,29 @@ class QUESTModel(nn.Module):
         extrinsics: torch.Tensor | None = None,
         ego_state: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor]:
-        encoded = self.encode_image(images, intrinsics, extrinsics, ego_state)
+        encoded = self.encode_image(images, intrinsics, extrinsics, ego_state,
+                                    use_ego_state=False if self.dense_frontend is not None else True)
         output = self.forward_agent(encoded["bev_tokens"], encoded["bev_features"])
         output.update(self.forward_map(encoded, intrinsics, extrinsics, ego_state,
                                        tuple(images.shape[-2:]), include_dense=self.training))
-        output.update(
-            {
+        if self.dense_frontend is not None:
+            output.update(self._decode_dense(encoded, intrinsics, tuple(images.shape[-2:])))
+        else:
+            output.update({
                 "seg_logits": self.seg_head(
                     encoded["backbone_patch_tokens"], encoded["patch_grid_size"]
                 ),
                 "depth": self.depth_head(
                     encoded["backbone_patch_tokens"], encoded["patch_grid_size"]
                 ),
+            })
+        output.update({
                 "bev_features": encoded["bev_features"],
                 "bev_visible_ratio": encoded["bev_visible_ratio"],
                 "camera_visible_ratio": encoded["camera_visible_ratio"],
                 "lifted_bev_std": encoded["lifted_bev_std"],
                 "encoded_bev_std": encoded["encoded_bev_std"],
-            }
-        )
+            })
         return output
 
 
@@ -324,6 +367,8 @@ def load_quest_v3_checkpoint(model: QUESTModel, checkpoint: Mapping[str, Any]) -
             f"expected architecture_version={QUEST_ARCHITECTURE_VERSION}, got {version}"
         )
     state_dict = checkpoint.get("model_state_dict")
+    if checkpoint.get("dense_frontend") != getattr(model, "dense_frontend_config", None):
+        raise ValueError("Dense front-end profile mismatch; use explicit spatial warm-start, not automatic conversion")
     if not isinstance(state_dict, Mapping):
         raise ValueError("QUEST V3 checkpoint must contain model_state_dict")
     return model.load_state_dict(state_dict)

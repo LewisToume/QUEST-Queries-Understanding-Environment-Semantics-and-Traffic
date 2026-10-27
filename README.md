@@ -7,14 +7,17 @@ The central requirement is ONE student learning all four tasks from specialists
 and/or real GT, with shared trainable representations and task-specific decoders.
 BEV is their spatial representation, not a fifth teacher task. See the
 [four-teacher design and readiness audit](docs/four_teacher_student_design.md).
-The four teachers/heads are not all validated or connected to training; their
-presence must not be presented as a completed multi-task model.
+The versioned Seg/Depth profile now has dataset, losses, training, evaluation and
+checkpoint integration. Its runtime and accuracy still require server validation;
+implemented code is not evidence of a fully trained multi-task model.
 
 Active supervision is Navformer Agent + real nuPlan Vector Map GT + SegFormer
 semantics + Metric3Dv2 depth. MapTRv2 is a structure reference, not a required
 teacher checkpoint; unreliable Navformer raster-map KD remains disabled.
 See [dense teacher export](docs/dense_teacher_export.md) for asset preparation
 and the eight-view semantic export entry point.
+See [Seg/Depth student training](docs/seg_depth_training.md) for the runnable
+dense training path, preserving the existing Agent/Map checkpoint.
 
 ## Model
 

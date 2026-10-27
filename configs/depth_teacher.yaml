@@ -6,6 +6,7 @@ teacher:
   checkpoint_path: weights/teachers/metric3d/metric_depth_vit_large_800k.pth
   input_size: [616, 1064]
   canonical_focal_px: 1000.0
+  canonical_depth_ceiling_m: 200.0  # Official ViT-L canonical prediction ceiling, before focal rescaling.
 dataset:
   metadata_path: data/openscene/meta_datas/meta_data_mini.pkl
   camera_root: data/openscene/sensor_blobs_mini

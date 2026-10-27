@@ -98,7 +98,7 @@ files are never overwritten; final PT files publish atomically. Nonfinite native
 logits, class/config mismatches or missing teacher parameters fail rather than
 producing random targets. Labels do not alter original JPEGs or metadata.
 
-## Shared Student Component: Implemented But Not Activated
+## Integrated Dense Student Profile
 
 `quest/dense_perception.py::SharedDensePerception` fuses four normalized DINO
 intermediate layers (same patch grid) into constructed scales and exposes:
@@ -111,16 +111,18 @@ image_pyramid      four constructed, trainable image scales
 ```
 
 Depth receives normalized focal/principal-point features, never absolute ego
-position. Seg and depth update the shared neck; spatial tasks can backpropagate
-through its nonzero-gated BEV feature adapter. Shape/gradient test SOURCES are
-included but were NOT run. No depth accuracy is established by positive values.
+position. Seg/Depth update the shared neck and their task heads in
+`scripts/train_seg_depth.py`. `QUESTModel.forward` emits Agent, Vector Map,
+Cityscapes19 Seg and positive metric Depth under the saved dense profile.
+`forward_dense` avoids running frozen spatial branches during dense training.
+Agent/Map still receive the unmodified final DINO features; the optional BEV
+adapter is frozen and unused in this phase. Existing checkpoints are preserved,
+not silently converted or overwritten. New full-model checkpoints contain
+explicit frontend/version, labels/split hashes, geometry policy and optimizer.
+See [training commands and safety gates](seg_depth_training.md).
 
-This is not yet wired into `QUESTModel`, legacy Stage 2/3 optimizers or
-checkpoint schemas. Their trained behavior remains unchanged. A separately
-versioned joint integration must connect it to the actual lift/Agent/Map, add
-target loading/losses/optimizer/checkpoint handling, and validate Agent regression.
-The component alone is NOT the final depth-guided BEV architecture or a complete
-four-task training chain. It does not pretend that a resampled 18x32 grid restores
-missing high-frequency image evidence.
+This is NOT yet joint four-task optimization or a depth-guided lift. Test sources
+are included but NOT run. No actual depth accuracy is established by positivity
+or agreement with the teacher. Constructed scales cannot restore missing detail.
 
 No local Python, unit tests, forward/backward, exporters or training were run.

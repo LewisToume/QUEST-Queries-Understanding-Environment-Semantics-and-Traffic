@@ -30,6 +30,8 @@ def load_checkpoint_cpu(path: str | Path) -> Mapping[str, Any]:
 
 
 def configure_agent_training(model: nn.Module) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+    if getattr(model, "dense_frontend", None) is not None:
+        raise ValueError("Use the dense trainer/checkpoint format for a dense-front-end QUEST model")
     model.requires_grad_(False)
     for name in TRAINABLE_AGENT_MODULES:
         getattr(model, name).requires_grad_(True)

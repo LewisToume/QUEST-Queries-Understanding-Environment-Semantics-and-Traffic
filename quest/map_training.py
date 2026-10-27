@@ -451,6 +451,8 @@ def frozen_agent_fingerprint(model: nn.Module) -> str:
 
 def configure_stage3(model: nn.Module, raster_head: MapRasterDistillHead | None,
                      config: Mapping[str, Any]) -> torch.optim.Optimizer:
+    if getattr(model, "dense_frontend", None) is not None:
+        raise ValueError("Use the dense trainer/checkpoint format for a dense-front-end QUEST model")
     model.requires_grad_(False)
     if raster_head is not None:
         raster_head.requires_grad_(True)

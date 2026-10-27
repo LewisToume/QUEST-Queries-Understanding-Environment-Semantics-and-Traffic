@@ -14,7 +14,7 @@ from quest.depth_teacher import (
     DEPTH_ALIGNMENT_VERSION, DEPTH_SCHEMA_VERSION, cross_view_audit,
     depth_to_original_pixels, pixel_rays, prepare_metric3d_input,
     rectified_teacher_image, resize_depth_label, restore_metric_depth,
-    scale_intrinsic, sensor_to_lidar, validate_depth_record, validate_image_geometry,
+    scale_intrinsic, sensor_to_lidar, validate_depth_record, validate_image_geometry, native_depth_valid_mask,
 )
 from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES
 from scripts.export_metric3d_depth import (
@@ -29,6 +29,20 @@ def camera():
 
 
 class Metric3DDepthAdapterTest(unittest.TestCase):
+    def test_candidate_export_is_explicit_not_geometry_approval(self):
+        policy = inference_policy("raw_opencv", "", False, candidate_labels=True)
+        self.assertTrue(policy["write_labels"])
+        self.assertIn("EXPERIMENTAL_IMAGE_PLANE_ONLY", policy["evidence"])
+        self.assertIn("NOT_CALIBRATION_APPROVAL", policy["evidence"])
+        with self.assertRaises(ValueError):
+            inference_policy("raw_opencv", "", True, candidate_labels=True)
+        with self.assertRaises(ValueError):
+            inference_policy("unverified", "", False, candidate_labels=True)
+
+    def test_native_saturation_is_invalid_before_focal_conversion(self):
+        output = torch.tensor([0., -1., float("nan"), 20., 199., 200., 201.])
+        self.assertEqual(native_depth_valid_mask(output).tolist(), [False, False, False, True, True, False, False])
+
     def test_unverified_diagnostic_inference_never_enables_training_label_export(self):
         policy = inference_policy("raw_opencv", "", True)
         self.assertFalse(policy["write_labels"])
