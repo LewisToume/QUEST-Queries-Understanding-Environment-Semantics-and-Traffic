@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from quest.frame_selection import select_indices  # noqa: E402
+from quest.cuda_runtime import initialize_cuda_device  # noqa: E402
 from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES, resolve_openscene_camera_path  # noqa: E402
 from quest.seg_teacher import (  # noqa: E402
     CITYSCAPES_CLASSES, CITYSCAPES_PALETTE, SEG_PIXEL_ALIGNMENT, SEG_PREPROCESS_VERSION,
@@ -179,10 +180,7 @@ def main(argv=None):
     if args.preflight_only:
         print("runtime=NOT_CHECKED GPU=False outputs_written=False")
         return 0
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA required for real SegFormer inference; no fake/CPU fallback labels")
-    device = torch.device("cuda:0")
-    torch.cuda.reset_peak_memory_stats(device)
+    device = initialize_cuda_device()
     model = build_teacher(bundle, device)
     provenance = {"teacher": teacher["name"], "model_id": teacher["model_id"],
                   "checkpoint_sha256": file_sha256(weight), "config_sha256": file_sha256(bundle / "config.json"),

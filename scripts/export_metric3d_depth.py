@@ -32,6 +32,7 @@ from quest.depth_teacher import (  # noqa: E402
 from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES, resolve_openscene_camera_path  # noqa: E402
 from quest.stage3_split import file_sha256, load_stage3_split  # noqa: E402
 from quest.frame_selection import select_indices  # noqa: E402
+from quest.cuda_runtime import initialize_cuda_device  # noqa: E402
 
 
 def local_path(value):
@@ -339,10 +340,7 @@ def main():
     print("DEPTH_TEACHER_PREFLIGHT=PASS; checkpoint_contents_and_GPU_inference_not_checked")
     if args.preflight_only:
         return 0
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA unavailable; no CPU fallback or fake depth labels")
-    device = torch.device("cuda:0")
-    torch.cuda.reset_peak_memory_stats(device)
+    device = initialize_cuda_device()
     checkpoint_hash = file_sha256(checkpoint)
     revision = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                               capture_output=True, text=True, check=False)
