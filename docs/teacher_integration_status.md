@@ -10,8 +10,8 @@ required neural checkpoints. Four-task training is not yet validated.
 | Navformer UniAD Agent branch | Agent | User-reported real inference/export and Stage 2 training | Agent regression after shared-front-end changes |
 | nuPlan HD map | Vector Map | User-reported real vector GT export/audit/training | Keep schema/split/capacity validation; no neural Map teacher is required |
 | Navformer raster map branch | Optional Map KD | User-reported unreliable lane masks | DISABLED; cross-representation KD must not resume without a new audit |
-| SegFormer-B5 Cityscapes | Semantic Segmentation | Native 19-class offline export implemented; not executed locally | Server strict load/eight-view quality unverified; legacy six-class training still disabled |
-| Metric3Dv2 ViT-L | Depth | Adaptation/export code; user reports downloads | Real inference and image geometry unverified; student training not connected |
+| SegFormer-B5 Cityscapes | Semantic Segmentation | User-reported strict load and real 8-view GPU inference; received PNG/JSON for source index 0 | One-frame qualitative evidence, not measured GT accuracy; legacy six-class training still disabled |
+| Metric3Dv2 ViT-L | Depth | Native build reached checkpoint check on server; only missing encoder mask_token; narrow audited compatibility added | Rerun required; actual depth inference/image geometry unverified; student training not connected |
 
 QUEST Stage2 reads exported labels by OpenScene sample token. Online teacher
 construction is disabled in the student training process.

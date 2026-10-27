@@ -33,6 +33,7 @@ from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES, resolve_openscene_ca
 from quest.stage3_split import file_sha256, load_stage3_split  # noqa: E402
 from quest.frame_selection import select_indices  # noqa: E402
 from quest.cuda_runtime import initialize_cuda_device  # noqa: E402
+from quest.metric3d_checkpoint import load_metric3d_state  # noqa: E402
 
 
 def local_path(value):
@@ -158,12 +159,7 @@ def build_teacher(repo, checkpoint, device):
     if not isinstance(payload, Mapping) or not isinstance(payload.get("model_state_dict"), Mapping):
         raise ValueError("Expected official Metric3D checkpoint['model_state_dict']")
     state = payload["model_state_dict"]
-    missing = sorted(set(model.state_dict()) - set(state))
-    unexpected = sorted(set(state) - set(model.state_dict()))
-    print(f"checkpoint_missing_keys={missing} unexpected_keys={unexpected}")
-    if missing or unexpected:
-        raise ValueError("Incomplete/mismatched teacher weights; no random-head label export allowed")
-    model.load_state_dict(state, strict=True)
+    model.quest_checkpoint_audit = load_metric3d_state(model, state)
     del payload, state
     model.requires_grad_(False)
     return model.to(device).eval()
@@ -352,6 +348,11 @@ def main():
                   "canonical_focal_px": teacher["canonical_focal_px"], "geometry_evidence": evidence,
                   "versions": versions, "checkpoint_load": "strict", "diagnostic_only": args.diagnostic_only}
     model = build_teacher(repo, checkpoint, device)
+    provenance["checkpoint_audit"] = model.quest_checkpoint_audit
+    provenance["checkpoint_load"] = (
+        "strict_with_audited_non_inference_omission"
+        if model.quest_checkpoint_audit["omitted_non_inference_keys"] else "strict"
+    )
     print(f"teacher_model_type={type(model).__name__} device={torch.cuda.get_device_name(device)} "
           "geometry_approval=UNVERIFIED")
     if policy["write_labels"]:

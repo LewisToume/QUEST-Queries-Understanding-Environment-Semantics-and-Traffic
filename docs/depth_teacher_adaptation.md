@@ -18,6 +18,27 @@ References:
 
 ## Server Preflight
 
+### Audited Checkpoint Compatibility
+
+The user reported the official ViT-L checkpoint lacks only
+`depth_model.encoder.mask_token`. In the official
+[encoder source](https://github.com/YvanYin/Metric3D/blob/main/mono/model/backbones/ViT_DINO_reg.py),
+this parameter is read only in `prepare_tokens_with_masks` when `masks is not
+None`; ordinary [depth inference](https://github.com/YvanYin/Metric3D/blob/main/mono/model/model_pipelines/dense_pipeline.py)
+passes a single image tensor without masks. Official encoder loading also
+contains explicit deletion of this pretraining-only parameter.
+
+`quest/metric3d_checkpoint.py` handles exactly this omission. It inspects the
+server encoder source, requires the known conditional use/default and ViT-L
+token shape, removes only the unused parameter from the in-memory model, then
+loads every remaining parameter with `strict=True`. A runtime hook rejects
+masked/nested inputs. It never fills random/zero checkpoint weights, changes
+third-party files or rewrites downloaded weights. Missing other parameters,
+unexpected keys, shape mismatches or changed mask semantics still fail.
+The native source hash and exact compatibility exception enter provenance and
+logs. This compatibility code and six regression-test sources have NOT been
+executed locally; actual depth inference/geometry/accuracy remain unverified.
+
 From the QUEST root in `quest_env`, run this CPU-only, read-only command first:
 
 ```bash
