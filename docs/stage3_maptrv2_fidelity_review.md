@@ -1,5 +1,9 @@
 # Stage 3: MapTRv2 Fidelity Re-audit
 
+Operational clarification: MapTRv2 is a structure/loss reference, NOT a required
+OpenScene Map teacher checkpoint. Existing real nuPlan vector GT is the primary
+supervision; Navformer raster cross-representation KD remains disabled.
+
 ## Scope And Evidence
 
 Static review of QUEST at `6e25b03`, `spatial_map_v1`, against the MapTRv2

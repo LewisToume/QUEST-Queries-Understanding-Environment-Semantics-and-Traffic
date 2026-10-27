@@ -81,6 +81,18 @@ class FrozenDINOv2Backbone(torch.nn.Module):
             outputs = self.model(pixel_values=images)
         return outputs.last_hidden_state
 
+    def forward_intermediates(self, images: torch.Tensor, layer_indices=(3, 6, 9, 12)):
+        """Optional dense front-end entry; existing forward/checkpoints are unchanged."""
+        count = int(self.model.config.num_hidden_layers)
+        if (len(layer_indices) != 4 or len(set(layer_indices)) != 4
+                or tuple(sorted(layer_indices)) != tuple(layer_indices)
+                or any(index < 1 or index > count for index in layer_indices)):
+            raise ValueError("Require four increasing, distinct, real DINO encoder layer indices")
+        with torch.no_grad():
+            output = self.model(pixel_values=images, output_hidden_states=True)
+            levels = tuple(self.model.layernorm(output.hidden_states[index]) for index in layer_indices)
+        return output.last_hidden_state, levels
+
 
 def test_dinov2_forward() -> None:
     print("=" * 60)

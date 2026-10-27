@@ -39,28 +39,40 @@ class MultitaskTeacherInventoryTest(unittest.TestCase):
             ), "UNVERIFIED")
             self.assertEqual(report["missing"], [])
 
-    def test_roster_is_exactly_four_tasks_and_default_map_requires_centerline(self):
+    def test_roster_has_four_tasks_but_map_requires_gt_not_maptr(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            reports = inspect_teachers(root, root, root / "map.pth", root, root, root / "depth.pth")
+            reports = inspect_teachers(root, root, root, root, root / "depth.pth")
             self.assertEqual([item["task"] for item in reports], ["agent", "map", "seg", "depth"])
             map_report = reports[1]
-            self.assertIn("w_centerline.py", str(map_report["missing"]))
+            self.assertIn("stage3_split.json", str(map_report["missing"]))
+            self.assertNotIn("maptrv2", str(map_report["missing"]))
             self.assertEqual(map_report["runtime_status"], "NOT_CHECKED")
 
-    def test_three_class_profile_discloses_missing_centerline(self):
+    def test_map_gt_does_not_require_raster_or_vector_teacher_weights(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            reports = inspect_teachers(root, root, root / "map.pth", root, root, root / "depth.pth",
-                                       map_profile="three_class")
-            self.assertIn("NO centerline", reports[1]["openscene_alignment"])
-            self.assertNotIn("w_centerline.py", str(reports[1]["missing"]))
+            (root / "data/vector_map_gt").mkdir(parents=True)
+            (root / "data/stage3_split.json").write_text("{}")
+            (root / "data/vector_map_capacity_audit.json").write_text("{}")
+            reports = inspect_teachers(root, root, root, root, root / "depth.pth")
+            self.assertEqual(reports[1]["asset_status"], "FILES_PRESENT")
+            self.assertIn("raster_KD=DISABLED", reports[1]["openscene_alignment"])
+            self.assertIn("full_GT_coverage=NOT_CHECKED", reports[1]["openscene_alignment"])
 
     def test_inventory_defaults_do_not_select_a_training_action(self):
         args = parse_args([])
-        self.assertEqual(args.map_profile, "centerline")
+        self.assertFalse(hasattr(args, "map_profile"))
         self.assertFalse(args.json)
         self.assertFalse(hasattr(args, "train"))
+
+    def test_partial_depth_download_is_not_a_complete_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "depth.pth.part").write_bytes(b"partial")
+            report = inspect_teachers(root, root, root, root, root / "depth.pth")[-1]
+            self.assertEqual(report["asset_status"], "ASSETS_MISSING")
+            self.assertEqual(report["partial_download_bytes"], 7)
 
 
 if __name__ == "__main__":

@@ -27,17 +27,20 @@ teachers:
     config_path: /home/user/DataDisk/QUEST_WORK/Navformer/configs/navformer/track_map_nuplan_r50_navtrain.py
     checkpoint_path: /home/user/DataDisk/QUEST_WORK/Navformer/data/alg_engine/ckpts/track_map_nuplan_r50_navtrain_100pct_bs1x8.pth
   map:
-    name: MapTRv2
-    enabled: true
-    repo_path: third_party/MapTR
-    config_path: third_party/MapTR/projects/configs/maptrv2/maptrv2_nusc_r50_24ep.py
-    checkpoint_path: weights/teachers/maptrv2/maptrv2_nusc_r50_24ep.pth
+    name: external_offline
+    enabled: false
+    supervision_source: nuplan_vector_gt
+    # Navformer raster cross-representation KD is unavailable and stays OFF.
   seg:
     name: external_offline
     enabled: false
+    candidate: SegFormer-B5-Cityscapes19
+    export_config: configs/seg_teacher.yaml
   depth:
     name: external_offline
     enabled: false
+    candidate: Metric3Dv2-ViT-L
+    export_config: configs/depth_teacher.yaml
 loss_weights:
   seg: 1.0
   depth: 1.0

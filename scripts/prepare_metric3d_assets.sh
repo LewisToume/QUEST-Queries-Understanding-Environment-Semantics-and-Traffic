@@ -17,6 +17,10 @@ else
     printf 'Using existing repository without checkout/reset: %s\n' "$REPO"
 fi
 if [[ -e "$CHECKPOINT" ]]; then
+    if [[ ! -s "$CHECKPOINT" ]]; then
+        printf 'ERROR: existing empty checkpoint preserved; inspect manually: %s\n' "$CHECKPOINT" >&2
+        exit 1
+    fi
     printf 'Existing checkpoint preserved (contents not checked): %s\n' "$CHECKPOINT"
 else
     curl --fail --location --retry 3 --continue-at - "$URL" --output "$CHECKPOINT.part"

@@ -9,6 +9,11 @@ four output projections on a generic latent. BEV is their shared spatial
 representation, not a fifth final task or teacher. Real GT may replace or
 supplement teacher supervision when available.
 
+Corrected operational route: Agent=Navformer, Map=nuPlan Vector GT,
+Seg=SegFormer, Depth=Metric3Dv2. The earlier requirement for a MapTRv2
+centerline checkpoint was incorrect for this project. Navformer is the existing
+raster-map specialist, but its cross-representation KD is currently disabled.
+
 This is a design/readiness audit, NOT an implemented replacement model. No
 model, training, labels, environment or checkpoint is changed by this document.
 Keep eight ordered cameras F0,L0,R0,L1,R1,L2,R2,B0 (all prefixed CAM_), frozen
@@ -19,13 +24,14 @@ DINOv2-S and 252x448 student input unless explicitly versioning an experiment.
 | Task | Specialist | Evidence available | Still missing |
 | --- | --- | --- | --- |
 | Agent | Existing Navformer UniAD track+map checkpoint, Agent only | User-reported native inference, label export and Stage 2 training | Regression checks after shared-front-end changes; not full tracking distillation |
-| Map | MapTRv2; centerline-enabled variant is the coverage candidate | Official source/config/weights identified; local three-class asset exists | Native OpenScene inference, taxonomy/geometry/ROI/quality verification; no verified KD |
-| Seg | SegFormer-B5 Cityscapes, official NVIDIA release | Paper/config/19-class weights identified; local legacy source exists | Server assets/runtime, eight-view quality and 19-to-QUEST taxonomy audit; no exporter/trainer |
+| Map | nuPlan Vector GT; Navformer raster KD remains OFF | Real vector GT export/audit/training reported by user | Map student quality; no MapTR checkpoint prerequisite |
+| Seg | SegFormer-B5 Cityscapes, official NVIDIA release | Native offline exporter implemented; not executed locally | Server assets/runtime, eight-view quality and taxonomy review; no student trainer yet |
 | Depth | Existing Metric3Dv2 ViT-L choice | Adaptation/diagnostic code; user reports downloads | Actual strict load/inference and image-geometry approval; no student training |
 
-These are NOT four already validated teachers. They are not all nuScenes models:
-Agent is the existing nuPlan/OpenScene adaptation, Map weights are nuScenes,
-Seg weights Cityscapes, and Metric3Dv2 uses mixed training data. Zero-shot
+These are NOT four required neural teachers. Current supervision is three
+neural teachers plus true vector GT. MapTRv2 is an architecture/loss reference,
+NOT the operational Map teacher. Agent is the existing nuPlan/OpenScene
+adaptation, Seg weights Cityscapes, and Metric3Dv2 uses mixed training data. Zero-shot
 OpenScene quality must be measured. Local files do not establish server state.
 Navformer map masks remain disabled: observed zero lane channels are not GT.
 Direct nuPlan vector GT remains the primary map supervision.
@@ -57,18 +63,12 @@ direction and layer losses, order equivalences, and attention-isolated one-to-
 many training when budgeted. Existing point-averaging attention is not equivalent;
 see [the detailed fidelity audit](stage3_maptrv2_fidelity_review.md).
 
-Current three-class weights have divider/crossing/boundary, NO centerline.
-The [centerline config](https://github.com/hustvl/MapTR/blob/maptrv2/projects/configs/maptrv2/maptrv2_nusc_r50_24ep_w_centerline.py)
-adds teacher class 3 centerline, with four classes and 20 points. The
-[official release](https://github.com/hustvl/MapTR/tree/maptrv2) links the paired
-checkpoint with Drive ID `1m02OKAKPhzMOaSu_4STVcepY8jbE7v3o`. This is a proposed
-additional asset, NOT an automatic replacement for the existing three-class pair.
-
-Its nuScenes boundary/path-wise centerline definitions still need comparison
-with nuPlan union boundaries/lane baselines. Smaller teacher ROI and different
-cameras also limit KD coverage. Use verified class/coordinate/valid-spatial
-masks, not assumed mappings or zero targets outside the teacher ROI. Keep real
-GT and full audited query capacity; no GT truncation.
+Do not download/require a nuScenes MapTRv2 checkpoint to proceed. Its semantics
+and ROI differ from our real nuPlan labels; even a centerline-enabled variant
+would not establish same-dataset teacher coverage. Train the vector decoder
+against the existing nuPlan GT and audited query capacity. No GT truncation.
+Only revisit Navformer raster-to-vector KD after its output and alignment pass
+a new human-reviewed audit; do not treat unavailable/zero raster channels as GT.
 
 ### Seg: SegFormer-B5 Cityscapes
 
@@ -118,7 +118,13 @@ coefficients or an undistortion preview cannot approve calibration.
                                 +-> point-preserving MapTRv2 decoder -> Vector Map
 ```
 
-This is the proposed destination, NOT current `QUESTModel.forward`. DINO
+This is the proposed destination, NOT current `QUESTModel.forward`.
+`quest/dense_perception.py` now implements the shared image-pyramid/dense-head
+component and a differentiable feature output for spatial branches. The optional
+`FrozenDINOv2Backbone.forward_intermediates()` supplies normalized intermediate
+tokens. These are NOT yet wired into legacy V3 training/checkpoints; doing so
+requires a separately versioned integration and gradient/checkpoint validation.
+DINO
 intermediate blocks have different semantic depths at the SAME 18x32 resolution;
 they are not a native MiT pyramid. A trainable neck constructs scales, but
 upsampling cannot restore image detail lost at 252x448/patch14. Record this
@@ -148,8 +154,8 @@ channel projection and valid-spatial masks, not just equal tensor shapes.
 
 - Agent: existing metric canonical pseudo targets, visibility and support mask;
   preserve explicit hard-GT/hybrid options and the immutable Stage 2 baseline.
-- Map: full schema-5 nuPlan GT, permutations and Hungarian matching; MapTRv2 KD
-  optional only AFTER semantic, geometric and quality verification.
+- Map: full schema-5 nuPlan GT, permutations and Hungarian matching. Existing
+  Navformer raster KD stays disabled; MapTRv2 remains a structural reference.
 - Seg: mapped probabilities for KL and/or reviewed class IDs for CE; mandatory
   pixel/class-support masks and ignore IDs. Six-class semantics not assumed.
 - Depth: valid camera-Z teacher/real depth and correct intrinsics/pixel mapping;
@@ -181,11 +187,13 @@ Standard-library-only inventory: explicit paths, no image scan, model import,
 weight loading, download or writes. Missing files yield exit code 2.
 `FILES_PRESENT` means only nonempty files, NOT runtime/integrity/quality. All
 runtimes remain `NOT_CHECKED` and all-teacher readiness remains unverified.
-The default Map profile checks the centerline candidate. `--map-profile
-three_class` inventories old assets while disclosing their lack of centerline.
-Use path overrides for existing server locations; no automatic download occurs.
+Map inventory checks the split manifest, capacity audit and vector-label directory,
+not MapTRv2 weights or unverified raster labels. Full GT file coverage is checked
+by existing Stage 3 preflight, not by directory presence in this inventory.
+Use path overrides for existing server teacher locations; no automatic download occurs.
 
 Follow-up evidence needed: exact config/weight pairs, strict load reports,
-eight-camera outputs/overlays, image geometry approval, Seg taxonomy and Map
-native-vs-nuPlan audit. The user runs server commands. No local Python or tests
+eight-camera outputs/overlays, image geometry approval and Seg taxonomy. Map does
+not wait for another neural teacher. See [Dense Teacher Export](dense_teacher_export.md)
+for the next actual export command. The user runs server commands. No local Python or tests
 were executed, and no four-task training or completed integration is claimed.

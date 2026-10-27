@@ -10,6 +10,12 @@ BEV is their spatial representation, not a fifth teacher task. See the
 The four teachers/heads are not all validated or connected to training; their
 presence must not be presented as a completed multi-task model.
 
+Active supervision is Navformer Agent + real nuPlan Vector Map GT + SegFormer
+semantics + Metric3Dv2 depth. MapTRv2 is a structure reference, not a required
+teacher checkpoint; unreliable Navformer raster-map KD remains disabled.
+See [dense teacher export](docs/dense_teacher_export.md) for asset preparation
+and the eight-view semantic export entry point.
+
 ## Model
 
 ```text

@@ -1,0 +1,15 @@
+# Offline teacher export only. Does not enable the old six-class student head.
+teacher:
+  name: SegFormer-B5
+  model_id: nvidia/segformer-b5-finetuned-cityscapes-1024-1024
+  local_dir: weights/teachers/segformer_cityscapes_b5
+  native_classes: 19
+dataset:
+  metadata_path: data/openscene/meta_datas/meta_data_mini.pkl
+  camera_root: data/openscene/sensor_blobs_mini
+  image_size: [252, 448]
+export:
+  output_dir: data/soft_labels_segformer_cityscapes19_v1
+  audit_dir: data/diagnostics/segformer_cityscapes19_v1
+  save_probabilities: false  # Optional full soft targets cost about 34 MiB/frame.
+  log_interval: 10

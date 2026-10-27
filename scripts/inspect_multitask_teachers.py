@@ -1,4 +1,4 @@
-"""Read-only four-teacher asset inventory, not an inference/readiness certificate."""
+"""Inventory active supervision: Navformer Agent, nuPlan Vector GT, Seg and Depth."""
 
 import argparse
 import json
@@ -33,49 +33,43 @@ def inspect_files(task, teacher, required_groups, alignment):
     }
 
 
-def inspect_teachers(navformer_root, maptr_root, maptr_checkpoint,
-                     segformer_dir, metric3d_root, metric3d_checkpoint,
-                     map_profile="centerline"):
-    if map_profile not in ("centerline", "three_class"):
-        raise ValueError("unknown MapTRv2 profile")
-    config_name = (
-        "maptrv2_nusc_r50_24ep_w_centerline.py"
-        if map_profile == "centerline" else "maptrv2_nusc_r50_24ep.py"
-    )
-    return [
+def inspect_teachers(root, navformer_root, segformer_dir, metric3d_root, metric3d_checkpoint):
+    vector_dir = root / "data/vector_map_gt"
+    map_report = inspect_files("map", "nuPlan Vector GT (NOT a neural teacher)", (
+        (root / "data/stage3_split.json",),
+        (root / "data/vector_map_capacity_audit.json",),
+    ), "MapTRv2=STRUCTURE_REFERENCE_ONLY; raster_KD=DISABLED; full_GT_coverage=NOT_CHECKED")
+    if not vector_dir.is_dir():
+        map_report["missing"].append([str(vector_dir) + " (directory)"])
+        map_report["asset_status"] = "ASSETS_MISSING"
+    reports = [
         inspect_files("agent", "Navformer UniAD track+map", (
             (navformer_root / "mmdet3d_plugin/__init__.py",),
             (navformer_root / "configs/navformer/track_map_nuplan_r50_navtrain.py",),
             (navformer_root / "data/alg_engine/ckpts/track_map_nuplan_r50_navtrain_100pct_bs1x8.pth",),
         ), "USER_REPORTED_AGENT_VALIDATION; current files/runtime not revalidated"),
-        inspect_files("map", "MapTRv2 " + map_profile, (
-            (maptr_root / "projects/mmdet3d_plugin/maptr/detectors/maptrv2.py",),
-            (maptr_root / "projects/configs/maptrv2" / config_name,),
-            (maptr_checkpoint,),
-        ), "UNVERIFIED; " + (
-            "centerline checkpoint still requires nuPlan semantic/ROI audit"
-            if map_profile == "centerline" else "three-class model has NO centerline"
-        )),
+        map_report,
         inspect_files("seg", "SegFormer-B5 Cityscapes (HF bundle)", (
             (segformer_dir / "config.json",),
             (segformer_dir / "preprocessor_config.json",),
             (segformer_dir / "model.safetensors", segformer_dir / "pytorch_model.bin"),
-        ), "UNVERIFIED; 19 teacher classes, QUEST mapping not implemented"),
+        ), "UNVERIFIED; native Cityscapes19 export only; not legacy QUEST C_seg=6"),
         inspect_files("depth", "Metric3Dv2 ViT-L", (
             (metric3d_root / "hubconf.py",),
             (metric3d_root / "mono/configs/HourglassDecoder/vit.raft5.large.py",),
             (metric3d_checkpoint,),
         ), "UNVERIFIED; image geometry and real inference evidence required"),
     ]
+    partial = metric3d_checkpoint.with_name(metric3d_checkpoint.name + ".part")
+    if nonempty_file(partial):
+        reports[-1]["partial_download_bytes"] = partial.stat().st_size
+    return reports
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--navformer-root", type=Path, default=NAVFORMER_ROOT)
-    parser.add_argument("--maptr-root", type=Path)
-    parser.add_argument("--maptr-checkpoint", type=Path)
-    parser.add_argument("--map-profile", choices=("centerline", "three_class"), default="centerline")
     parser.add_argument("--segformer-dir", type=Path)
     parser.add_argument("--metric3d-root", type=Path)
     parser.add_argument("--metric3d-checkpoint", type=Path)
@@ -86,22 +80,16 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     root = args.root.resolve()
-    map_name = (
-        "maptrv2_nusc_r50_24ep_w_centerline.pth"
-        if args.map_profile == "centerline" else "maptrv2_nusc_r50_24ep.pth"
-    )
     reports = inspect_teachers(
-        args.navformer_root, args.maptr_root or root / "third_party/MapTR",
-        args.maptr_checkpoint or root / "weights/teachers/maptrv2" / map_name,
+        root, args.navformer_root,
         args.segformer_dir or root / "weights/teachers/segformer_cityscapes_b5",
         args.metric3d_root or root / "third_party/Metric3D",
         args.metric3d_checkpoint or root / "weights/teachers/metric3d/metric_depth_vit_large_800k.pth",
-        args.map_profile,
     )
     if args.json:
         print(json.dumps({
             "read_only": True, "model_loaded": False, "gpu_used": False,
-            "teachers": reports, "all_teachers_ready": "NOT_VERIFIED",
+            "supervision_sources": reports, "all_four_tasks_ready": "NOT_VERIFIED",
         }, indent=2))
     else:
         print("READ_ONLY=True model_load=False GPU=False directory_scan=False")
@@ -109,8 +97,10 @@ def main(argv=None):
             print("{task}: {teacher} assets={asset_status} runtime={runtime_status}".format(**report))
             for alternatives in report["missing"]:
                 print("  MISSING " + " OR ".join(alternatives))
+            if "partial_download_bytes" in report:
+                print("  resumable_partial_bytes=" + str(report["partial_download_bytes"]))
             print("  alignment=" + report["openscene_alignment"])
-        print("ALL_TEACHERS_READY=NOT_VERIFIED; existence is not checkpoint/inference/quality verification")
+        print("ALL_FOUR_TASKS_READY=NOT_VERIFIED; Map uses GT, not a required MapTRv2 checkpoint")
     return 0 if all(report["asset_status"] == "FILES_PRESENT" for report in reports) else 2
 
 
