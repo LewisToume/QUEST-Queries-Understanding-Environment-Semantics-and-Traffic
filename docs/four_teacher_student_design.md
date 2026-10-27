@@ -1,0 +1,191 @@
+# QUEST: Four-Teacher Student Design Contract
+
+## Project Requirement
+
+The user reaffirmed this requirement on 2026-10-27: ONE deployed QUEST student
+must jointly provide Agent, Vector Map, per-camera Semantic Segmentation and
+metric Depth. Preserve the useful mechanisms of the four specialists, not just
+four output projections on a generic latent. BEV is their shared spatial
+representation, not a fifth final task or teacher. Real GT may replace or
+supplement teacher supervision when available.
+
+This is a design/readiness audit, NOT an implemented replacement model. No
+model, training, labels, environment or checkpoint is changed by this document.
+Keep eight ordered cameras F0,L0,R0,L1,R1,L2,R2,B0 (all prefixed CAM_), frozen
+DINOv2-S and 252x448 student input unless explicitly versioning an experiment.
+
+## Four Teachers And Actual Evidence
+
+| Task | Specialist | Evidence available | Still missing |
+| --- | --- | --- | --- |
+| Agent | Existing Navformer UniAD track+map checkpoint, Agent only | User-reported native inference, label export and Stage 2 training | Regression checks after shared-front-end changes; not full tracking distillation |
+| Map | MapTRv2; centerline-enabled variant is the coverage candidate | Official source/config/weights identified; local three-class asset exists | Native OpenScene inference, taxonomy/geometry/ROI/quality verification; no verified KD |
+| Seg | SegFormer-B5 Cityscapes, official NVIDIA release | Paper/config/19-class weights identified; local legacy source exists | Server assets/runtime, eight-view quality and 19-to-QUEST taxonomy audit; no exporter/trainer |
+| Depth | Existing Metric3Dv2 ViT-L choice | Adaptation/diagnostic code; user reports downloads | Actual strict load/inference and image-geometry approval; no student training |
+
+These are NOT four already validated teachers. They are not all nuScenes models:
+Agent is the existing nuPlan/OpenScene adaptation, Map weights are nuScenes,
+Seg weights Cityscapes, and Metric3Dv2 uses mixed training data. Zero-shot
+OpenScene quality must be measured. Local files do not establish server state.
+Navformer map masks remain disabled: observed zero lane channels are not GT.
+Direct nuPlan vector GT remains the primary map supervision.
+
+## Teacher Mechanisms To Preserve
+
+### Agent: Navformer UniAD
+
+The [native config](https://github.com/OpenDriveLab/Navformer/blob/main/configs/navformer/track_map_nuplan_r50_navtrain.py)
+uses R50/FPN, 200x200 BEV, six BEVFormer encoder layers with spatial/temporal
+attention, and six reference-refining detection decoder layers. Track queries
+carry memory. Its classification is sigmoid focal, regression L1, assignment
+Hungarian. QUEST should retain image-conditioned object queries, local spatial
+sampling, reference refinement and layer supervision.
+
+Existing Agent V3 predicts current-frame boxes/velocity; it is not a reproduction
+of track memory. Track IDs/temporal features cannot be claimed from current box
+files. Keep vehicle/pedestrian support [true,true,false,false], visible targets,
+and the working Agent loss. It need not adopt the Map classifier to share BEV.
+
+### Map: MapTRv2
+
+The [paper](https://arxiv.org/html/2308.05736v2) and
+[decoder source](https://github.com/hustvl/MapTR/blob/maptrv2/projects/mmdet3d_plugin/maptr/modules/decoder.py)
+use depth-aware image-to-BEV lift, instance-plus-point queries, point-preserving
+inter/intra-instance attention, deformable sampling and iterative point
+refinement. Preserve classification/matching normalization, ordered point L1,
+direction and layer losses, order equivalences, and attention-isolated one-to-
+many training when budgeted. Existing point-averaging attention is not equivalent;
+see [the detailed fidelity audit](stage3_maptrv2_fidelity_review.md).
+
+Current three-class weights have divider/crossing/boundary, NO centerline.
+The [centerline config](https://github.com/hustvl/MapTR/blob/maptrv2/projects/configs/maptrv2/maptrv2_nusc_r50_24ep_w_centerline.py)
+adds teacher class 3 centerline, with four classes and 20 points. The
+[official release](https://github.com/hustvl/MapTR/tree/maptrv2) links the paired
+checkpoint with Drive ID `1m02OKAKPhzMOaSu_4STVcepY8jbE7v3o`. This is a proposed
+additional asset, NOT an automatic replacement for the existing three-class pair.
+
+Its nuScenes boundary/path-wise centerline definitions still need comparison
+with nuPlan union boundaries/lane baselines. Smaller teacher ROI and different
+cameras also limit KD coverage. Use verified class/coordinate/valid-spatial
+masks, not assumed mappings or zero targets outside the teacher ROI. Keep real
+GT and full audited query capacity; no GT truncation.
+
+### Seg: SegFormer-B5 Cityscapes
+
+[SegFormer](https://arxiv.org/html/2105.15203v3) combines a hierarchical MiT
+encoder and an MLP decoder fusing four scales. The light decoder depends on that
+multi-scale encoder. A single last-layer DINO feature plus a few convolutions is
+not equivalent. The [B5 config](https://github.com/NVlabs/SegFormer/blob/master/local_configs/segformer/B5/segformer.b5.1024x1024.city.160k.py)
+uses 19 classes and CE; its [test pipeline](https://github.com/NVlabs/SegFormer/blob/master/local_configs/_base_/datasets/cityscapes_1024x1024_repeat.py)
+preserves aspect ratio, with sliding-window inference defined by the B5 config.
+
+Weights: [nvidia/segformer-b5-finetuned-cityscapes-1024-1024](https://huggingface.co/nvidia/segformer-b5-finetuned-cityscapes-1024-1024).
+This is a loading candidate without requiring legacy training dependencies, not
+proof its default processor reproduces the original sliding-window protocol.
+Declare/audit preprocessing. Preserve 19 native IDs in raw exports until mapping
+is reviewed. Current `C_seg=6` lacks a complete canonical taxonomy: never feed
+native IDs into it or silently merge unknown classes into background.
+
+### Depth: Metric3Dv2 ViT-L
+
+[Metric3Dv2](https://arxiv.org/html/2404.15506v2) uses canonical camera focal
+normalization, DPT-style dense decoding and recurrent depth/normal refinement.
+The [selected config](https://github.com/YvanYin/Metric3D/blob/main/mono/configs/HourglassDecoder/vit.raft5.large.py)
+uses canonical focal 1000 and 616x1064 input. Reuse our existing strict adapter
+and [official ViT-L weights](https://huggingface.co/JUGGHM/Metric3D).
+
+The student needs intrinsic-conditioned metric geometry and multi-level dense
+decoding, not just an unconditioned positive scalar head. Camera-Z meters, valid
+metric/log-depth residuals and edge/gradient supervision are proposed student
+objectives, not a claim to reproduce all teacher losses. Scale-invariant loss
+alone cannot establish metric scale. Normal refinement is a mechanism reference,
+not a fifth requested output. Image geometry must still be verified; distortion
+coefficients or an undistortion preview cannot approve calibration.
+
+## Proposed Unified Architecture
+
+```text
+8 RGB views + calibration
+  -> ONE frozen DINOv2-S, selected intermediate block outputs
+  -> shared TRAINABLE image neck / dense feature pyramid
+       |-> multi-level semantic decoder -> per-camera Segmentation
+       |-> intrinsic-conditioned depth/refinement -> per-camera metric Depth
+       |                              |
+       |      features + learned depth distribution + calibrated camera rays
+       |                              v
+       +-------------------> shared fine-metric BEV pyramid
+                                |-> object proposal/query decoder -> Agent
+                                +-> point-preserving MapTRv2 decoder -> Vector Map
+```
+
+This is the proposed destination, NOT current `QUESTModel.forward`. DINO
+intermediate blocks have different semantic depths at the SAME 18x32 resolution;
+they are not a native MiT pyramid. A trainable neck constructs scales, but
+upsampling cannot restore image detail lost at 252x448/patch14. Record this
+capacity limit rather than promising teacher accuracy from a small fixed input.
+Dense outputs should remain rectangular, e.g. 252x448, not the current 64x64.
+
+Choose BEV resolution from metric precision and measured memory, not a fixed
+32x32 rule or target parameter count. Fine BEV and a lower-resolution Agent
+view can coexist. Use sparse/window attention, not full quadratic self-attention
+over 200x200 tokens. A new depth/ray lift with learned refinement requires a
+versioned implementation and memory validation; this audit enables neither.
+
+Depth used for lifting MUST receive depth supervision and Agent/Map gradients
+through a differentiable path. A disconnected output head, hard argmax, detached
+depth or disconnected neck does not supply this. Seg/Depth gradients should
+reach the shared trainable neck; DINO remains frozen. Per-task adapters remain
+available to reduce conflicting updates. BEV must not become the forced
+bottleneck for fine image-plane boundaries.
+
+Do not merge incompatible teacher parameter tensors or deploy four full teacher
+encoders. Distill predictions, aligned features or relations through student
+adapters. ResNet256, MiT and ViT-L tensors are not interchangeable with
+DINO-S384. Teacher BEV feature matching additionally requires frame/ROI/axes,
+channel projection and valid-spatial masks, not just equal tensor shapes.
+
+## Supervision And Acceptance Contract
+
+- Agent: existing metric canonical pseudo targets, visibility and support mask;
+  preserve explicit hard-GT/hybrid options and the immutable Stage 2 baseline.
+- Map: full schema-5 nuPlan GT, permutations and Hungarian matching; MapTRv2 KD
+  optional only AFTER semantic, geometric and quality verification.
+- Seg: mapped probabilities for KL and/or reviewed class IDs for CE; mandatory
+  pixel/class-support masks and ignore IDs. Six-class semantics not assumed.
+- Depth: valid camera-Z teacher/real depth and correct intrinsics/pixel mapping;
+  invalid pixels are unavailable, not zero-distance background.
+- BEV: direct geometry/task gradients; optional aligned teacher feature loss is
+  not enabled by tensor shape equality or by this document.
+- Four tasks share raw source index, token, ordered cameras, split hash,
+  augmentation transforms and provenance. Never train on held-out labels.
+- Normalize losses on valid targets; log per-task gradient RMS on shared neck
+  and BEV. Loss magnitude alone does not measure useful shared learning.
+- Validate ALL four outputs and Agent regression jointly. New neck/lift/head
+  contracts require checkpoint versioning and explicit warm-start reports, not
+  unexplained `strict=False` missing keys.
+- Before another full run: eight-view teacher/geometry evidence, tiny per-task
+  fit, real/zero/shuffled dependency, then held-out multi-task metrics. One-frame
+  memorization does not establish usable generalization.
+
+[LFG](https://lfg-ai.github.io/) supports the principle of unified outputs under
+specialist supervision, not arbitrary weight merging. Its temporal reconstruction
+tasks differ from QUEST object/vector-map outputs. QUEST is not its reproduction.
+
+## Next Server Evidence: No GPU
+
+```bash
+python scripts/inspect_multitask_teachers.py
+```
+
+Standard-library-only inventory: explicit paths, no image scan, model import,
+weight loading, download or writes. Missing files yield exit code 2.
+`FILES_PRESENT` means only nonempty files, NOT runtime/integrity/quality. All
+runtimes remain `NOT_CHECKED` and all-teacher readiness remains unverified.
+The default Map profile checks the centerline candidate. `--map-profile
+three_class` inventories old assets while disclosing their lack of centerline.
+Use path overrides for existing server locations; no automatic download occurs.
+
+Follow-up evidence needed: exact config/weight pairs, strict load reports,
+eight-camera outputs/overlays, image geometry approval, Seg taxonomy and Map
+native-vs-nuPlan audit. The user runs server commands. No local Python or tests
+were executed, and no four-task training or completed integration is claimed.

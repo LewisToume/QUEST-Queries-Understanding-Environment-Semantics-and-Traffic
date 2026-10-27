@@ -3,6 +3,13 @@
 QUEST V3 is an 8-camera geometry-aware perception model with shared BEV latent and four
 outputs: Semantic Segmentation, Depth, Agent, Vector Map.
 
+The central requirement is ONE student learning all four tasks from specialists
+and/or real GT, with shared trainable representations and task-specific decoders.
+BEV is their spatial representation, not a fifth teacher task. See the
+[four-teacher design and readiness audit](docs/four_teacher_student_design.md).
+The four teachers/heads are not all validated or connected to training; their
+presence must not be presented as a completed multi-task model.
+
 ## Model
 
 ```text
