@@ -120,6 +120,36 @@ Depth output is then explicitly untrained in checkpoint task metadata.
 CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_seg_depth.py --checkpoint checkpoints/quest_seg_depth_experimental_v1.pt
 ```
 
+Evaluation now also saves `data/diagnostics/seg_depth_review_v1/report.json` and
+up to three validation-frame previews (prefer one per scene). Seg shows RGB,
+teacher, Student, disagreement; Depth shows RGB, teacher, Student, relative
+error. Depth panels use a common evaluation mask and fixed log color scale,
+never independent per-image scaling. Black areas are excluded, not correct
+predictions. No geometric projection, teacher rerun or label change is performed.
+Use `--output-dir <new-empty-directory>` for a repeat or `--preview-frames 0`
+to skip PNGs. Existing reports/previews are not overwritten.
+
+Console output stays bounded: existing summary, 19-class IoU/precision/recall,
+depth camera-Z bins and per-scene scores. JSON additionally contains the full
+teacher-row/Student-column confusion matrix, per-camera scores, signed depth
+bias, scale ratio, pixel-mask counts, original frame indices/tokens and hashes.
+Bins use teacher Z: [0.1,10), [10,20), [20,30), [30,40), [40,50), [50,80] by
+default. Empty bins/classes have null metrics, not zero-error or perfect scores.
+The original global metric definitions and 0.1-80m/sky exclusion are unchanged.
+
+User-reported first held-out result (120 frames, 3 scenes): Seg teacher pixel
+accuracy 0.901887, mIoU 0.419609; Depth teacher AbsRel 0.153423, RMSE 7.082613m,
+delta1 0.779979. These establish teacher agreement only. No structural/loss
+change is justified by these aggregate values alone. The new diagnostic code
+and tests have NOT been run locally.
+
+No additional dataset is needed for this diagnostic. To measure true depth
+accuracy later, provide a small synchronized LiDAR subset with timestamps,
+format/units and LiDAR-to-camera calibration, plus verified JPEG geometry.
+Sparse LiDAR must use visibility/z-buffer handling; object box centers, OCC
+centers and map lines are not surface-depth GT. True semantic accuracy needs
+human-labeled pixels (including ignore IDs), rather than another teacher score.
+
 Dense checkpoints include full model + optimizer/scheduler/epoch, model/profile
 config, trained tasks and Agent support mask, label/manifest hashes, source
 checkpoint hash, geometry policy and frozen-spatial checksum. Existing V3
@@ -144,3 +174,9 @@ python -m unittest discover -s tests -p 'test_seg_depth_training.py' -v
 Also run existing `test_shared_dense_perception.py`, `test_metric3d_depth_adapter.py`
 and `test_cuda_runtime.py` in their appropriate environments. Test success is
 not a substitute for the real one-frame GPU check above.
+
+New diagnostic test sources (not executed locally):
+
+```bash
+python -m unittest discover -s tests -p 'test_seg_depth_diagnostics.py' -v
+```
