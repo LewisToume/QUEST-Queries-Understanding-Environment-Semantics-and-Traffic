@@ -1,5 +1,9 @@
 # QUEST: Four-Teacher Student Design Contract
 
+For the code-versus-teacher mechanism audit and parameter breakdown, see
+[Seg/Depth fidelity review](seg_depth_teacher_fidelity_review.md). The active
+dense profile is a lightweight baseline, not a faithful teacher reconstruction.
+
 ## Project Requirement
 
 The user reaffirmed this requirement on 2026-10-27: ONE deployed QUEST student
@@ -82,9 +86,9 @@ preserves aspect ratio, with sliding-window inference defined by the B5 config.
 Weights: [nvidia/segformer-b5-finetuned-cityscapes-1024-1024](https://huggingface.co/nvidia/segformer-b5-finetuned-cityscapes-1024-1024).
 This is a loading candidate without requiring legacy training dependencies, not
 proof its default processor reproduces the original sliding-window protocol.
-Declare/audit preprocessing. Preserve 19 native IDs in raw exports until mapping
-is reviewed. Current `C_seg=6` lacks a complete canonical taxonomy: never feed
-native IDs into it or silently merge unknown classes into background.
+Declare/audit preprocessing. The active dense profile preserves native19 IDs;
+`C_seg=6` is only the legacy default. Never feed native IDs into that legacy
+head or silently merge unknown classes into background.
 
 ### Depth: Metric3Dv2 ViT-L
 
