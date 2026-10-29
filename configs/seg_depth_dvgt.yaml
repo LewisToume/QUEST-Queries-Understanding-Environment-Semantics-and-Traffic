@@ -1,0 +1,44 @@
+# Depth-only experiment: no Cityscapes Seg labels required or silently reused.
+# Use only AFTER native DVGT inference and pixel/metric diagnostics are reviewed.
+stage: seg_depth_offline
+tasks: [depth]
+frontend:
+  version: shared_image_pyramid_v1
+  preserve_spatial_features: true
+  layer_indices: [3, 6, 9, 12]
+  channels: 128
+  output_size: [252, 448]
+  min_depth_m: 0.1
+train:
+  num_samples: 5000
+  epochs: 5
+  batch_size: 1
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  gradient_clip_norm: 1.0
+  num_workers: 0
+  log_interval: 100
+  seed: 42
+  missing_labels: error
+loss:
+  weights:
+    seg_ce: 0.0
+    depth_log: 1.0
+    depth_relative: 0.5
+    depth_gradient: 0.5
+  depth:
+    min_depth_m: 0.1
+    max_depth_m: 80.0
+    exclude_sky: false  # No approved same-domain Seg teacher; validity is NOT sky detection.
+paths:
+  model_config: configs/model.yaml
+  dataset_config: configs/stage1.yaml
+  stage3_config: configs/stage3_map.yaml
+  init_checkpoint: checkpoints/quest_stage3_map_spatial_v1.pt
+  split_manifest: data/stage3_split.json
+  capacity_audit: data/vector_map_capacity_audit.json
+  seg_labels: data/soft_labels_seg_unavailable
+  depth_labels: data/soft_labels_depth_dvgt1_v1_verified
+  candidate_depth_labels: data/soft_labels_depth_dvgt1_v1_candidate
+  checkpoint: checkpoints/quest_depth_dvgt1_verified_v1.pt
+  experimental_checkpoint: checkpoints/quest_depth_dvgt1_experimental_v1.pt

@@ -19,7 +19,8 @@ OpenScene training/validation evidence. See the superseding
 Retain Agent=Navformer and Map=nuPlan Vector GT. SegFormer Cityscapes and
 Metric3Dv2 are OUT-OF-DOMAIN / UNQUALIFIED-DOMAIN experiment controls, not formal
 teachers satisfying this requirement. DVGT-1 is the new domain-supported Depth
-candidate, not yet integrated. A same-domain camera-Seg checkpoint is unresolved.
+candidate: [native adapter implemented, server validation pending](dvgt_depth_teacher.md).
+A same-domain camera-Seg checkpoint is unresolved.
 Navformer raster KD remains disabled. Four qualified neural teachers are not
 ready; real map GT is not a neural teacher.
 

@@ -1,0 +1,28 @@
+# Native teacher only; never changes the QUEST Student or existing experiments.
+teacher:
+  name: DVGT-1
+  repo_path: third_party/DVGT
+  repo_revision: 51cf3f6d11fdff8bc7e2bbe1a88f71665ccb2236
+  dinov3_revision: 6876159a11b4df116f30f667f8c9888617df0751
+  checkpoint_path: weights/teachers/dvgt1/dvgt1.pt
+  checkpoint_sha256: 8e1ab60f901cffc3316fa0a09f24ddcf6b90d0221cf7bfea64664c6f83cc1e22
+  checkpoint_bytes: 6929346337
+  gt_scale_factor: 0.1
+  context_frames: 2
+  timestamp_scale: 1.0e-6  # OpenScene metadata microseconds -> seconds.
+  max_gap_s: 1.1
+  decoder_chunk_frames: 1
+dataset:
+  metadata_path: data/openscene/meta_datas/meta_data_mini.pkl
+  camera_root: data/openscene/sensor_blobs_mini
+  image_size: [252, 448]
+  image_geometry: unverified
+export:
+  output_dir: data/soft_labels_depth_dvgt1_v1_candidate
+  audit_dir: data/diagnostics/depth_dvgt1_v1
+  min_depth_m: 0.1
+  max_depth_m: 80.0
+  confidence_min: 0.0  # Uncalibrated score, NOT a probability threshold.
+  max_reprojection_px: 8.0  # Explicit consistency mask, not an accuracy claim.
+  log_interval: 25
+  preview_frames: 3

@@ -1,4 +1,4 @@
-"""Metric3Dv2 adaptation, without importing QUEST models or training modules."""
+"""Camera-Z depth utilities and Metric3Dv2 adapter; no QUEST model imports."""
 
 from __future__ import annotations
 
@@ -242,11 +242,17 @@ def cross_view_audit(depth: np.ndarray, valid: np.ndarray, intrinsics: np.ndarra
 
 def validate_depth_record(record: Mapping[str, Any], token: str, source_index: int,
                            camera_names: tuple[str, ...]) -> None:
-    if (record.get("schema_version") != DEPTH_SCHEMA_VERSION
-            or record.get("alignment_version") != DEPTH_ALIGNMENT_VERSION):
+    metric3d = (record.get("schema_version") == DEPTH_SCHEMA_VERSION
+                and record.get("alignment_version") == DEPTH_ALIGNMENT_VERSION)
+    dvgt = (record.get("schema_version") == 2
+            and record.get("alignment_version") == "dvgt1_first_ego_rdf_to_camera_z_original_pixels_v1")
+    if not (metric3d or dvgt):
         raise ValueError("Unsupported depth label schema/alignment version")
     if record.get("token") != token or record.get("source_index") != source_index:
         raise ValueError("Depth label original-index/token mismatch")
+    if dvgt:
+        from .dvgt_depth import validate_dvgt_provenance
+        validate_dvgt_provenance(record)
     if tuple(record.get("camera_names", ())) != tuple(camera_names):
         raise ValueError("Depth label camera order mismatch")
     if record.get("adaptation_verified") is not False:

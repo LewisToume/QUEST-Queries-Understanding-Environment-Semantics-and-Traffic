@@ -12,7 +12,7 @@ Four ready domain-qualified neural teachers are NOT available in this checkout.
 | Navformer UniAD Agent branch | Agent | User-reported nuPlan checkpoint inference/export and Stage 2 training | RETAIN; Agent regression after shared-front-end changes |
 | nuPlan HD map | Vector Map | User-reported real vector GT export/audit/training | RETAIN AS GT, not a neural teacher; preserve schema/split/capacity checks |
 | Navformer raster map branch | Optional Map KD | Same-domain checkpoint, unreliable lane masks observed | DISABLED FOR QUALITY; no silent reactivation |
-| DVGT-1 | Depth / geometry candidate | Author OpenScene training/evaluation configs and public dvgt1.pt listing verified online | DOMAIN CANDIDATE ONLY; no download/load/inference/conversion tested |
+| DVGT-1 | Depth / geometry candidate | Author OpenScene configs/public checkpoint hash verified online; native exporter and Dataset schema implemented | SERVER UNTESTED; strict load, axis/scale/pixel conversion and actual accuracy still require validation |
 | ViGT | Backup geometry candidate | Author paper/README includes nuPlan and publishes weight link | No checkpoint-content/load/rendering check; not camera Seg |
 | No selected same-domain camera-Seg checkpoint | Semantic Segmentation | Search did not verify a reusable qualifying release | BLOCKED; BEV segmentation does not satisfy camera-Seg |
 | SegFormer-B5 Cityscapes | Out-of-domain Seg control | User-reported export, Student training and 120-frame pseudo-agreement | NOT FORMAL: Cityscapes weights, no independent nuPlan semantic GT validation |
@@ -46,3 +46,10 @@ Depth adaptation uses `configs/depth_teacher.yaml` and
 `scripts/export_metric3d_depth.py`. It does not enable the legacy Stage2 Depth
 task or modify Agent/Map training. See [Depth Teacher Adaptation](depth_teacher_adaptation.md)
 for the geometry gate, canonical labels, provenance and server-only validation.
+
+The new same-domain route uses `configs/depth_teacher_dvgt.yaml`,
+`scripts/export_dvgt_depth.py` and schema 2, not the old Metric3D schema 1.
+[DVGT server guide](dvgt_depth_teacher.md) provides asset preparation, CPU
+preflight and one-target GPU diagnostics. Default inference writes NO training
+labels. A separate Depth-only config `configs/seg_depth_dvgt.yaml` avoids
+requiring the unqualified-domain Seg labels. No server test/training is claimed.

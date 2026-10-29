@@ -4,6 +4,11 @@ Research audit: 2026-10-29. Primary papers, author repositories and model-file
 listings were inspected. No weights were downloaded; no Python, tests,
 inference, export, installation or training was executed.
 
+Implementation follow-up: the [DVGT-1 native adapter](dvgt_depth_teacher.md) is
+now added, with a separate schema/Depth-only config. It has NOT been executed
+on the server. Candidate/readiness statements below describe research evidence,
+not a successful inference or accuracy certification.
+
 ## Admission Rule
 
 A formal specialist needs all of the following:
@@ -25,7 +30,7 @@ scenes. These are separate checks.
 | --- | --- | --- | --- |
 | Agent | Retain the existing Navformer nuPlan track checkpoint | Existing checkpoint/config and user-reported real inference/export/training | Retain vehicle/pedestrian support; no replacement |
 | Vector Map | Retain direct nuPlan vector GT | Existing real-map source and audited label pipeline | GT supervision, NOT a fourth neural teacher |
-| Depth / geometry | DVGT-1, first integration candidate | Author paper includes OpenScene training/evaluation; author repo links an actual public checkpoint | Domain-qualified candidate; NOT integrated or server-tested |
+| Depth / geometry | DVGT-1, first integration candidate | Author paper includes OpenScene training/evaluation; author repo links an actual public checkpoint | Native adapter added; NOT server-tested |
 | Camera Semantic Segmentation | No qualifying checkpoint selected | No reusable, real-nuPlan/OpenScene camera-semantic checkpoint verified in this search | BLOCKED, not silently replaced by a Cityscapes model |
 
 The project does NOT currently have four ready, domain-qualified neural
@@ -59,7 +64,7 @@ parameters. Input is `[B,T,V,3,H,W]`; native results include `points`,
 `points_conf`, `absolute_ego_pose_enc`. Points are expressed in the first-frame
 ego reference, not directly as eight camera depth maps.
 
-Integration requirements, not yet implemented:
+Integration requirements (adapter now implements these checks; runtime pending):
 
 - Pin source revision, weight hash, dataset provenance and inference contract.
   Use the official inference wrapper and strict full task-weight loading, not

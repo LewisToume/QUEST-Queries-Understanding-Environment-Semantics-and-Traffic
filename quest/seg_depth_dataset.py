@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset
 
-from .depth_teacher import scale_intrinsic, sensor_to_lidar, validate_depth_record
+from .depth_teacher import DEPTH_ALIGNMENT_VERSION, scale_intrinsic, sensor_to_lidar, validate_depth_record
 from .openscene_dataset import OPENSCENE_CAMERA_NAMES, OpenSceneMetadataDataset
 from .seg_teacher import validate_seg_record
 from .seg_depth_losses import depth_valid_mask
@@ -95,7 +95,8 @@ class SegDepthDataset(Dataset):
                 validate_depth_record(record, token, index, OPENSCENE_CAMERA_NAMES)
                 validate_depth_training_scope(record, self.experimental_depth)
                 depth = record["depth"]
-                if provenance.get("native_saturation_excluded") is not True:
+                if (record["alignment_version"] == DEPTH_ALIGNMENT_VERSION
+                        and provenance.get("native_saturation_excluded") is not True):
                     raise ValueError("Regenerate depth labels with native saturation exclusion")
                 if len(record.get("source_hw", [])) != len(OPENSCENE_CAMERA_NAMES):
                     raise ValueError("Depth source image dimensions are missing")
@@ -111,6 +112,10 @@ class SegDepthDataset(Dataset):
                 signature = (record["schema_version"], record["alignment_version"], depth["image_geometry"],
                              provenance["checkpoint_sha256"], provenance.get("adapter_sha256"),
                              provenance.get("geometry_adapter_sha256"), record["training_label_scope"])
+                if record["schema_version"] == 2:
+                    signature += (provenance.get("config_sha256"), provenance.get("repo_revision"),
+                                  provenance.get("dinov3_revision"), provenance.get("max_reprojection_px"),
+                                  provenance.get("confidence_min"), provenance.get("allow_future_context"))
                 targets[task] = depth
             previous = self.teacher_signatures.setdefault(task, signature)
             if previous != signature:
