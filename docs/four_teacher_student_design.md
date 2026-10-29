@@ -13,17 +13,26 @@ four output projections on a generic latent. BEV is their shared spatial
 representation, not a fifth final task or teacher. Real GT may replace or
 supplement teacher supervision when available.
 
-Corrected operational route: Agent=Navformer, Map=nuPlan Vector GT,
-Seg=SegFormer, Depth=Metric3Dv2. The earlier requirement for a MapTRv2
-centerline checkpoint was incorrect for this project. Navformer is the existing
-raster-map specialist, but its cross-representation KD is currently disabled.
+Formal domain requirement (2026-10-29): task checkpoints must have nuPlan or
+OpenScene training/validation evidence. See the superseding
+[teacher selection audit](nuplan_openscene_teacher_selection.md).
+Retain Agent=Navformer and Map=nuPlan Vector GT. SegFormer Cityscapes and
+Metric3Dv2 are OUT-OF-DOMAIN / UNQUALIFIED-DOMAIN experiment controls, not formal
+teachers satisfying this requirement. DVGT-1 is the new domain-supported Depth
+candidate, not yet integrated. A same-domain camera-Seg checkpoint is unresolved.
+Navformer raster KD remains disabled. Four qualified neural teachers are not
+ready; real map GT is not a neural teacher.
 
 This is a design/readiness audit, NOT an implemented replacement model. No
 model, training, labels, environment or checkpoint is changed by this document.
 Keep eight ordered cameras F0,L0,R0,L1,R1,L2,R2,B0 (all prefixed CAM_), frozen
 DINOv2-S and 252x448 student input unless explicitly versioning an experiment.
 
-## Four Teachers And Actual Evidence
+## Historical Experimental Route
+
+The table below records the earlier route, NOT current formal approval. Its
+implementation/runtime notes are historical; the current status is in
+[Teacher Integration Status](teacher_integration_status.md).
 
 | Task | Specialist | Evidence available | Still missing |
 | --- | --- | --- | --- |
@@ -32,11 +41,12 @@ DINOv2-S and 252x448 student input unless explicitly versioning an experiment.
 | Seg | SegFormer-B5 Cityscapes, official NVIDIA release | Native offline exporter implemented; not executed locally | Server assets/runtime, eight-view quality and taxonomy review; no student trainer yet |
 | Depth | Existing Metric3Dv2 ViT-L choice | Adaptation/diagnostic code; user reports downloads | Actual strict load/inference and image-geometry approval; no student training |
 
-These are NOT four required neural teachers. Current supervision is three
-neural teachers plus true vector GT. MapTRv2 is an architecture/loss reference,
-NOT the operational Map teacher. Agent is the existing nuPlan/OpenScene
-adaptation, Seg weights Cityscapes, and Metric3Dv2 uses mixed training data. Zero-shot
-OpenScene quality must be measured. Local files do not establish server state.
+This experimental route used three neural teachers plus true vector GT; it did
+not establish three domain-qualified teachers. MapTRv2 is an architecture/loss
+reference, NOT the operational Map teacher. Seg weights are Cityscapes; mixed
+generic Metric3Dv2 training is not verified nuPlan checkpoint provenance.
+Student/teacher agreement does not establish teacher accuracy. Local files do
+not establish server state.
 Navformer map masks remain disabled: observed zero lane channels are not GT.
 Direct nuPlan vector GT remains the primary map supervision.
 

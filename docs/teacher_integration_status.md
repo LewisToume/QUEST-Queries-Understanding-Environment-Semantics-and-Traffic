@@ -1,17 +1,22 @@
 # Teacher Integration Status
 
 Design contract: [Four-Teacher Student](four_teacher_student_design.md).
+Domain requirement and selection: [nuPlan/OpenScene audit](nuplan_openscene_teacher_selection.md).
 BEV is the shared spatial representation, not a fifth teacher task.
-The active route is THREE neural teachers plus real vector-map GT, NOT four
-required neural checkpoints. Four-task training is not yet validated.
+FORMAL teachers must have nuPlan/OpenScene task training/validation evidence.
+The old three-teacher experimental route does NOT meet that requirement.
+Four ready domain-qualified neural teachers are NOT available in this checkout.
 
-| Teacher | Task | Evidence | Remaining gate |
+| Source | Task | Evidence | Formal status / remaining gate |
 | --- | --- | --- | --- |
-| Navformer UniAD Agent branch | Agent | User-reported real inference/export and Stage 2 training | Agent regression after shared-front-end changes |
-| nuPlan HD map | Vector Map | User-reported real vector GT export/audit/training | Keep schema/split/capacity validation; no neural Map teacher is required |
-| Navformer raster map branch | Optional Map KD | User-reported unreliable lane masks | DISABLED; cross-representation KD must not resume without a new audit |
-| SegFormer-B5 Cityscapes | Semantic Segmentation | User-reported strict load and real 8-view GPU inference; received PNG/JSON for source index 0 | Native19 Student training connected in code; actual labels/export/training still server-only; one frame is not GT accuracy |
-| Metric3Dv2 ViT-L | Depth | User-reported real 8-view CUDA inference, shape [8,1,252,448], 3277 MiB; only audited non-inference mask_token omission | Student training connected in code; geometry remains unverified; experimental image-plane scope must be explicit |
+| Navformer UniAD Agent branch | Agent | User-reported nuPlan checkpoint inference/export and Stage 2 training | RETAIN; Agent regression after shared-front-end changes |
+| nuPlan HD map | Vector Map | User-reported real vector GT export/audit/training | RETAIN AS GT, not a neural teacher; preserve schema/split/capacity checks |
+| Navformer raster map branch | Optional Map KD | Same-domain checkpoint, unreliable lane masks observed | DISABLED FOR QUALITY; no silent reactivation |
+| DVGT-1 | Depth / geometry candidate | Author OpenScene training/evaluation configs and public dvgt1.pt listing verified online | DOMAIN CANDIDATE ONLY; no download/load/inference/conversion tested |
+| ViGT | Backup geometry candidate | Author paper/README includes nuPlan and publishes weight link | No checkpoint-content/load/rendering check; not camera Seg |
+| No selected same-domain camera-Seg checkpoint | Semantic Segmentation | Search did not verify a reusable qualifying release | BLOCKED; BEV segmentation does not satisfy camera-Seg |
+| SegFormer-B5 Cityscapes | Out-of-domain Seg control | User-reported export, Student training and 120-frame pseudo-agreement | NOT FORMAL: Cityscapes weights, no independent nuPlan semantic GT validation |
+| Metric3Dv2 ViT-L | Unqualified-domain Depth control | User-reported export/training and 120-frame pseudo-agreement | NOT FORMAL: no verified nuPlan/OpenScene checkpoint task provenance; geometry experimental |
 
 QUEST Stage2 reads exported labels by OpenScene sample token. Online teacher
 construction is disabled in the student training process.
@@ -20,14 +25,19 @@ construction is disabled in the student training process.
 proof of four-teacher readiness: Seg/Depth there are disabled placeholders and
 `maptr_output_to_quest()` still rejects unverified taxonomy. MapTRv2 is ONLY a
 structure/loss reference here; its nuScenes checkpoints are not prerequisites.
-The separate `configs/seg_depth.yaml` enables dense offline training, with
-frozen Agent/Map and strict label preflight. Runtime is not yet verified.
+The separate `configs/seg_depth.yaml` implements the experimental dense route,
+with frozen Agent/Map and strict label preflight. The user reported real server
+training and validation. These measure imitation of OUT-OF-DOMAIN pseudo labels,
+not same-domain teacher qualification or real-GT accuracy. Existing experimental
+labels/checkpoints are preserved; configurations are not switched by this audit.
 Stage 3 trains against nuPlan vector GT, NOT
 MapTRv2 predictions. Navformer raster-map KD stays disabled because of the
 observed unreliable lane masks.
 
-`scripts/inspect_multitask_teachers.py` inventories explicit asset paths using
-only the standard library. It does not certify model load, outputs or quality.
+`scripts/inspect_multitask_teachers.py` inventories explicit legacy asset paths
+using only the standard library. It does not certify domain provenance, model
+load, outputs or quality, and does not inventory DVGT-1 yet. FILES_PRESENT must
+not be interpreted as formal teacher approval.
 
 Asset preparation and actual Seg exporter commands are documented in
 [Dense Teacher Export](dense_teacher_export.md). No MapTRv2 download is required.
