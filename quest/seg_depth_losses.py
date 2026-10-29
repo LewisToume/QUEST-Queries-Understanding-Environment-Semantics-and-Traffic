@@ -5,6 +5,20 @@ import math
 import torch
 import torch.nn.functional as F
 
+from .seg_teacher import CITYSCAPES_CLASSES
+
+
+def segmentation_class_weights(settings, reference):
+    values = settings.get("seg", {}).get("class_weights")
+    if values is None:
+        return None
+    if tuple(settings["seg"].get("class_names", CITYSCAPES_CLASSES)) != CITYSCAPES_CLASSES:
+        raise ValueError("Seg class weight order must be canonical Cityscapes19")
+    weights = torch.as_tensor(values, dtype=reference.dtype, device=reference.device)
+    if weights.shape != (19,) or not bool((torch.isfinite(weights) & (weights > 0)).all()):
+        raise ValueError("Seg class_weights must contain 19 finite positive values")
+    return weights
+
 
 def depth_valid_mask(target, seg_target, settings):
     value, valid = target["depth_m"], target["valid_mask"].clone()
@@ -29,6 +43,8 @@ def compute_seg_depth_loss(predictions, targets, settings, tasks=("seg", "depth"
     if any(not math.isfinite(float(value)) or float(value) < 0 for value in weights.values()):
         raise ValueError("Dense loss weights must be finite and nonnegative")
     zero = seg.sum() * 0 + depth.sum() * 0
+    class_weights = segmentation_class_weights(settings, seg)
+    seg_normalizer = seg.new_zeros(())
     sums = {key: zero for key in ("seg_ce", "depth_log", "depth_relative", "depth_gradient")}
     counts = {"seg_pixels": 0, "depth_pixels": 0, "depth_edges": 0}
     for index, target in enumerate(targets):
@@ -40,8 +56,10 @@ def compute_seg_depth_loss(predictions, targets, settings, tasks=("seg", "depth"
             if bool(((labels[valid] < 0) | (labels[valid] >= 19)).any()):
                 raise ValueError("Unsupported Cityscapes ID in valid target")
             safe_labels = torch.where(valid, labels, 0)
-            pixels = F.cross_entropy(seg[index], safe_labels, reduction="none")
+            pixels = F.cross_entropy(seg[index], safe_labels, weight=class_weights, reduction="none")
             sums["seg_ce"] = sums["seg_ce"] + pixels[valid].sum()
+            if class_weights is not None:
+                seg_normalizer = seg_normalizer + class_weights[safe_labels[valid]].sum()
             counts["seg_pixels"] += int(valid.sum())
         metric = target.get("depth")
         if "depth" in tasks and metric is not None:
@@ -61,7 +79,11 @@ def compute_seg_depth_loss(predictions, targets, settings, tasks=("seg", "depth"
                 delta = predicted_log.diff(dim=axis) - target_log.diff(dim=axis)
                 sums["depth_gradient"] = sums["depth_gradient"] + delta[edge_valid].abs().sum()
                 counts["depth_edges"] += int(edge_valid.sum())
-    losses = {"seg_ce": sums["seg_ce"] / max(counts["seg_pixels"], 1),
+    # Match weighted CrossEntropyLoss(mean): normalize by target weights, not
+    # raw pixel count, so changing the balance does not arbitrarily rescale Seg/Depth.
+    denominator = (seg_normalizer.clamp_min(torch.finfo(seg.dtype).eps) if class_weights is not None
+                   else max(counts["seg_pixels"], 1))
+    losses = {"seg_ce": sums["seg_ce"] / denominator,
               "depth_log": sums["depth_log"] / max(counts["depth_pixels"], 1),
               "depth_relative": sums["depth_relative"] / max(counts["depth_pixels"], 1),
               "depth_gradient": sums["depth_gradient"] / max(counts["depth_edges"], 1)}

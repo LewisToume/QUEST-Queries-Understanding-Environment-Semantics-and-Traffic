@@ -1,0 +1,7 @@
+# Applied only with --seg-class-balance. Counts come from actual TRAIN labels,
+# never validation and never the export log (which omitted the first frame).
+mode: inverse_sqrt_train_pixels
+min_weight: 0.5
+max_weight: 5.0
+finetune_epochs: 3
+finetune_lr: 3.0e-5

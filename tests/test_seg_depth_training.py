@@ -176,6 +176,10 @@ class DenseDatasetTest(unittest.TestCase):
                 torch.save(record(index), root / f"t{index}.pt")
             dataset = SegDepthDataset({}, [19, 7], root, root, "m", "split", tasks=("seg",))
             self.assertEqual(dataset.audit()["frames"], 2)
+            class_audit = dataset.audit(include_seg_class_counts=True)
+            self.assertEqual(class_audit["seg_class_pixel_counts"][0], 2 * 8 * 252 * 448)
+            self.assertEqual(sum(class_audit["seg_class_pixel_counts"]), class_audit["tasks"]["seg"]["valid_pixels"])
+            self.assertNotIn("seg_class_pixel_counts", dataset.audit())  # Old checkpoint audit identity stays compatible.
             self.assertEqual(dataset.source_indices, [19, 7])
             invalid = record(7)
             invalid["token"] = "t19"

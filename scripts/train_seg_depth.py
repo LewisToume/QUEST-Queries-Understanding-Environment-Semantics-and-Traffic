@@ -25,7 +25,9 @@ from quest.seg_depth_dataset import SegDepthDataset, collate_seg_depth
 from quest.seg_depth_losses import (compute_seg_depth_loss, empty_dense_metrics,
                                     summarize_dense_metrics, update_dense_metrics)
 from quest.seg_depth_training import (configure_dense_training, frozen_spatial_fingerprint,
-                                      load_dense_model, save_dense_checkpoint, validate_dense_config)
+                                      load_dense_model, save_dense_checkpoint, validate_dense_config,
+                                      resolve_seg_class_balance, validate_dense_checkpoint, validate_dense_data_join)
+from quest.seg_teacher import CITYSCAPES_CLASSES
 from quest.stage3_split import file_sha256, load_stage3_split, selected_frames
 from quest.utils import load_yaml_config
 
@@ -63,7 +65,8 @@ def make_dataset(config, dataset, manifest, split, count=None):
         missing_policy=config["train"]["missing_labels"], experimental_depth=experimental,
         require_seg_for_depth=config["loss"]["depth"]["exclude_sky"],
     )
-    audit = result.audit(config["loss"]["depth"])
+    count_classes = split == "train" and config["loss"].get("seg", {}).get("class_balance") is not None
+    audit = result.audit(config["loss"]["depth"], include_seg_class_counts=count_classes)
     print(f"dense_preflight split={split} frames={len(result)} tasks={json.dumps(audit['tasks'])}")
     return result, audit
 
@@ -142,9 +145,15 @@ def main():
     parser.add_argument("--config", type=Path, default=ROOT / "configs/seg_depth.yaml")
     parser.add_argument("--num-samples", type=int)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--lr", type=float)
     parser.add_argument("--tasks", nargs="+", choices=("seg", "depth"))
     parser.add_argument("--checkpoint", type=Path, help="New output; will not overwrite an existing run")
     parser.add_argument("--resume", type=Path, help="Resume exactly the saved config and label set")
+    parser.add_argument("--finetune-from", type=Path,
+                        help="Load existing dense model, reset optimizer/schedule, require a NEW --checkpoint")
+    parser.add_argument("--seg-class-balance", action="store_true",
+                        help="Use bounded training-frequency weighted CE; taxonomy and evaluation stay unchanged")
+    parser.add_argument("--balance-config", type=Path, default=ROOT / "configs/seg_balance.yaml")
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--smoke-steps", type=int, default=0, help="Repeat selected data; NEVER save a checkpoint")
     parser.add_argument("--experimental-unverified-depth", action="store_true",
@@ -152,12 +161,24 @@ def main():
     args = parser.parse_args()
     if args.smoke_steps < 0 or (args.resume and args.smoke_steps):
         parser.error("smoke steps must be nonnegative and cannot resume")
+    if args.resume and args.finetune_from:
+        parser.error("Choose resume OR finetune-from, not both")
+    if args.finetune_from and (not args.checkpoint or not args.seg_class_balance):
+        parser.error("Balanced fine-tuning requires --seg-class-balance and a NEW --checkpoint")
     resumed = load_checkpoint_cpu(resolve(args.resume)) if args.resume else None
+    fine_source = load_checkpoint_cpu(resolve(args.finetune_from)) if args.finetune_from else None
+    if fine_source is not None:
+        validate_dense_checkpoint(fine_source)
+        if args.num_samples is not None or args.tasks is not None or args.experimental_unverified_depth:
+            parser.error("Fine-tuning preserves source tasks, complete frame lists and depth geometry policy")
     if resumed is not None:
         if any((args.num_samples is not None, args.epochs is not None, args.tasks is not None,
-                args.experimental_unverified_depth, args.checkpoint is not None)):
+                args.experimental_unverified_depth, args.checkpoint is not None, args.lr is not None,
+                args.seg_class_balance)):
             parser.error("Resume does not accept configuration/output overrides")
         config = copy.deepcopy(resumed["training_config"])
+    elif fine_source is not None:
+        config = copy.deepcopy(fine_source["training_config"])
     else:
         config = load_yaml_config(resolve(args.config))
         config["depth_geometry_policy"] = "experimental_image_plane" if args.experimental_unverified_depth else "verified"
@@ -165,13 +186,33 @@ def main():
             config["tasks"] = args.tasks
         if args.num_samples is not None:
             config["train"]["num_samples"] = args.num_samples
-        if args.epochs is not None:
-            config["train"]["epochs"] = args.epochs
+    if args.seg_class_balance:
+        recipe = load_yaml_config(resolve(args.balance_config))
+        config["loss"].setdefault("seg", {})["class_balance"] = {
+            key: recipe[key] for key in ("mode", "min_weight", "max_weight")}
+        if fine_source is not None:
+            config["train"]["epochs"] = int(recipe["finetune_epochs"])
+            config["train"]["lr"] = float(recipe["finetune_lr"])
+    if args.epochs is not None:
+        config["train"]["epochs"] = args.epochs
+    if args.lr is not None:
+        config["train"]["lr"] = args.lr
+    if fine_source is not None:
+        config["dense_finetune_source"] = {"path": str(resolve(args.finetune_from)),
+                                            "sha256": file_sha256(resolve(args.finetune_from)),
+                                            "epoch": int(fine_source["epoch"]),
+                                            "previous_class_balance": copy.deepcopy(
+                                                fine_source["training_config"]["loss"].get("seg"))}
     validate_dense_config(config, config["tasks"])
     random.seed(config["train"]["seed"])
     torch.manual_seed(config["train"]["seed"])
     dataset_config, manifest = load_context(config)
     train_data, train_audit = make_dataset(config, dataset_config, manifest, "train", config["train"]["num_samples"])
+    balance = resolve_seg_class_balance(config["loss"], train_audit, saved_weights_required=resumed is not None)
+    if balance is not None:
+        print("SEG_CLASS_BALANCE=TRAIN_ONLY formula=clip(sqrt(median_positive_count/count),min,max) "
+              "normalization=SUM_TARGET_WEIGHTS")
+        print("seg_class_weights=" + json.dumps(dict(zip(CITYSCAPES_CLASSES, balance["class_weights"]))))
     audits = {"train": train_audit}
     validation = None
     if not args.smoke_steps:
@@ -179,6 +220,9 @@ def main():
         if train_audit["teacher_signatures"] != audits["validation"]["teacher_signatures"]:
             raise ValueError("Training/validation teachers or preprocessing differ")
     model_config, source, initialization = prepare_spatial_initialization(config, manifest)
+    if fine_source is not None:
+        validate_dense_data_join(fine_source, manifest, audits, model_config, initialization,
+                                 smoke=bool(args.smoke_steps))
     if resumed is not None:
         if (resumed["split_sha256"] != manifest["split_sha256"]
                 or resumed["metadata_sha256"] != manifest["metadata_sha256"]
@@ -190,6 +234,8 @@ def main():
         "experimental_checkpoint" if experimental else "checkpoint"])
     if output_path == resolve(config["paths"]["init_checkpoint"]):
         raise ValueError("Refusing to overwrite the Agent/Map initialization checkpoint")
+    if args.finetune_from and output_path.resolve() == resolve(args.finetune_from).resolve():
+        raise ValueError("Fine-tuning must not overwrite the original dense checkpoint")
     if not args.resume and not args.smoke_steps and output_path.exists():
         raise FileExistsError("Checkpoint already exists; use --resume or a new --checkpoint: " + str(output_path))
     print(f"tasks={config['tasks']} depth_geometry_policy={config['depth_geometry_policy']} "
@@ -201,7 +247,12 @@ def main():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for server training; no automatic model/resolution fallback")
     device = initialize_cuda_device()
-    if resumed is None:
+    if fine_source is not None:
+        model = load_dense_model(fine_source)
+        print(f"dense_finetune_loaded_epoch={fine_source['epoch']} optimizer=NEW "
+              f"epochs={config['train']['epochs']} lr={config['train']['lr']}; original checkpoint preserved")
+        del fine_source
+    elif resumed is None:
         model = QUESTModel(**model_config)
         source_epoch = load_stage3_checkpoint(model, None, source, expected_map_kd_enabled=False)
         print(f"spatial_warm_start_epoch={source_epoch}; Seg/Depth heads=NEW")

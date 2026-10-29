@@ -125,8 +125,11 @@ class SegDepthDataset(Dataset):
             targets["depth"] = None  # No reliable sky exclusion without the aligned Seg target.
         return targets
 
-    def audit(self, depth_settings=None):
+    def audit(self, depth_settings=None, *, include_seg_class_counts=False):
         counts = {task: {"frames": 0, "valid_pixels": 0, "missing": 0} for task in self.load_tasks}
+        class_counts = torch.zeros(19, dtype=torch.int64) if include_seg_class_counts else None
+        if include_seg_class_counts and "seg" not in self.load_tasks:
+            raise ValueError("Seg class balance requires real Seg targets")
         for position in range(len(self)):
             targets = self._load_targets(position, establish=True)
             for task in self.load_tasks:
@@ -138,13 +141,20 @@ class SegDepthDataset(Dataset):
                     valid = (depth_valid_mask(target, targets["seg"], depth_settings)
                              if task == "depth" and depth_settings is not None else target["valid_mask"])
                     counts[task]["valid_pixels"] += int(valid.sum())
+                    if task == "seg" and class_counts is not None:
+                        class_counts += torch.bincount(target["labels"][valid].long(), minlength=19)
         if any(counts[task]["valid_pixels"] == 0 for task in self.load_tasks):
             raise ValueError("No valid supervision for an enabled dense task: " + str(counts))
         identity = [(index, str(info["token"]), self.digests[index])
                     for index, info in zip(self.source_indices, self.images.infos)]
         label_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-        return {"frames": len(self), "tasks": counts, "labels_sha256": label_hash,
-                "teacher_signatures": dict(self.teacher_signatures)}
+        result = {"frames": len(self), "tasks": counts, "labels_sha256": label_hash,
+                  "teacher_signatures": dict(self.teacher_signatures)}
+        if class_counts is not None:
+            if int(class_counts.sum()) != counts["seg"]["valid_pixels"]:
+                raise RuntimeError("Seg frequency count differs from audited valid pixels")
+            result["seg_class_pixel_counts"] = class_counts.tolist()
+        return result
 
     def __getitem__(self, position):
         if not self.digests:

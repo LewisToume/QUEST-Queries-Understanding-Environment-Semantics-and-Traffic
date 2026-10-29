@@ -180,3 +180,72 @@ New diagnostic test sources (not executed locally):
 ```bash
 python -m unittest discover -s tests -p 'test_seg_depth_diagnostics.py' -v
 ```
+
+## Bounded Seg Class-Balance Fine-Tuning
+
+The user-reported training export contains hundreds of millions of road/building
+pixels but fewer than a million rider/train/motorcycle pixels. Held-out teacher
+agreement confirms near-zero recall for several rare classes. This motivates a
+controlled loss experiment, not a new taxonomy or a claim that all rare teacher
+labels are correct. Do not substitute unrelated nuScenes test or RoboSense PCDs
+for synchronized OpenScene depth GT.
+
+`configs/seg_balance.yaml` defines an opt-in recipe:
+
+```text
+w_c = clip(sqrt(median(positive training class counts) / max(count_c, 1)), 0.5, 5.0)
+Seg CE = sum(w_target * pixel_CE) / sum(w_target) over valid pixels
+```
+
+The ratio between largest/smallest pixel weights is capped at 10, rather than
+amplifying a rare/noisy class by thousands. The formula and limits are an
+engineering starting point, not a proven optimum. Weighted mean normalization
+follows [PyTorch CrossEntropyLoss](https://docs.pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html).
+No focal/Dice loss, oversampling, image/camera changes or class remapping is added
+in this first experiment. Depth loss and geometry policy remain unchanged;
+the shared dense neck can still affect Depth, so compare its held-out metrics.
+DINO/Agent/Map remain frozen and fingerprint-protected.
+
+Frequencies are recomputed from ALL selected TRAIN `.pt` labels during existing
+preflight, including frame0. The 4999-frame export log is not hardcoded. No
+validation statistics determine the weights. Counts, class order, weights and
+label hashes are saved with the training config/audit. Ordinary old runs keep
+their old loss and audit schema; balanced resumes require identical weights.
+Frames with no positive teacher example of a class cannot learn that class
+merely by changing weights; frequency/qualitative audits remain necessary.
+
+Start from the trained dense model, with a NEW optimizer and output checkpoint:
+
+```bash
+python scripts/train_seg_depth.py --finetune-from checkpoints/quest_seg_depth_experimental_v1.pt --seg-class-balance --checkpoint checkpoints/quest_seg_depth_balanced_v1.pt --preflight-only
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/train_seg_depth.py --finetune-from checkpoints/quest_seg_depth_experimental_v1.pt --seg-class-balance --checkpoint checkpoints/quest_seg_depth_balanced_v1.pt
+```
+
+Default fine-tune is 3 additional epochs at lr3e-5 (not restarting Seg/Depth from
+random weights). Source tasks, full train/validation lists, metadata/label/teacher
+hashes, spatial initialization and architecture must match. Source geometry
+policy is inherited and stays experimental; do not add the experimental flag
+again. `--epochs`/`--lr` can override the recipe; changing tasks or frame lists
+is refused. `--smoke-steps 1` is available for a no-save check after the same
+full training-label audit. Original checkpoints and teacher labels are never
+overwritten. `--resume` retains exact saved config/optimizer semantics instead
+of applying a new recipe.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/evaluate_seg_depth.py --checkpoint checkpoints/quest_seg_depth_balanced_v1.pt --output-dir data/diagnostics/seg_depth_balanced_review_v1
+```
+
+Compare per-class IoU/recall/precision AND common-class/Depth regression against
+the existing baseline. Improved recall alone with excessive false positives is
+not success. Validation definitions, masks and taxonomy do not change; weighted
+training losses are not directly comparable to the old unweighted total loss.
+Do not keep tuning against these same 3 scenes as if they were a final test set.
+
+Test sources are added, NOT executed locally:
+
+```bash
+python -m unittest discover -s tests -p 'test_seg_class_balance.py' -v
+```
