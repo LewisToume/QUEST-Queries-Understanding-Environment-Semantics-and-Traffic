@@ -18,6 +18,12 @@ Agent/Map weights are changed. Old Metric3D/Seg experiments are preserved.
   No separate gated DINOv3 weight is needed: code-only construction is followed
   by STRICT full DVGT checkpoint loading. Missing/unexpected/shape-mismatched
   keys are fatal; no Metric3D-style omission exception is applied.
+  The QUEST adapter routes DVGT's local hub request directly to the pinned
+  `dinov3.hub.backbones.dinov3_vitl16(pretrained=False)` factory. This is the same
+  backbone constructor exported by DINOv3 `hubconf.py`, without importing its
+  unrelated segmentation/depth/detection evaluation modules. In particular,
+  `torchmetrics` is not required just to construct this backbone. No third-party
+  source or environment is modified, and automatic weight downloads stay blocked.
 - Teacher training includes OpenScene and its task evaluation configuration
   uses OpenScene. This qualifies its dataset provenance, not our actual depth
   accuracy. Teacher-training overlap with the QUEST validation scenes is UNKNOWN.
@@ -70,6 +76,12 @@ Reports include per-camera valid fraction, depth median and native reprojection
 errors, native K, camera transforms, sequence tokens/indices/timestamps and
 weight/source/config/adapter hashes. Reprojection consistency is not a real
 LiDAR accuracy measurement. Camera timestamp offsets remain uncorrected.
+
+On 2026-10-30 the user reported asset/hash preflight PASS, followed by a model
+construction failure: DINOv3's general `hubconf.py` imported segmentation
+evaluation, which required missing `torchmetrics`. The direct backbone route
+above addresses that import path only. It has been statically reviewed but NOT
+executed by Codex; real model loading, inference and geometry remain unverified.
 
 ## Temporal Selection And Output Safety
 

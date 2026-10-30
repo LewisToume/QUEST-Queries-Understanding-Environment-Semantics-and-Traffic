@@ -85,7 +85,8 @@ def inspect_assets(repo, checkpoint, teacher):
     blockers = []
     files = ("dvgt/models/architectures/dvgt1.py", "dvgt/models/backbones/dvgt1_aggregator.py",
              "tools/data_process/utils/image.py", "dvgt/datasets/transforms/transforms.py",
-             "configs/_base_/default_dataset.yaml", "third_party/dinov3/hubconf.py")
+             "configs/_base_/default_dataset.yaml", "third_party/dinov3/hubconf.py",
+             "third_party/dinov3/dinov3/hub/backbones.py")
     for relative in files:
         if not (repo / relative).is_file():
             blockers.append("ASSET_MISSING: " + str(repo / relative))

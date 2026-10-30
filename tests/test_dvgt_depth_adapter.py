@@ -187,15 +187,49 @@ class DVGTDepthAdapterTest(unittest.TestCase):
 
             module.DVGT1 = construct
             model = torch.nn.Linear(2, 1)
+            dinov3 = types.ModuleType("dinov3")
+            dinov3.__file__ = str(root / "third_party/dinov3/dinov3/__init__.py")
+            backbones = types.ModuleType("dinov3.hub.backbones")
+            backbones.dinov3_vitl16 = Mock(return_value=model)
             old_path = sys.path.copy()
             try:
-                with patch.dict(sys.modules, {"dvgt": package, module.__name__: module}), patch(
-                        "torch.hub.load", return_value=model) as hub, patch(
+                with patch.dict(sys.modules, {
+                        "dvgt": package, module.__name__: module, "dinov3": dinov3,
+                        "dinov3.hub": types.ModuleType("dinov3.hub"),
+                        backbones.__name__: backbones, "dinov3.eval": None, "torchmetrics": None,
+                }), patch(
+                        "torch.hub.load", side_effect=AssertionError("Task hubconf must not load")) as hub, patch(
                         "torch.load", return_value=model.state_dict()):
                     loaded, _ = build_teacher(root, root / "weights.pt", "cpu")
                 self.assertIs(loaded, model)
-                self.assertFalse(hub.call_args.kwargs["pretrained"])
+                hub.assert_not_called()
+                backbones.dinov3_vitl16.assert_called_once_with(pretrained=False)
                 self.assertFalse(any(parameter.requires_grad for parameter in model.parameters()))
+            finally:
+                sys.path[:] = old_path
+
+    def test_backbone_build_rejects_other_hub_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            package = types.ModuleType("dvgt")
+            package.__file__ = str(root / "dvgt/__init__.py")
+            module = types.ModuleType("dvgt.models.architectures.dvgt1")
+            requests = (("third_party/dinov3", "dinov3_vitb16", {"source": "local"}),
+                        ("other/dinov3", "dinov3_vitl16", {"source": "local"}),
+                        ("third_party/dinov3", "dinov3_vitl16", {"source": "github"}))
+            old_path = sys.path.copy()
+            try:
+                for repo_or_dir, model_name, kwargs in requests:
+                    with self.subTest(repo=repo_or_dir, model=model_name, source=kwargs["source"]):
+                        def construct(**unused):
+                            return torch.hub.load(repo_or_dir, model_name, **kwargs)
+
+                        module.DVGT1 = construct
+                        with patch.dict(sys.modules, {"dvgt": package, module.__name__: module}), patch(
+                                "torch.load") as load:
+                            with self.assertRaisesRegex(RuntimeError, "Unexpected native hub request"):
+                                build_teacher(root, root / "weights.pt", "cpu")
+                            load.assert_not_called()
             finally:
                 sys.path[:] = old_path
 

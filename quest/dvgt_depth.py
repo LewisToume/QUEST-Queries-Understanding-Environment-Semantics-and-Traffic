@@ -170,7 +170,7 @@ def build_teacher(repo, checkpoint, device, decoder_chunk_frames=1):
             if repo not in origin.parents:
                 raise RuntimeError(f"Conflicting {package} package; use a separate teacher process")
     sys.path.insert(0, str(repo))
-    native_hub = torch.hub.load
+    sys.path.insert(0, str(repo / "third_party/dinov3"))
 
     def local_backbone(repo_or_dir, model_name, *args, **kwargs):
         if (Path(repo_or_dir).resolve() != repo / "third_party/dinov3"
@@ -178,8 +178,12 @@ def build_teacher(repo, checkpoint, device, decoder_chunk_frames=1):
             raise RuntimeError("Unexpected native hub request; network/model substitution forbidden")
         # Upstream DVGT's None path still defaults to DINO pretrained=True.
         # Construct code only; the full DVGT checkpoint supplies EVERY backbone weight.
+        # Bypass hubconf.py's unrelated task imports, not the official backbone factory.
+        from dinov3.hub.backbones import dinov3_vitl16
+
+        kwargs.pop("source")
         kwargs["pretrained"] = False
-        return native_hub(repo_or_dir, model_name, *args, **kwargs)
+        return dinov3_vitl16(*args, **kwargs)
 
     with native_working_directory(repo), patch("torch.hub.load", side_effect=local_backbone), patch(
             "torch.hub.load_state_dict_from_url", side_effect=RuntimeError("Automatic downloads forbidden")):
