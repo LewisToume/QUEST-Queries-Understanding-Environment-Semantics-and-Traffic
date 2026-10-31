@@ -108,6 +108,34 @@ explicit contracts but rejects mixing them or changing preprocessing within a
 run. Old checkpoints remain readable; old-label resumes cannot swap to DVGT.
 DVGT candidates still require `--experimental-unverified-depth` for training.
 
+### Explicit Safe Export Resume
+
+`--resume --export-candidate-labels` validates every existing target `.pt` on
+CPU (canonical tensors, token/index, metadata/split hash, camera calibration,
+source paths, exact temporal context, teacher/checkpoint/config and geometry
+adapter). Only valid completed labels are skipped. Missing targets retain their
+original full context window; no teacher preprocessing/model changes are made.
+When all targets exist and validate, exit without model construction or GPU use.
+Preflight reports existing/remaining counts and at most eight blocker details.
+
+Actual exporter file hashes are retained. The reviewed f3bc817 exporter and this
+orchestration-only resume update share `dvgt1_native_depth_export_v1`; training
+normalizes this inference contract rather than rejecting a CLI-only file hash
+change. Geometry adapter and config hashes and all other teacher signature
+fields remain strict. Unknown legacy exporter hashes are not accepted by resume.
+
+Nothing is deleted or overwritten. For a stale diagnostic JSON/PNG left before
+the final label was published, select a NEW `--audit-dir`; validated `.pt` files
+are still reused from the original label directory. Corrupt labels or orphan
+`.pt.tmp` files block and require explicit review. Do not run concurrent writers
+to the same output directory. Source/model edits still require a separate audit.
+
+User-run continuation of the full training split (not executed by Codex):
+
+```bash
+cd /home/user/DataDisk/QUEST_WORK/QUEST && CUDA_VISIBLE_DEVICES=0 "$HOME/.venvs/quest_dvgt_teacher/bin/python" -u scripts/export_dvgt_depth.py --split-manifest data/stage3_split.json --split train --num-frames 5000 --allow-future-context --image-geometry raw_opencv --export-candidate-labels --resume --audit-dir data/diagnostics/depth_dvgt_resume_train_v1
+```
+
 ## Server Commands
 
 ### 1. Prepare Assets (Network / Disk Only)

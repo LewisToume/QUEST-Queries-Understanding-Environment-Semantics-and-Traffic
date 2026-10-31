@@ -113,6 +113,10 @@ class SegDepthDataset(Dataset):
                              provenance["checkpoint_sha256"], provenance.get("adapter_sha256"),
                              provenance.get("geometry_adapter_sha256"), record["training_label_scope"])
                 if record["schema_version"] == 2:
+                    from .dvgt_export_resume import inference_signature
+
+                    # Export orchestration may change without changing native inference.
+                    signature = signature[:4] + (inference_signature(provenance),) + signature[5:]
                     signature += (provenance.get("config_sha256"), provenance.get("repo_revision"),
                                   provenance.get("dinov3_revision"), provenance.get("max_reprojection_px"),
                                   provenance.get("confidence_min"), provenance.get("allow_future_context"))

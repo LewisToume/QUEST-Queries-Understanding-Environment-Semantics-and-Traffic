@@ -19,6 +19,10 @@ from quest.dvgt_depth import (
     points_to_camera_z, prepare_image, restore_depth,
 )
 from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES
+from quest.dvgt_export_resume import (
+    DVGT_INFERENCE_CONTRACT, LEGACY_EXPORTER_SHA256, inference_signature,
+    inspect_outputs, validate_completed_record,
+)
 from quest.seg_depth_dataset import SegDepthDataset, validate_depth_training_scope
 from scripts.export_dvgt_depth import check_native_predictions, parse_args, publish_record
 
@@ -53,6 +57,25 @@ def depth_record():
                       "intrinsics": torch.eye(3).repeat(8, 1, 1),
                       "sensor2lidar": torch.eye(4).repeat(8, 1, 1),
                       "distortion": [torch.zeros(5) for _ in range(8)]}}
+
+
+def resume_fixture(root):
+    record = depth_record()
+    record.update(timestamp=500000., split_sha256="b" * 64,
+                  source_hw=[(252, 448)] * 8,
+                  teacher_intrinsics=[np.eye(3).tolist() for _ in range(8)],
+                  camera_from_first_ego_rdf=[FLU_FROM_RDF.tolist() for _ in range(8)])
+    cameras = [{"name": name, "path": root / (name + ".jpg"), "source_hw": (252, 448),
+                "scaled_intrinsic": np.eye(3), "sensor2lidar": np.eye(4), "distortion": np.zeros(5)}
+               for name in OPENSCENE_CAMERA_NAMES]
+    record["source_paths"] = [str(camera["path"]) for camera in cameras]
+    record["provenance"].update(adapter_sha256=LEGACY_EXPORTER_SHA256,
+                               config_sha256="c" * 64, geometry_adapter_sha256="d" * 64)
+    expected = {key: value for key, value in record["provenance"].items() if key != "checkpoint_load"}
+    expected.update(adapter_sha256="f" * 64, inference_contract=DVGT_INFERENCE_CONTRACT)
+    plan = {"indices": [0, 1], "targets": [1], "scene_token": "A"}
+    settings = {"min_depth_m": .1, "max_depth_m": 80.}
+    return record, [info(0), info(1)], plan, cameras, expected, settings
 
 
 class DVGTDepthAdapterTest(unittest.TestCase):
@@ -267,8 +290,101 @@ class DVGTDepthAdapterTest(unittest.TestCase):
         self.assertEqual(set(DVGT_TEACHER_CAMERAS), set(OPENSCENE_CAMERA_NAMES))
         self.assertNotEqual(DVGT_TEACHER_CAMERAS, OPENSCENE_CAMERA_NAMES)
 
+    def test_resume_requires_explicit_candidate_mode(self):
+        with self.assertRaises(SystemExit):
+            parse_args(["--resume"])
+        self.assertTrue(parse_args(["--resume", "--export-candidate-labels"]).resume)
+
+    def test_resume_skips_only_valid_final_labels_and_preserves_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record, infos, plan, cameras, expected, settings = resume_fixture(root)
+            publish_record(record, root)
+            before = (root / "token1.pt").read_bytes()
+            complete, pending, blockers = inspect_outputs(
+                [1], infos, [plan], root, root / "audit", resume=True, candidate=True,
+                cameras_by_index={1: cameras}, metadata_hash="a" * 64, split_hash="b" * 64,
+                provenance=expected, settings=settings, geometry="raw_opencv")
+            self.assertEqual(complete, {"token1"})
+            self.assertEqual(pending, [])  # main exits before constructing a model/GPU.
+            self.assertEqual(blockers, [])
+            self.assertEqual((root / "token1.pt").read_bytes(), before)
+
+    def test_resume_missing_target_keeps_original_context_and_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, infos, plan, cameras, expected, settings = resume_fixture(root)
+            complete, pending, blockers = inspect_outputs(
+                [1], infos, [plan], root, root / "audit", resume=True, candidate=True,
+                cameras_by_index={1: cameras}, metadata_hash="a" * 64, split_hash="b" * 64,
+                provenance=expected, settings=settings, geometry="raw_opencv")
+            self.assertEqual(complete, set())
+            self.assertEqual(pending, [plan])
+            self.assertEqual(blockers, [])
+
+    def test_resume_shared_window_skips_target_without_removing_its_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record, infos, plan, cameras, expected, settings = resume_fixture(root)
+            publish_record(record, root)
+            plan["targets"] = [0, 1]
+            complete, pending, blockers = inspect_outputs(
+                [0, 1], infos, [plan], root, root / "audit", resume=True, candidate=True,
+                cameras_by_index={0: cameras, 1: cameras}, metadata_hash="a" * 64, split_hash="b" * 64,
+                provenance=expected, settings=settings, geometry="raw_opencv")
+            self.assertEqual(complete, {"token1"})
+            self.assertEqual(pending, [{**plan, "targets": [0]}])
+            self.assertEqual(pending[0]["indices"], [0, 1])
+            self.assertEqual(blockers, [])
+
+    def test_resume_rejects_changed_join_context_config_and_calibration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record, infos, plan, cameras, expected, settings = resume_fixture(Path(directory))
+            for change in (lambda r: r.update(token="wrong"),
+                           lambda r: r.update(metadata_sha256="x" * 64),
+                           lambda r: r.update(split_sha256=None),
+                           lambda r: r["provenance"].update(config_sha256="x" * 64),
+                           lambda r: r["provenance"].update(adapter_sha256="x" * 64),
+                           lambda r: r["sequence"].update(source_indices=[5, 1]),
+                           lambda r: r["depth"]["intrinsics"].__setitem__((0, 0, 0), 2.)):
+                changed = copy.deepcopy(record)
+                change(changed)
+                with self.assertRaises(ValueError):
+                    validate_completed_record(changed, 1, infos, plan, cameras, "a" * 64,
+                                              "b" * 64, expected, settings, "raw_opencv")
+
+    def test_resume_corrupt_label_and_partial_files_are_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, infos, plan, cameras, expected, settings = resume_fixture(root)
+            options = dict(resume=True, candidate=True, cameras_by_index={1: cameras},
+                           metadata_hash="a" * 64, split_hash="b" * 64, provenance=expected,
+                           settings=settings, geometry="raw_opencv")
+            path = root / "token1.pt"
+            path.write_bytes(b"invalid checkpoint")
+            complete, _, blockers = inspect_outputs([1], infos, [plan], root, root, **options)
+            self.assertEqual(complete, set())
+            self.assertIn("EXISTING_LABEL_INVALID", blockers[0])
+            self.assertEqual(path.read_bytes(), b"invalid checkpoint")
+            path.unlink()
+            for suffix in (".json", ".png", ".pt.tmp"):
+                (root / ("token1" + suffix)).write_bytes(b"keep")
+            _, _, blockers = inspect_outputs([1], infos, [plan], root, root, **options)
+            self.assertEqual(len(blockers), 3)
+            for suffix in (".json", ".png", ".pt.tmp"):
+                self.assertEqual((root / ("token1" + suffix)).read_bytes(), b"keep")
+
+    def test_resume_contract_normalization_keeps_legacy_and_new_labels_compatible(self):
+        old = {"adapter_sha256": LEGACY_EXPORTER_SHA256}
+        new = {"adapter_sha256": "f" * 64, "inference_contract": DVGT_INFERENCE_CONTRACT}
+        self.assertEqual(inference_signature(old), inference_signature(new))
+        self.assertNotEqual(inference_signature({"adapter_sha256": "unknown"}), inference_signature(new))
+        with self.assertRaisesRegex(ValueError, "Unknown DVGT inference contract"):
+            inference_signature({**new, "inference_contract": "unreviewed_v2"})
+
     def test_existing_dataset_reads_dvgt_without_seg_or_metric_saturation_claim(self):
         record = depth_record()
+        record["provenance"]["adapter_sha256"] = LEGACY_EXPORTER_SHA256
         record.update(split_sha256="b" * 64, source_hw=[(252, 448)] * 8)
         sample = info(1)
         sample["cams"] = {name: {"cam_intrinsic": np.eye(3), "sensor2lidar_rotation": np.eye(3),
@@ -288,6 +404,10 @@ class DVGTDepthAdapterTest(unittest.TestCase):
             loaded = dataset._load_targets(0, establish=True)
             self.assertIsNone(loaded["seg"])
             self.assertEqual(tuple(loaded["depth"]["depth_m"].shape), (8, 1, 252, 448))
+            record["provenance"].update(adapter_sha256="f" * 64,
+                                        inference_contract=DVGT_INFERENCE_CONTRACT)
+            torch.save(record, root / "token1.pt")
+            dataset._load_targets(0, establish=True)  # Reviewed resume update is not a new teacher.
             record["provenance"]["confidence_min"] = 1.
             torch.save(record, root / "token1.pt")
             with self.assertRaisesRegex(ValueError, "Mixed teacher"):

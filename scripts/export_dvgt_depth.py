@@ -28,6 +28,7 @@ from quest.dvgt_depth import (
     prepare_image, repository_revision, restore_depth,
 )
 from quest.frame_selection import select_indices
+from quest.dvgt_export_resume import DVGT_INFERENCE_CONTRACT, inspect_outputs
 from quest.openscene_dataset import OPENSCENE_CAMERA_NAMES
 from quest.stage3_split import file_sha256, load_stage3_split, selected_frames
 # Only existing JPEG/calibration inspection and PNG utilities are reused here.
@@ -51,6 +52,8 @@ def parse_args(argv=None):
     parser.add_argument("--image-geometry", choices=("raw_opencv", "rectified_pinhole"))
     parser.add_argument("--allow-future-context", action="store_true",
                         help="Permit real same-scene future context at scene starts for OFFLINE teacher only")
+    parser.add_argument("--resume", action="store_true",
+                        help="Validate and skip completed candidate labels; never overwrite existing files")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--preflight-only", action="store_true", help="Read-only CPU; no model construction")
     modes.add_argument("--diagnostic-only", action="store_true", help="Default: PNG/JSON only, never training .pt")
@@ -59,6 +62,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.indices is not None and (args.sample_index != 0 or args.num_frames != 1):
         parser.error("--indices cannot be combined with --sample-index/--num-frames")
+    if args.resume and not args.export_candidate_labels:
+        parser.error("--resume requires --export-candidate-labels")
     return args
 
 
@@ -175,36 +180,13 @@ def main(argv=None):
         for camera in cameras:
             camera_from_first_ego(infos[index], infos[index], camera["sensor2lidar"])
         cameras_by_index[index] = cameras
-    for index in targets:
-        token = str(infos[index]["token"])
-        paths = [audit_dir / (token + ".json"), audit_dir / (token + ".png")]
-        if args.export_candidate_labels:
-            paths += [output_dir / (token + ".pt"), output_dir / (token + ".pt.tmp")]
-        blockers.extend("OUTPUT_EXISTS: " + str(path) for path in paths if path.exists())
     metadata_hash = file_sha256(metadata_path)
-    print(f"teacher=DVGT-1 domain=OpenScene preflight_only={args.preflight_only} no_student_model=True no_training=True")
-    print(f"targets={len(targets)} sequences={len(plans)} context={teacher['context_frames']} "
-          f"allow_future_context={args.allow_future_context} geometry={geometry}")
-    print("student_camera_order=" + ",".join(OPENSCENE_CAMERA_NAMES))
-    print("teacher_camera_order=" + ",".join(DVGT_TEACHER_CAMERAS))
-    print("versions=" + json.dumps(dependency_versions(), sort_keys=True))
-    if blockers:
-        for blocker in blockers:
-            print("BLOCKER " + blocker)
-        print("DVGT_PREFLIGHT=BLOCKED")
-        return 2
-    print("DVGT_PREFLIGHT=PASS checkpoint_hash=PASS; model_load_and_geometry_quality=NOT_CHECKED")
-    if args.preflight_only:
-        return 0
-    device = initialize_cuda_device()
-    helpers = load_preprocessors(repo)
-    model, load_audit = build_teacher(repo, checkpoint, device, teacher["decoder_chunk_frames"])
     provenance = {"teacher": "DVGT-1", "teacher_domain": "trained_and_evaluated_on_openscene",
                   "repo_revision": DVGT_REVISION, "dinov3_revision": DINOV3_REVISION,
                   "checkpoint_sha256": DVGT_CHECKPOINT_SHA256, "checkpoint_revision": DVGT_WEIGHT_REVISION,
-                  "checkpoint_load": load_audit,
                   "gt_scale_factor": DVGT_SCALE, "native_coordinate_frame": "first_ego_rdf",
                   "pose_source": "openscene_metadata", "adapter_sha256": file_sha256(Path(__file__)),
+                  "inference_contract": DVGT_INFERENCE_CONTRACT,
                   "geometry_adapter_sha256": file_sha256(ROOT / "quest/dvgt_depth.py"),
                   "config_sha256": file_sha256(local_path(args.config)),
                   "geometry_evidence": f"UNVERIFIED_{geometry}_HYPOTHESIS_NOT_CALIBRATION_APPROVAL",
@@ -213,11 +195,49 @@ def main(argv=None):
                   "max_reprojection_px": settings["max_reprojection_px"],
                   "preprocess": "native_openscene_annotation_and_deterministic_288x512_eval",
                   "teacher_training_split_overlap": "UNKNOWN", "allow_future_context": args.allow_future_context}
+    completed, pending, output_blockers = inspect_outputs(
+        targets, infos, plans, output_dir, audit_dir, resume=args.resume, candidate=args.export_candidate_labels,
+        cameras_by_index=cameras_by_index, metadata_hash=metadata_hash,
+        split_hash=manifest["split_sha256"] if manifest else None,
+        provenance=provenance, settings=settings, geometry=geometry)
+    blockers.extend(output_blockers)
+    print(f"teacher=DVGT-1 domain=OpenScene preflight_only={args.preflight_only} no_student_model=True no_training=True")
+    print(f"targets={len(targets)} sequences={len(plans)} context={teacher['context_frames']} "
+          f"allow_future_context={args.allow_future_context} geometry={geometry}")
+    print("student_camera_order=" + ",".join(OPENSCENE_CAMERA_NAMES))
+    print("teacher_camera_order=" + ",".join(DVGT_TEACHER_CAMERAS))
+    print("versions=" + json.dumps(dependency_versions(), sort_keys=True))
+    print(f"existing_validated={len(completed)} remaining_targets={len(targets) - len(completed)} "
+          f"remaining_sequences={len(pending)} resume={args.resume}")
+    if blockers:
+        for blocker in blockers[:8]:
+            print("BLOCKER " + blocker)
+        if len(blockers) > 8:
+            print(f"BLOCKER remaining_omitted={len(blockers) - 8}")
+        if output_blockers:
+            print("Existing files were NOT modified; use --resume for completed labels. "
+                  "For orphan diagnostics without a final .pt, use a NEW --audit-dir; "
+                  "invalid labels or .pt.tmp require explicit review.")
+        print("DVGT_PREFLIGHT=BLOCKED")
+        return 2
+    print("DVGT_PREFLIGHT=PASS checkpoint_hash=PASS; model_load_and_geometry_quality=NOT_CHECKED")
+    if args.preflight_only:
+        return 0
+    if not pending:
+        print(f"DVGT_DEPTH=PASS target_frames={len(targets)} saved=0 skipped={len(completed)} "
+              "no_model_load=True no_GPU_inference=True")
+        print("GEOMETRY_APPROVAL=UNVERIFIED student_training=NOT_STARTED")
+        return 0
+    device = initialize_cuda_device()
+    helpers = load_preprocessors(repo)
+    model, load_audit = build_teacher(repo, checkpoint, device, teacher["decoder_chunk_frames"])
+    provenance["checkpoint_load"] = load_audit
     audit_dir.mkdir(parents=True, exist_ok=True)
     if args.export_candidate_labels:
         output_dir.mkdir(parents=True, exist_ok=True)
-    saved_tokens, processed = set(), 0
-    for plan in plans:
+    saved_tokens, processed = set(completed), 0
+    remaining_targets = len(targets) - len(completed)
+    for plan in pending:
         tensors, native_ks, rgbs = [], {}, {}
         for index in plan["indices"]:
             cameras = {item["name"]: item for item in cameras_by_index[index]}
@@ -312,14 +332,16 @@ def main(argv=None):
                 for stat in stats:
                     print("  {camera} valid={valid_fraction:.3f} median_m={median_m:.2f} "
                           "reprojection_median_px={native_reprojection_median_px:.2f}".format(**stat))
-            if processed == 1 or processed % settings["log_interval"] == 0 or processed == len(targets):
-                print(f"frame={processed}/{len(targets)} index={index} token={token} depth={tuple(depth.shape)} "
+            if processed == 1 or processed % settings["log_interval"] == 0 or processed == remaining_targets:
+                print(f"frame={processed}/{remaining_targets} complete={len(saved_tokens)}/{len(targets)} "
+                      f"index={index} token={token} depth={tuple(depth.shape)} "
                       f"valid={mask.float().mean().item():.4f} saved={args.export_candidate_labels}", flush=True)
         del points, confidence
     expected_tokens = {str(infos[index]["token"]) for index in targets}
     if args.export_candidate_labels and saved_tokens != expected_tokens:
         raise RuntimeError("Target/exported token mismatch")
-    print(f"DVGT_DEPTH=PASS target_frames={processed} saved={len(saved_tokens)} "
+    print(f"DVGT_DEPTH=PASS target_frames={len(targets)} saved={processed if args.export_candidate_labels else 0} "
+          f"skipped={len(completed)} complete={len(saved_tokens)} "
           f"peak_allocated_MiB={torch.cuda.max_memory_allocated(device) / 2**20:.1f} audit_dir={audit_dir}")
     print("GEOMETRY_APPROVAL=UNVERIFIED student_training=NOT_STARTED")
     return 0
