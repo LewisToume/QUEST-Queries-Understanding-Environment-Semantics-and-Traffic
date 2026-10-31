@@ -1,6 +1,8 @@
 # Teacher Integration Status
 
 Design contract: [Four-Teacher Student](four_teacher_student_design.md).
+Current encoder/decoder audit and proposed integration:
+[Teacher/QUEST comparison, 2026-10-31](teacher_encoder_decoder_comparison.md).
 Domain requirement and selection: [nuPlan/OpenScene audit](nuplan_openscene_teacher_selection.md).
 BEV is the shared spatial representation, not a fifth teacher task.
 FORMAL teachers must have nuPlan/OpenScene task training/validation evidence.
@@ -12,7 +14,7 @@ Four ready domain-qualified neural teachers are NOT available in this checkout.
 | Navformer UniAD Agent branch | Agent | User-reported nuPlan checkpoint inference/export and Stage 2 training | RETAIN; Agent regression after shared-front-end changes |
 | nuPlan HD map | Vector Map | User-reported real vector GT export/audit/training | RETAIN AS GT, not a neural teacher; preserve schema/split/capacity checks |
 | Navformer raster map branch | Optional Map KD | Same-domain checkpoint, unreliable lane masks observed | DISABLED FOR QUALITY; no silent reactivation |
-| DVGT-1 | Depth / geometry candidate | Author OpenScene configs/public checkpoint hash verified online; native exporter and Dataset schema implemented | SERVER UNTESTED; strict load, axis/scale/pixel conversion and actual accuracy still require validation |
+| DVGT-1 | Offline Depth / geometry teacher; experimental adaptation | User-reported strict native GPU inference, label export and five-epoch 5,000-frame Student training; full 120-frame evaluation | RUNTIME REPORTED PASS; Student/teacher AbsRel=0.1238268, RMSE=6.0619m, delta1=0.8278686; real LiDAR accuracy / geometry NOT verified |
 | ViGT | Backup geometry candidate | Author paper/README includes nuPlan and publishes weight link | No checkpoint-content/load/rendering check; not camera Seg |
 | No selected same-domain camera-Seg checkpoint | Semantic Segmentation | Search did not verify a reusable qualifying release | BLOCKED; BEV segmentation does not satisfy camera-Seg |
 | SegFormer-B5 Cityscapes | Out-of-domain Seg control | User-reported export, Student training and 120-frame pseudo-agreement | NOT FORMAL: Cityscapes weights, no independent nuPlan semantic GT validation |
@@ -30,6 +32,10 @@ with frozen Agent/Map and strict label preflight. The user reported real server
 training and validation. These measure imitation of OUT-OF-DOMAIN pseudo labels,
 not same-domain teacher qualification or real-GT accuracy. Existing experimental
 labels/checkpoints are preserved; configurations are not switched by this audit.
+The DVGT Depth-only experiment is separate from the historical Metric3D/Seg
+control. It freezes Agent/Map and does NOT automatically merge the trained Seg
+branch. Current data signatures permit the reviewed safe-export resume update
+without weakening geometry/config/split checks.
 Stage 3 trains against nuPlan vector GT, NOT
 MapTRv2 predictions. Navformer raster-map KD stays disabled because of the
 observed unreliable lane masks.
@@ -52,4 +58,6 @@ The new same-domain route uses `configs/depth_teacher_dvgt.yaml`,
 [DVGT server guide](dvgt_depth_teacher.md) provides asset preparation, CPU
 preflight and one-target GPU diagnostics. Default inference writes NO training
 labels. A separate Depth-only config `configs/seg_depth_dvgt.yaml` avoids
-requiring the unqualified-domain Seg labels. No server test/training is claimed.
+requiring the unqualified-domain Seg labels. As of 2026-10-31 the user has
+reported real inference, export, training and validation for this route; these
+are not local Codex executions or independent geometry/GT certification.

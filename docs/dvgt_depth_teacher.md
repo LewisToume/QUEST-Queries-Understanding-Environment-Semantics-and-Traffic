@@ -5,6 +5,16 @@ execution, data export, installation or training was run by Codex. The user
 executes the commands below on the server. No Student architecture/loss or
 Agent/Map weights are changed. Old Metric3D/Seg experiments are preserved.
 
+2026-10-31 USER-REPORTED follow-up: strict GPU inference passed with empty
+missing/unexpected/mismatched lists; the full 120-frame validation export passed.
+The Student completed five epochs over 5,000 frames, with frozen Agent/Map
+unchanged. Held-out 120-frame teacher agreement: AbsRel=0.1238268,
+RMSE=6.0619m, delta1=0.8278686. Geometry and real LiDAR accuracy remain UNVERIFIED.
+This does not certify architectural equivalence or an integrated trained Seg
+branch. See [the encoder/decoder comparison](teacher_encoder_decoder_comparison.md).
+The original execution notes below are historical; no local Codex execution
+was performed for this follow-up.
+
 ## Source And Weight Contract
 
 - [Author code](https://github.com/wzzheng/DVGT), pinned commit

@@ -1,5 +1,10 @@
 # QUEST: Four-Teacher Student Design Contract
 
+Current project-wide encoder/decoder comparison and integration proposal:
+[2026-10-31 audit](teacher_encoder_decoder_comparison.md). It incorporates the
+user-reported DVGT Student experiment; historical readiness notes below must not
+override the newer evidence or be mistaken for an implemented replacement.
+
 For the code-versus-teacher mechanism audit and parameter breakdown, see
 [Seg/Depth fidelity review](seg_depth_teacher_fidelity_review.md). The active
 dense profile is a lightweight baseline, not a faithful teacher reconstruction.
@@ -19,7 +24,7 @@ OpenScene training/validation evidence. See the superseding
 Retain Agent=Navformer and Map=nuPlan Vector GT. SegFormer Cityscapes and
 Metric3Dv2 are OUT-OF-DOMAIN / UNQUALIFIED-DOMAIN experiment controls, not formal
 teachers satisfying this requirement. DVGT-1 is the new domain-supported Depth
-candidate: [native adapter implemented, server validation pending](dvgt_depth_teacher.md).
+teacher: [native adapter and user-reported server experiment](dvgt_depth_teacher.md).
 A same-domain camera-Seg checkpoint is unresolved.
 Navformer raster KD remains disabled. Four qualified neural teachers are not
 ready; real map GT is not a neural teacher.
