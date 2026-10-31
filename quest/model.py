@@ -9,6 +9,7 @@ from .backbone import FrozenDINOv2Backbone
 from .bev import BEVEncoder
 from .geometry import GeometryAwareBEVLift
 from .dense_perception import SHARED_IMAGE_FRONTEND_VERSION, SharedDensePerception
+from .geometry_depth import GEOMETRY_DEPTH_VERSION, GeometryDepthFrontend
 from .heads import AgentHead, AgentProposalHead, DepthHead, MapHead, SegHead
 from .queries import AgentDecoder, MapDecoder
 from .spatial_map import SPATIAL_MAP_VERSION, MapSpatialBranch, SpatialMapDecoder, SpatialMapHead
@@ -77,7 +78,7 @@ class QUESTModel(nn.Module):
         self.dense_frontend_config = dict(dense_frontend) if dense_frontend is not None else None
         if self.dense_frontend_config is not None:
             settings = self.dense_frontend_config
-            if (settings.get("version") != SHARED_IMAGE_FRONTEND_VERSION
+            if (settings.get("version") not in (SHARED_IMAGE_FRONTEND_VERSION, GEOMETRY_DEPTH_VERSION)
                     or settings.get("preserve_spatial_features") is not True
                     or C_seg != 19 or tuple(seg_size) != tuple(settings["output_size"])
                     or tuple(depth_size) != tuple(settings["output_size"])):
@@ -133,10 +134,13 @@ class QUESTModel(nn.Module):
             )
         self.seg_head = SegHead(self.backbone.hidden_dim, C_seg, seg_size) if dense_frontend is None else None
         self.depth_head = DepthHead(self.backbone.hidden_dim, depth_size) if dense_frontend is None else None
-        self.dense_frontend = (SharedDensePerception(
-            hidden_dim=hidden_dim, channels=int(dense_frontend["channels"]), num_classes=C_seg,
-            output_size=tuple(dense_frontend["output_size"]), min_depth_m=float(dense_frontend["min_depth_m"]),
-        ) if dense_frontend is not None else None)
+        self.dense_frontend = None
+        if dense_frontend is not None and dense_frontend["version"] == GEOMETRY_DEPTH_VERSION:
+            self.dense_frontend = GeometryDepthFrontend(hidden_dim, dense_frontend)
+        elif dense_frontend is not None:
+            self.dense_frontend = SharedDensePerception(
+                hidden_dim=hidden_dim, channels=int(dense_frontend["channels"]), num_classes=C_seg,
+                output_size=tuple(dense_frontend["output_size"]), min_depth_m=float(dense_frontend["min_depth_m"]))
         self.agent_head = AgentHead(hidden_dim, C_agent, D_box)
         self.map_head = (SpatialMapHead(hidden_dim, C_map, int(self.map_architecture["decoder_layers"]))
                          if self.map_architecture is not None else MapHead(hidden_dim, C_map, P))
@@ -301,12 +305,18 @@ class QUESTModel(nn.Module):
                 for value in levels)
         return result
 
-    def forward_dense(self, images: torch.Tensor, intrinsics: torch.Tensor) -> dict:
+    def forward_dense(self, images: torch.Tensor, intrinsics: torch.Tensor,
+                      extrinsics=None, distortion=None, camera_mask=None) -> dict:
         if self.dense_frontend is None:
             raise ValueError("Seg/Depth training requires the versioned dense_frontend profile")
-        return self._decode_dense(self.extract_camera_features(images), intrinsics, tuple(images.shape[-2:]))
+        return self._decode_dense(self.extract_camera_features(images), intrinsics, tuple(images.shape[-2:]),
+                                  extrinsics, distortion, camera_mask)
 
-    def _decode_dense(self, features: Mapping, intrinsics: torch.Tensor, image_size: tuple[int, int]) -> dict:
+    def _decode_dense(self, features: Mapping, intrinsics: torch.Tensor, image_size: tuple[int, int],
+                      extrinsics=None, distortion=None, camera_mask=None) -> dict:
+        if self.dense_frontend_config["version"] == GEOMETRY_DEPTH_VERSION:
+            return self.dense_frontend(features["dense_feature_levels"], intrinsics, extrinsics,
+                                       distortion, image_size, camera_mask)
         dense = self.dense_frontend(features["dense_feature_levels"], intrinsics, image_size, include_spatial=False)
         return {"seg_logits": dense["seg_logits"], "depth": dense["depth"]}
 
@@ -332,6 +342,8 @@ class QUESTModel(nn.Module):
         intrinsics: torch.Tensor | None = None,
         extrinsics: torch.Tensor | None = None,
         ego_state: torch.Tensor | None = None,
+        distortion: torch.Tensor | None = None,
+        camera_mask: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor]:
         encoded = self.encode_image(images, intrinsics, extrinsics, ego_state,
                                     use_ego_state=False if self.dense_frontend is not None else True)
@@ -339,7 +351,8 @@ class QUESTModel(nn.Module):
         output.update(self.forward_map(encoded, intrinsics, extrinsics, ego_state,
                                        tuple(images.shape[-2:]), include_dense=self.training))
         if self.dense_frontend is not None:
-            output.update(self._decode_dense(encoded, intrinsics, tuple(images.shape[-2:])))
+            output.update(self._decode_dense(encoded, intrinsics, tuple(images.shape[-2:]),
+                                             extrinsics, distortion, camera_mask))
         else:
             output.update({
                 "seg_logits": self.seg_head(

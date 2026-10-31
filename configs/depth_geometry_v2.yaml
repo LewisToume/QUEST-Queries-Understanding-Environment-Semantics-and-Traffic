@@ -1,0 +1,56 @@
+# New architecture experiment. Reuses existing DVGT labels; no teacher re-export.
+stage: seg_depth_offline
+tasks: [depth]
+frontend:
+  version: geometry_dpt_depth_v2
+  preserve_spatial_features: true
+  image_geometry: raw_opencv
+  layer_indices: [3, 6, 9, 12]
+  output_size: [252, 448]
+  min_depth_m: 0.1
+  geometry_layers: 4
+  heads: 8
+  attention_dim: 128
+  ffn_dim: 1536
+  depth_samples: 16
+  ray_min_depth_m: 0.5
+  ray_max_depth_m: 80.0
+  neighbors: 2
+  dpt_features: 256
+  dropout: 0.1
+  amp_bf16: true
+  gradient_checkpointing: true
+train:
+  num_samples: 5000
+  epochs: 5
+  batch_size: 1
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  gradient_clip_norm: 1.0
+  num_workers: 0
+  log_interval: 100
+  seed: 42
+  missing_labels: error
+loss:
+  # Keep the baseline objective unchanged to isolate architecture effects.
+  weights:
+    seg_ce: 0.0
+    depth_log: 1.0
+    depth_relative: 0.5
+    depth_gradient: 0.5
+  depth:
+    min_depth_m: 0.1
+    max_depth_m: 80.0
+    exclude_sky: false
+paths:
+  model_config: configs/model.yaml
+  dataset_config: configs/stage1.yaml
+  stage3_config: configs/stage3_map.yaml
+  init_checkpoint: checkpoints/quest_stage3_map_spatial_v1.pt
+  split_manifest: data/stage3_split.json
+  capacity_audit: data/vector_map_capacity_audit.json
+  seg_labels: data/soft_labels_seg_unavailable
+  depth_labels: data/soft_labels_depth_dvgt1_v1_verified
+  candidate_depth_labels: data/soft_labels_depth_dvgt1_v1_candidate
+  checkpoint: checkpoints/quest_depth_geometry_v2_verified.pt
+  experimental_checkpoint: checkpoints/quest_depth_geometry_v2.pt

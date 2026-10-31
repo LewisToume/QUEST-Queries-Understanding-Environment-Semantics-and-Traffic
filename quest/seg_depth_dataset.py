@@ -41,13 +41,15 @@ def validate_depth_training_scope(record, experimental_depth):
 class SegDepthDataset(Dataset):
     def __init__(self, dataset_config, source_indices, seg_dir, depth_dir,
                  metadata_sha256, split_sha256, tasks=("seg", "depth"),
-                 missing_policy="error", experimental_depth=False, require_seg_for_depth=True):
+                 missing_policy="error", experimental_depth=False, require_seg_for_depth=True,
+                 required_depth_geometry=None):
         self.tasks = tuple(tasks)
         if not self.tasks or len(set(tasks)) != len(tasks) or set(tasks) - {"seg", "depth"}:
             raise ValueError("Dense tasks must be a nonempty subset of seg/depth")
         if missing_policy not in ("error", "mask"):
             raise ValueError("missing_policy must be error or mask")
         self.missing_policy, self.experimental_depth = missing_policy, bool(experimental_depth)
+        self.required_depth_geometry = required_depth_geometry
         load_tasks = list(self.tasks)
         if "depth" in self.tasks and require_seg_for_depth and "seg" not in load_tasks:
             load_tasks.append("seg")
@@ -95,6 +97,15 @@ class SegDepthDataset(Dataset):
                 validate_depth_record(record, token, index, OPENSCENE_CAMERA_NAMES)
                 validate_depth_training_scope(record, self.experimental_depth)
                 depth = record["depth"]
+                if getattr(self, "required_depth_geometry", None) is not None:
+                    from .depth_geometry import pack_distortion
+
+                    if depth["image_geometry"] != self.required_depth_geometry:
+                        raise ValueError("Depth frontend and label image geometry differ")
+                    if record["schema_version"] != 2 or provenance.get("teacher") != "DVGT-1":
+                        raise ValueError("Geometry Depth V2 requires the audited DVGT label contract")
+                    for coefficients in depth["distortion"]:
+                        pack_distortion(coefficients)
                 if (record["alignment_version"] == DEPTH_ALIGNMENT_VERSION
                         and provenance.get("native_saturation_excluded") is not True):
                     raise ValueError("Regenerate depth labels with native saturation exclusion")
@@ -173,15 +184,26 @@ class SegDepthDataset(Dataset):
         # Reuse the existing image/calibration path without loading unrelated Agent GT.
         sample = {**self.images._load_multiview(info), "sample_token": str(info["token"]),
                   "ego_state": torch.as_tensor(info["can_bus"][:9], dtype=torch.float32)}
-        return {key: sample[key] for key in ("images", "intrinsics", "extrinsics", "ego_state", "sample_token")} | {
+        result = {key: sample[key] for key in ("images", "intrinsics", "extrinsics", "ego_state", "sample_token")} | {
             "source_index": self.source_indices[position], "dense_targets": targets,
         }
+        if self.required_depth_geometry is not None:
+            from .depth_geometry import pack_distortion
+
+            result["distortion"] = torch.stack([pack_distortion(info["cams"][name]["distortion"])
+                                                 for name in self.images.camera_names])
+        return result
 
 
 def collate_seg_depth(samples):
     # Keep missing targets as None, never fabricate dummy GT for stacking.
+    keys = ["images", "intrinsics", "extrinsics", "ego_state"]
+    if any("distortion" in sample for sample in samples):
+        if not all("distortion" in sample for sample in samples):
+            raise ValueError("Mixed calibrated/legacy dense samples")
+        keys.append("distortion")
     return {key: torch.stack([sample[key] for sample in samples])
-            for key in ("images", "intrinsics", "extrinsics", "ego_state")} | {
+            for key in keys} | {
         "sample_token": [sample["sample_token"] for sample in samples],
         "source_index": [sample["source_index"] for sample in samples],
         "dense_targets": [sample["dense_targets"] for sample in samples],

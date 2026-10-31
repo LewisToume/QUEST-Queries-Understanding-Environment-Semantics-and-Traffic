@@ -27,8 +27,9 @@ def print_summary(report):
     summary = {**report["overall"], "mean_batch_loss": report["mean_batch_loss"],
                "frames": len(report["frames"]), "depth_geometry_policy": report["depth_geometry_policy"]}
     print(json.dumps(summary, indent=2, allow_nan=False))
-    print("seg_class teacher_pixels student_pixels IoU precision recall")
-    for row in report["seg_per_class"]:
+    if "seg" in report["trained_dense_tasks"]:
+        print("seg_class teacher_pixels student_pixels IoU precision recall")
+    for row in report["seg_per_class"] if "seg" in report["trained_dense_tasks"] else []:
         print(f"{row['class'].replace(' ', '_')} {row['teacher_pixels']} {row['student_pixels']} "
               f"{display(row['iou'])} {display(row['precision'])} {display(row['recall'])}")
     print("depth_teacher_Z_bin pixels AbsRel RMSE_m delta1 signed_bias_m")
@@ -92,7 +93,7 @@ def main():
                 if index in preview_indices:
                     files.extend(save_dense_previews(
                         output_dir, index, batch["sample_token"][position], str(infos[position]["scene_token"]),
-                        batch["images"][position], {key: output[key][position] for key in ("seg_logits", "depth")},
+                        batch["images"][position], {key: output[key][position] for key in ("seg_logits", "depth") if key in output},
                         batch["dense_targets"][position], dataset.images.camera_names, config["loss"], config["tasks"]))
             evaluated += len(infos)
             if evaluated % args.log_interval == 0 or evaluated == len(dataset):

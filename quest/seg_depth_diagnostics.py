@@ -114,7 +114,7 @@ class DenseEvaluationDiagnostics:
             scene = str(info["scene_token"])
             scene_metrics = self.scenes.setdefault(scene, empty_dense_metrics())
             self.scene_frames[scene] = self.scene_frames.get(scene, 0) + 1
-            sample = {key: predictions[key][index:index + 1] for key in ("seg_logits", "depth")}
+            sample = {key: predictions[key][index:index + 1] for key in ("seg_logits", "depth") if key in predictions}
             update_dense_metrics(scene_metrics, sample, [target], self.settings, self.tasks)
             for camera, name in enumerate(self.camera_names):
                 camera_prediction = {key: value[:, camera:camera + 1] for key, value in sample.items()}
@@ -216,7 +216,7 @@ def save_dense_previews(output_dir, source_index, token, scene, images, predicti
                        f"RGB | teacher camera-Z | QUEST camera-Z | absolute relative error (blue=0, red>=0.5); depth log scale {settings['depth']['min_depth_m']:g}-{settings['depth']['max_depth_m']:g}m")
         draw.text((8, 36), description, fill="black")
         canvases[task] = canvas
-    predicted_seg = predictions["seg_logits"].detach().argmax(1).cpu().numpy()
+    predicted_seg = predictions["seg_logits"].detach().argmax(1).cpu().numpy() if "seg" in canvases else None
     predicted_depth = predictions["depth"].detach().cpu().numpy()[:, 0]
     palette = np.asarray(CITYSCAPES_PALETTE, dtype=np.uint8)
     for camera, name in enumerate(camera_names):

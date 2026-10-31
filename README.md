@@ -11,13 +11,19 @@ The versioned Seg/Depth profile now has dataset, losses, training, evaluation an
 checkpoint integration. Its runtime and accuracy still require server validation;
 implemented code is not evidence of a fully trained multi-task model.
 
-Active supervision is Navformer Agent + real nuPlan Vector Map GT + SegFormer
-semantics + Metric3Dv2 depth. MapTRv2 is a structure reference, not a required
+Active same-domain supervision is Navformer Agent, real nuPlan Vector Map GT
+and OpenScene DVGT-1 candidate depth. Same-domain Seg teacher readiness remains
+unresolved; SegFormer Cityscapes and Metric3Dv2 are out-of-domain controls, not
+approved nuPlan/OpenScene teachers. MapTRv2 is a structure reference, not a required
 teacher checkpoint; unreliable Navformer raster-map KD remains disabled.
 See [dense teacher export](docs/dense_teacher_export.md) for asset preparation
 and the eight-view semantic export entry point.
 See [Seg/Depth student training](docs/seg_depth_training.md) for the runnable
 dense training path, preserving the existing Agent/Map checkpoint.
+The opt-in [Geometry Depth V2](docs/depth_geometry_v2.md) adds calibrated cross-view
+attention and a full DPT-style decoder while freezing DINO/Agent/Map. It reuses
+DVGT labels; new runtime and quality are not yet server-verified. This Depth-only
+profile does not emit untrained Seg logits or claim four-task completion.
 
 ## Model
 

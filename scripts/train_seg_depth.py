@@ -21,6 +21,7 @@ from quest.agent_training import load_checkpoint_cpu
 from quest.cuda_runtime import initialize_cuda_device
 from quest.map_training import load_stage3_checkpoint, load_vector_capacity_audit, stage3_model_config
 from quest.model import QUESTModel
+from quest.geometry_depth import GEOMETRY_DEPTH_VERSION
 from quest.seg_depth_dataset import SegDepthDataset, collate_seg_depth
 from quest.seg_depth_losses import (compute_seg_depth_loss, empty_dense_metrics,
                                     summarize_dense_metrics, update_dense_metrics)
@@ -64,6 +65,8 @@ def make_dataset(config, dataset, manifest, split, count=None):
         manifest["metadata_sha256"], manifest["split_sha256"], config["tasks"],
         missing_policy=config["train"]["missing_labels"], experimental_depth=experimental,
         require_seg_for_depth=config["loss"]["depth"]["exclude_sky"],
+        required_depth_geometry=(config["frontend"]["image_geometry"]
+                                 if config["frontend"]["version"] == GEOMETRY_DEPTH_VERSION else None),
     )
     count_classes = split == "train" and config["loss"].get("seg", {}).get("class_balance") is not None
     audit = result.audit(config["loss"]["depth"], include_seg_class_counts=count_classes)
@@ -103,7 +106,13 @@ def loader(dataset, config, shuffle=False):
 
 
 def dense_predictions(model, batch, device):
-    return model.forward_dense(batch["images"].to(device), batch["intrinsics"].to(device))
+    geometry = model.dense_frontend_config["version"] == GEOMETRY_DEPTH_VERSION
+    amp = geometry and model.dense_frontend_config.get("amp_bf16", False) and device.type == "cuda"
+    if amp and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("This Depth profile requests bf16; no automatic precision/model fallback")
+    extra = ({key: batch[key].to(device) for key in ("extrinsics", "distortion")} if geometry else {})
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+        return model.forward_dense(batch["images"].to(device), batch["intrinsics"].to(device), **extra)
 
 
 @torch.no_grad()
@@ -123,9 +132,13 @@ def evaluate(model, dataset, config, device):
 
 
 def gradient_health(model):
-    groups = {"neck": (model.dense_frontend.lateral, model.dense_frontend.refine),
-              "seg": (model.dense_frontend.seg_decoder,),
-              "depth": (model.dense_frontend.camera_condition, model.dense_frontend.depth_decoder)}
+    dense = model.dense_frontend
+    if model.dense_frontend_config["version"] == GEOMETRY_DEPTH_VERSION:
+        groups = {"neck": (dense.level_projections, dense.ray_embedding),
+                  "geometry": (dense.geometry_blocks,), "depth": (dense.depth_decoder,), "seg": ()}
+    else:
+        groups = {"neck": (dense.lateral, dense.refine), "seg": (dense.seg_decoder,),
+                  "depth": (dense.camera_condition, dense.depth_decoder)}
     result = {}
     for name, modules in groups.items():
         square, count = 0.0, 0
@@ -255,7 +268,7 @@ def main():
     elif resumed is None:
         model = QUESTModel(**model_config)
         source_epoch = load_stage3_checkpoint(model, None, source, expected_map_kd_enabled=False)
-        print(f"spatial_warm_start_epoch={source_epoch}; Seg/Depth heads=NEW")
+        print(f"spatial_warm_start_epoch={source_epoch}; new_dense_tasks={config['tasks']}")
     else:
         model = load_dense_model(resumed)
     del source
@@ -273,8 +286,15 @@ def main():
         start_epoch = int(resumed["epoch"])
         torch.set_rng_state(resumed["torch_rng_state"])
         train_loader.generator.set_state(resumed["loader_rng_state"])
-    print(f"parameters={model.parameter_summary()} input=[B,8,3,252,448] "
-          "seg=[B,8,19,252,448] depth=[B,8,1,252,448]")
+    print(f"parameters={model.parameter_summary()} frontend={model.dense_frontend_config['version']} "
+          f"input=[B,8,3,252,448] tasks={config['tasks']} depth=[B,8,1,252,448]")
+    if model.dense_frontend_config["version"] == GEOMETRY_DEPTH_VERSION:
+        dense = model.dense_frontend
+        print("depth_component_parameters=" + str({
+            "image_projections": sum(p.numel() for p in dense.level_projections.parameters()),
+            "ray_embedding": sum(p.numel() for p in dense.ray_embedding.parameters()),
+            "geometry_encoder": sum(p.numel() for p in dense.geometry_blocks.parameters()),
+            "dpt_decoder": sum(p.numel() for p in dense.depth_decoder.parameters())}))
     epochs = range(1) if args.smoke_steps else range(start_epoch, config["train"]["epochs"])
     last_gradient = {}
     for epoch in epochs:
@@ -300,6 +320,9 @@ def main():
             last_gradient = gradient_health(model)
             if last_gradient["neck"] is None or (args.smoke_steps and last_gradient["neck"] <= 0):
                 raise RuntimeError("Dense neck received no training signal")
+            if "geometry" in last_gradient and (last_gradient["geometry"] is None
+                    or (args.smoke_steps and last_gradient["geometry"] <= 0)):
+                raise RuntimeError("Cross-view geometry encoder received no training signal")
             for task in config["tasks"]:
                 if losses[task + "_pixels"] > 0 and (last_gradient[task] is None
                         or (args.smoke_steps and last_gradient[task] <= 0)):
@@ -313,7 +336,10 @@ def main():
                 sums[key] = sums.get(key, 0.0) + float(value)
             if step == 0 or (step + 1) % config["train"]["log_interval"] == 0 or step + 1 == steps:
                 print(f"epoch={epoch+1} step={step+1}/{steps} total={float(losses['total_loss']):.4f} "
-                      f"seg={float(losses['seg_ce']):.4f} depth_log={float(losses['depth_log']):.4f}", flush=True)
+                      f"seg={float(losses['seg_ce']):.4f} depth_log={float(losses['depth_log']):.4f} "
+                      f"depth_absrel={float(losses['depth_absrel']):.4f}" +
+                      (f" cross_view_coverage={float(output['depth_cross_view_coverage']):.3f}"
+                       if "depth_cross_view_coverage" in output else ""), flush=True)
         if not active_steps or frozen_spatial_fingerprint(model) != baseline_hash:
             raise RuntimeError("No optimizer steps or frozen Agent/Map/backbone changed")
         print(f"epoch={epoch+1} means={json.dumps({key: value/active_steps for key, value in sums.items()})} "
@@ -323,9 +349,10 @@ def main():
                 raise RuntimeError("Optimizer did not change dense parameters")
             model.eval()
             with torch.no_grad():
-                full = model(**{key: batch[key].to(device) for key in ("images", "intrinsics", "extrinsics", "ego_state")})
-            print("four_task_shapes=" + str({key: tuple(full[key].shape) for key in (
-                "agent_cls_logits", "agent_boxes", "map_cls_logits", "map_points", "seg_logits", "depth")}))
+                full = model(**{key: batch[key].to(device) for key in
+                                ("images", "intrinsics", "extrinsics", "ego_state", "distortion") if key in batch})
+            print("available_task_shapes=" + str({key: tuple(full[key].shape) for key in (
+                "agent_cls_logits", "agent_boxes", "map_cls_logits", "map_points", "seg_logits", "depth") if key in full}))
             print("SEG_DEPTH_SMOKE=PASS parameter_update=PASS gradients=FINITE checkpoint_saved=False")
         else:
             print("held_out_teacher_agreement=" + json.dumps(evaluate(model, validation, config, device), allow_nan=False))

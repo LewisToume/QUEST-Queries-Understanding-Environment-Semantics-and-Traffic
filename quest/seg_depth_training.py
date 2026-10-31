@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 
 from .dense_perception import SHARED_IMAGE_FRONTEND_VERSION
+from .geometry_depth import GEOMETRY_DEPTH_VERSION, validate_geometry_depth_options
 from .model import QUESTModel, load_quest_v3_checkpoint
 from .seg_teacher import CITYSCAPES_CLASSES
 
@@ -68,10 +69,18 @@ def validate_dense_config(config, tasks):
     if config.get("stage") != DENSE_STAGE or not tasks or set(tasks) - {"seg", "depth"} or len(set(tasks)) != len(tasks):
         raise ValueError("Invalid dense training stage/tasks")
     frontend, train = config["frontend"], config["train"]
-    if (frontend["version"] != SHARED_IMAGE_FRONTEND_VERSION
+    if (frontend["version"] not in (SHARED_IMAGE_FRONTEND_VERSION, GEOMETRY_DEPTH_VERSION)
             or frontend["preserve_spatial_features"] is not True
             or tuple(frontend["output_size"]) != (252, 448)):
         raise ValueError("Dense profile must preserve the existing spatial branch and 252x448 pixels")
+    if frontend["version"] == GEOMETRY_DEPTH_VERSION:
+        validate_geometry_depth_options(frontend)
+        if list(tasks) != ["depth"] or config["loss"]["weights"]["seg_ce"] != 0:
+            raise ValueError("Geometry Depth V2 is Depth-only; no untrained Seg output is exported")
+        if config["loss"]["depth"]["exclude_sky"] or train["missing_labels"] != "error":
+            raise ValueError("Depth V2 requires actual Depth targets and no unqualified Seg dependency")
+        if config["loss"]["depth"]["max_depth_m"] != frontend["ray_max_depth_m"]:
+            raise ValueError("Depth V2 target and geometry ranges differ")
     for name in ("epochs", "num_samples", "batch_size", "log_interval"):
         if not isinstance(train[name], int) or train[name] <= 0:
             raise ValueError("Expected positive integer train." + name)
@@ -98,6 +107,12 @@ def configure_dense_training(model, tasks):
     model.requires_grad_(False)
     model.eval()
     dense = model.dense_frontend
+    if model.dense_frontend_config["version"] == GEOMETRY_DEPTH_VERSION:
+        if list(tasks) != ["depth"]:
+            raise ValueError("Geometry Depth V2 only trains Depth")
+        dense.requires_grad_(True)
+        dense.train()
+        return list(dense.parameters())
     for name in ("lateral", "refine"):
         getattr(dense, name).requires_grad_(True)
     if "seg" in tasks:
@@ -123,14 +138,20 @@ def frozen_spatial_fingerprint(model):
 
 
 def validate_dense_checkpoint(checkpoint):
+    profile = checkpoint.get("dense_frontend") or {}
+    expected_version = 2 if profile.get("version") == GEOMETRY_DEPTH_VERSION else DENSE_CHECKPOINT_VERSION
     if (checkpoint.get("stage") != DENSE_STAGE
-            or checkpoint.get("dense_checkpoint_version") != DENSE_CHECKPOINT_VERSION
+            or checkpoint.get("dense_checkpoint_version") != expected_version
             or checkpoint.get("architecture_version") != 3
             or checkpoint.get("spatial_preservation_verified") is not True
             or checkpoint.get("bev_use_ego_state") is not False):
         raise ValueError("Not a compatible/preserved Seg/Depth QUEST checkpoint")
     if checkpoint.get("dense_frontend") != checkpoint.get("model_config", {}).get("dense_frontend"):
         raise ValueError("Checkpoint frontend/model profile mismatch")
+    if profile.get("version") == GEOMETRY_DEPTH_VERSION:
+        if profile != checkpoint.get("training_config", {}).get("frontend"):
+            raise ValueError("Checkpoint frontend/training profile mismatch")
+        validate_dense_config(checkpoint["training_config"], checkpoint["trained_dense_tasks"])
     support = checkpoint.get("trained_class_support_mask")
     if not torch.is_tensor(support) or not torch.equal(support.cpu().bool(), torch.tensor([True, True, False, False])):
         raise ValueError("Dense checkpoint Agent support mask mismatch")
@@ -155,7 +176,8 @@ def save_dense_checkpoint(path, model, optimizer, scheduler, epoch, config, mode
     if frozen_spatial_fingerprint(model) != baseline_hash:
         raise RuntimeError("Agent/Map/backbone changed during dense training; checkpoint refused")
     payload = {
-        "stage": DENSE_STAGE, "dense_checkpoint_version": DENSE_CHECKPOINT_VERSION,
+        "stage": DENSE_STAGE, "dense_checkpoint_version": (
+            2 if model.dense_frontend_config["version"] == GEOMETRY_DEPTH_VERSION else DENSE_CHECKPOINT_VERSION),
         "architecture_version": 3, "dense_frontend": model.dense_frontend_config,
         "model_config": model_config, "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),

@@ -34,19 +34,24 @@ def depth_valid_mask(target, seg_target, settings):
 
 
 def compute_seg_depth_loss(predictions, targets, settings, tasks=("seg", "depth")):
-    seg, depth = predictions["seg_logits"], predictions["depth"]
-    if seg.ndim != 5 or seg.shape[2] != 19 or depth.shape != (*seg.shape[:2], 1, *seg.shape[-2:]):
+    seg, depth = predictions.get("seg_logits"), predictions["depth"]
+    if (depth.ndim != 5 or depth.shape[2] != 1
+            or ("seg" in tasks and seg is None)
+            or (seg is not None and (seg.ndim != 5 or seg.shape[2] != 19
+                                    or depth.shape != (*seg.shape[:2], 1, *seg.shape[-2:])))):
         raise ValueError("Require [B,N,19,H,W] segmentation and [B,N,1,H,W] camera-Z")
-    if len(targets) != seg.shape[0] or not bool(torch.isfinite(seg).all() & torch.isfinite(depth).all()) or not bool((depth > 0).all()):
+    if (len(targets) != depth.shape[0] or not bool(torch.isfinite(depth).all())
+            or (seg is not None and not bool(torch.isfinite(seg).all())) or not bool((depth > 0).all())):
         raise ValueError("Nonfinite/invalid dense predictions or target batch mismatch")
     weights = settings["weights"]
     if any(not math.isfinite(float(value)) or float(value) < 0 for value in weights.values()):
         raise ValueError("Dense loss weights must be finite and nonnegative")
-    zero = seg.sum() * 0 + depth.sum() * 0
-    class_weights = segmentation_class_weights(settings, seg)
-    seg_normalizer = seg.new_zeros(())
+    zero = depth.sum() * 0 + (seg.sum() * 0 if seg is not None else 0)
+    class_weights = segmentation_class_weights(settings, seg) if seg is not None else None
+    seg_normalizer = depth.new_zeros(())
     sums = {key: zero for key in ("seg_ce", "depth_log", "depth_relative", "depth_gradient")}
     counts = {"seg_pixels": 0, "depth_pixels": 0, "depth_edges": 0}
+    absrel_sum = depth.new_zeros(())
     for index, target in enumerate(targets):
         semantic = target.get("seg")
         if "seg" in tasks and semantic is not None:
@@ -74,6 +79,7 @@ def compute_seg_depth_loss(predictions, targets, settings, tasks=("seg", "depth"
             sums["depth_relative"] = sums["depth_relative"] + F.smooth_l1_loss(
                 ((depth[index] - safe_truth) / safe_truth)[valid], torch.zeros_like(truth[valid]), reduction="sum")
             counts["depth_pixels"] += int(valid.sum())
+            absrel_sum += ((depth[index].detach() - safe_truth).abs() / safe_truth)[valid].sum()
             for axis in (-2, -1):
                 edge_valid = valid.narrow(axis, 1, valid.shape[axis] - 1) & valid.narrow(axis, 0, valid.shape[axis] - 1)
                 delta = predicted_log.diff(dim=axis) - target_log.diff(dim=axis)
@@ -88,7 +94,7 @@ def compute_seg_depth_loss(predictions, targets, settings, tasks=("seg", "depth"
               "depth_relative": sums["depth_relative"] / max(counts["depth_pixels"], 1),
               "depth_gradient": sums["depth_gradient"] / max(counts["depth_edges"], 1)}
     losses["total_loss"] = sum(float(weights[key]) * losses[key] for key in losses)
-    return {**losses, **counts}
+    return {**losses, **counts, "depth_absrel": absrel_sum / max(counts["depth_pixels"], 1)}
 
 
 def empty_dense_metrics():
