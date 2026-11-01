@@ -202,9 +202,20 @@ def collate_seg_depth(samples):
         if not all("distortion" in sample for sample in samples):
             raise ValueError("Mixed calibrated/legacy dense samples")
         keys.append("distortion")
-    return {key: torch.stack([sample[key] for sample in samples])
+    result = {key: torch.stack([sample[key] for sample in samples])
             for key in keys} | {
         "sample_token": [sample["sample_token"] for sample in samples],
         "source_index": [sample["source_index"] for sample in samples],
         "dense_targets": [sample["dense_targets"] for sample in samples],
     }
+    if any("history" in sample for sample in samples):
+        if not all("history" in sample for sample in samples):
+            raise ValueError("Mixed temporal/single-frame dense samples")
+        result["history"] = {key: torch.stack([sample["history"][key] for sample in samples])
+                             for key in samples[0]["history"]}
+        result["history_identity"] = [sample["history_identity"] for sample in samples]
+    if any("soft_labels" in sample for sample in samples):
+        if not all("soft_labels" in sample for sample in samples):
+            raise ValueError("Mixed labeled/unlabeled temporal Agent samples")
+        result["soft_labels"] = [sample["soft_labels"] for sample in samples]
+    return result

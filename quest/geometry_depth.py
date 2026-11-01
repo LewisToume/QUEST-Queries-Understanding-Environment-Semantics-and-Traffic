@@ -15,10 +15,12 @@ from .depth_geometry import sampling_geometry
 
 
 GEOMETRY_DEPTH_VERSION = "geometry_dpt_depth_v2"
+TEMPORAL_DEPTH_VERSION = "temporal_geometry_dpt_depth_v3"
+GEOMETRY_DEPTH_VERSIONS = (GEOMETRY_DEPTH_VERSION, TEMPORAL_DEPTH_VERSION)
 
 
 def validate_geometry_depth_options(options):
-    if (options["version"] != GEOMETRY_DEPTH_VERSION or options["image_geometry"] != "raw_opencv"
+    if (options["version"] not in GEOMETRY_DEPTH_VERSIONS or options["image_geometry"] != "raw_opencv"
             or options["preserve_spatial_features"] is not True
             or tuple(options["output_size"]) != (252, 448)):
         raise ValueError("Geometry Depth V2 requires explicit raw OpenCV geometry and unchanged spatial features")
@@ -33,6 +35,20 @@ def validate_geometry_depth_options(options):
         raise ValueError("Invalid geometry Depth attention/ray configuration")
     if any(not isinstance(options[key], bool) for key in ("amp_bf16", "gradient_checkpointing")):
         raise ValueError("Depth precision/checkpointing flags must be explicit booleans")
+    if options["version"] == TEMPORAL_DEPTH_VERSION:
+        temporal = options["temporal"]
+        if (temporal["frames"] != 2 or temporal["causal"] is not True
+                or temporal["missing_history"] != "mask"
+                or not isinstance(temporal["source_cameras"], int)
+                or not 1 <= temporal["source_cameras"] <= 8
+                or not all(math.isfinite(temporal[k]) and temporal[k] > 0
+                           for k in ("timestamp_scale", "max_gap_s"))):
+            raise ValueError("Temporal Depth requires two causal frames and explicit history masking")
+        agent = temporal.get("agent_bev")
+        if agent is not None and (agent.get("enabled") is not True
+                or any(not isinstance(agent[k], int) or agent[k] <= 0 for k in ("layers", "heads", "attention_dim"))
+                or 384 % agent["heads"] or agent["attention_dim"] % agent["heads"]):
+            raise ValueError("Invalid opt-in temporal Agent BEV profile")
 
 
 class RayCrossViewAttention(nn.Module):
@@ -44,13 +60,16 @@ class RayCrossViewAttention(nn.Module):
         self.project = nn.Linear(attention_dim, dim)
         self.depth_bias = nn.Parameter(torch.zeros(heads, samples))
 
-    def forward(self, tokens, shape, geometry):
+    def forward(self, tokens, shape, geometry, source_tokens=None):
         b, n, h, w = shape
         source_ids, grids, masks = geometry[:3]
         p, c, heads = h * w, self.channels, self.heads
         maps = tokens.reshape(b * n, p, -1).transpose(1, 2).reshape(b * n, -1, h, w)
         kv = self.key_value(maps).reshape(b, n, c * 2, h, w)
         self_kv = kv.flatten(-2).transpose(-1, -2)
+        if source_tokens is not None:
+            source_maps = source_tokens.reshape(b * n, p, -1).transpose(1, 2).reshape(b * n, -1, h, w)
+            kv = self.key_value(source_maps).reshape(b, n, c * 2, h, w)
         candidates, validity = [self_kv.unsqueeze(-2)], [torch.ones(b, n, p, 1, dtype=torch.bool, device=tokens.device)]
         batch = torch.arange(b, device=tokens.device)[:, None]
         for rank, (grid, valid) in enumerate(zip(grids, masks)):

@@ -12,11 +12,13 @@ sys.path.insert(0, str(ROOT))
 
 from quest.agent_training import load_checkpoint_cpu
 from quest.cuda_runtime import initialize_cuda_device
+from quest.geometry_depth import TEMPORAL_DEPTH_VERSION
 from quest.seg_depth_diagnostics import DenseEvaluationDiagnostics, preview_positions, save_dense_previews
 from quest.seg_depth_losses import compute_seg_depth_loss
 from quest.seg_depth_training import load_dense_model, validate_dense_checkpoint
 from quest.stage3_split import file_sha256
 from scripts.train_seg_depth import dense_predictions, load_context, loader, make_dataset, resolve
+from quest.temporal_agent_training import empty_agent_agreement, summarize_agent_agreement, update_agent_agreement
 
 
 def display(value):
@@ -40,6 +42,14 @@ def print_summary(report):
     for scene, metrics in report["per_scene"].items():
         print(f"scene={scene} frames={metrics['frames']} Seg_mIoU={display(metrics['seg_teacher_mIoU'])} "
               f"Depth_AbsRel={display(metrics['depth_teacher_absrel'])}")
+    if "current_frame_only_same_weights" in report:
+        without = report["current_frame_only_same_weights"]
+        print("current_frame_only_same_weights=" + json.dumps(without["overall"], allow_nan=False))
+        far = without["depth_distance_bins"][-1]
+        print(f"current_frame_only_50_80m AbsRel={display(far['absrel'])} "
+              f"RMSE_m={display(far['rmse_m'])} signed_bias_m={display(far['signed_bias_m'])}")
+    if "agent_teacher_agreement" in report:
+        print("agent_teacher_agreement=" + json.dumps(report["agent_teacher_agreement"], allow_nan=False))
     print("full_per_camera_confusion_and_mask_counts=report.json; reference=TEACHER_PSEUDO_NOT_REAL_GT")
 
 
@@ -74,6 +84,10 @@ def main():
     device = initialize_cuda_device()
     model = load_dense_model(checkpoint).to(device).eval()
     diagnostics = DenseEvaluationDiagnostics(dataset.images.camera_names, config["loss"], config["tasks"])
+    temporal = config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION
+    current_only = DenseEvaluationDiagnostics(dataset.images.camera_names, config["loss"], config["tasks"]) if temporal else None
+    joint = config.get("temporal_agent", {}).get("enabled", False)
+    agent_metrics, agent_current_only = empty_agent_agreement(), empty_agent_agreement()
     lookup = dict(zip(dataset.source_indices, dataset.images.infos))
     preview_indices = {dataset.source_indices[position] for position in preview_positions(
         dataset.images.infos, args.preview_frames)}
@@ -87,6 +101,14 @@ def main():
                 raise RuntimeError("Nonfinite evaluation loss; no completed report will be produced")
             infos = [lookup[index] for index in batch["source_index"]]
             diagnostics.update(output, batch["dense_targets"], infos, batch["source_index"], batch["sample_token"])
+            if joint:
+                update_agent_agreement(agent_metrics, model, output, batch, config, device)
+            if current_only is not None:
+                without_history = dense_predictions(model, batch, device, disable_history=True)
+                current_only.update(without_history, batch["dense_targets"], infos,
+                                    batch["source_index"], batch["sample_token"])
+                if joint:
+                    update_agent_agreement(agent_current_only, model, without_history, batch, config, device)
             loss_sum += float(losses["total_loss"])
             batches += 1
             for position, index in enumerate(batch["source_index"]):
@@ -113,6 +135,17 @@ def main():
                         "Geometry remains UNVERIFIED for experimental_image_plane checkpoints",
                         "Preview depth panels share the evaluation mask and fixed log scale; black pixels are excluded",
                         f"Teacher agreement is not real GT accuracy; {evaluated} frames cover {len(diagnostics.scenes)} temporally correlated scenes"]}
+    if temporal:
+        report["temporal_context"] = audit["temporal_context"]
+        report["temporal_frame_identities"] = dataset.history_plans
+        report["current_frame_only_same_weights"] = current_only.summarize()
+        report["notes"].append("History-disabled evaluation measures reliance on history, not a separately trained single-frame control")
+    if joint:
+        report["agent_teacher_agreement"] = {
+            "with_history": summarize_agent_agreement(agent_metrics, config),
+            "original_current_only": summarize_agent_agreement(agent_current_only, config)}
+        report["agent_label_audit"] = audit["agent_temporal_labels"]
+        report["notes"].append("Original Agent weights are frozen, but temporal inputs can change Agent predictions; compare both routes")
     if (evaluated != len(dataset)
             or [row["source_index"] for row in report["frames"]] != dataset.source_indices):
         raise RuntimeError("Incomplete validation evaluation")

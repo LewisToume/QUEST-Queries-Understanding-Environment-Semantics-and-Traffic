@@ -24,6 +24,11 @@ The opt-in [Geometry Depth V2](docs/depth_geometry_v2.md) adds calibrated cross-
 attention and a full DPT-style decoder while freezing DINO/Agent/Map. It reuses
 DVGT labels; new runtime and quality are not yet server-verified. This Depth-only
 profile does not emit untrained Seg logits or claim four-task completion.
+The [selective temporal profile](docs/teacher_temporal_inputs.md) adds real
+previous-frame inputs to Agent (Navformer-inspired BEV fusion) and Depth (DVGT-
+inspired geometry). Map and Seg are not automatically made temporal. It preserves
+old weights, audits causal context and measures Agent/Depth history ablations;
+server runtime/quality checks are still required.
 
 ## Model
 

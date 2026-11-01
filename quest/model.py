@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, Dict, Mapping, Sequence, Tuple
 
 import torch
@@ -9,7 +10,8 @@ from .backbone import FrozenDINOv2Backbone
 from .bev import BEVEncoder
 from .geometry import GeometryAwareBEVLift
 from .dense_perception import SHARED_IMAGE_FRONTEND_VERSION, SharedDensePerception
-from .geometry_depth import GEOMETRY_DEPTH_VERSION, GeometryDepthFrontend
+from .geometry_depth import GEOMETRY_DEPTH_VERSION, GEOMETRY_DEPTH_VERSIONS, TEMPORAL_DEPTH_VERSION, GeometryDepthFrontend
+from .temporal_depth import TemporalGeometryDepthFrontend
 from .heads import AgentHead, AgentProposalHead, DepthHead, MapHead, SegHead
 from .queries import AgentDecoder, MapDecoder
 from .spatial_map import SPATIAL_MAP_VERSION, MapSpatialBranch, SpatialMapDecoder, SpatialMapHead
@@ -78,7 +80,7 @@ class QUESTModel(nn.Module):
         self.dense_frontend_config = dict(dense_frontend) if dense_frontend is not None else None
         if self.dense_frontend_config is not None:
             settings = self.dense_frontend_config
-            if (settings.get("version") not in (SHARED_IMAGE_FRONTEND_VERSION, GEOMETRY_DEPTH_VERSION)
+            if (settings.get("version") not in (SHARED_IMAGE_FRONTEND_VERSION, *GEOMETRY_DEPTH_VERSIONS)
                     or settings.get("preserve_spatial_features") is not True
                     or C_seg != 19 or tuple(seg_size) != tuple(settings["output_size"])
                     or tuple(depth_size) != tuple(settings["output_size"])):
@@ -135,7 +137,9 @@ class QUESTModel(nn.Module):
         self.seg_head = SegHead(self.backbone.hidden_dim, C_seg, seg_size) if dense_frontend is None else None
         self.depth_head = DepthHead(self.backbone.hidden_dim, depth_size) if dense_frontend is None else None
         self.dense_frontend = None
-        if dense_frontend is not None and dense_frontend["version"] == GEOMETRY_DEPTH_VERSION:
+        if dense_frontend is not None and dense_frontend["version"] == TEMPORAL_DEPTH_VERSION:
+            self.dense_frontend = TemporalGeometryDepthFrontend(hidden_dim, dense_frontend)
+        elif dense_frontend is not None and dense_frontend["version"] == GEOMETRY_DEPTH_VERSION:
             self.dense_frontend = GeometryDepthFrontend(hidden_dim, dense_frontend)
         elif dense_frontend is not None:
             self.dense_frontend = SharedDensePerception(
@@ -246,10 +250,14 @@ class QUESTModel(nn.Module):
             raise ValueError(f"invalid ego_state shape: {tuple(ego_state.shape)}")
 
         features = self.extract_camera_features(images)
+        return self.encode_camera_features(features, intrinsics, extrinsics, ego_state,
+                                            (height, width), use_ego_state)
+
+    def encode_camera_features(self, features, intrinsics, extrinsics, ego_state, image_size, use_ego_state=False):
         camera_features = features["backbone_feature_maps"]
         lifted_tokens, lift_diagnostics = self.geometry_lift(
             camera_features, intrinsics, extrinsics, ego_state,
-            image_size=(height, width), return_diagnostics=True, use_ego_state=use_ego_state,
+            image_size=image_size, return_diagnostics=True, use_ego_state=use_ego_state,
         )
         bev_tokens, bev_features = self.bev_encoder(lifted_tokens)
         return {
@@ -306,14 +314,23 @@ class QUESTModel(nn.Module):
         return result
 
     def forward_dense(self, images: torch.Tensor, intrinsics: torch.Tensor,
-                      extrinsics=None, distortion=None, camera_mask=None) -> dict:
+                      extrinsics=None, distortion=None, camera_mask=None, history=None) -> dict:
         if self.dense_frontend is None:
             raise ValueError("Seg/Depth training requires the versioned dense_frontend profile")
         return self._decode_dense(self.extract_camera_features(images), intrinsics, tuple(images.shape[-2:]),
-                                  extrinsics, distortion, camera_mask)
+                                  extrinsics, distortion, camera_mask, history)
 
     def _decode_dense(self, features: Mapping, intrinsics: torch.Tensor, image_size: tuple[int, int],
-                      extrinsics=None, distortion=None, camera_mask=None) -> dict:
+                      extrinsics=None, distortion=None, camera_mask=None, history=None, history_features=None) -> dict:
+        if self.dense_frontend_config["version"] == TEMPORAL_DEPTH_VERSION:
+            if history is None or history["images"].shape[-2:] != image_size:
+                raise ValueError("Temporal Depth requires explicit previous image buffers and mask")
+            previous = dict(history)
+            if history_features is None:
+                history_features = self.extract_camera_features(history["images"])
+            previous["feature_levels"] = history_features["dense_feature_levels"]
+            return self.dense_frontend(features["dense_feature_levels"], intrinsics, extrinsics,
+                                       distortion, image_size, camera_mask, previous)
         if self.dense_frontend_config["version"] == GEOMETRY_DEPTH_VERSION:
             return self.dense_frontend(features["dense_feature_levels"], intrinsics, extrinsics,
                                        distortion, image_size, camera_mask)
@@ -344,15 +361,32 @@ class QUESTModel(nn.Module):
         ego_state: torch.Tensor | None = None,
         distortion: torch.Tensor | None = None,
         camera_mask: torch.Tensor | None = None,
+        history: Mapping | None = None,
     ) -> Dict[str, torch.Tensor]:
-        encoded = self.encode_image(images, intrinsics, extrinsics, ego_state,
-                                    use_ego_state=False if self.dense_frontend is not None else True)
-        output = self.forward_agent(encoded["bev_tokens"], encoded["bev_features"])
-        output.update(self.forward_map(encoded, intrinsics, extrinsics, ego_state,
-                                       tuple(images.shape[-2:]), include_dense=self.training))
+        temporal_agent = getattr(self.dense_frontend, "agent_temporal", None)
+        previous_features = None
+        # Keep the original Agent/Map feature route in fp32, even with a bf16 dense decoder.
+        with torch.autocast(device_type=images.device.type, enabled=False) if temporal_agent is not None else nullcontext():
+            encoded = self.encode_image(images, intrinsics, extrinsics, ego_state,
+                                        use_ego_state=False if self.dense_frontend is not None else True)
+            if temporal_agent is not None:
+                if history is None:
+                    raise ValueError("Temporal Agent requires actual previous-frame inputs and validity mask")
+                previous_features = self.extract_camera_features(history["images"])
+                previous_encoded = self.encode_camera_features(previous_features, history["intrinsics"],
+                    history["extrinsics"], torch.zeros_like(ego_state), tuple(images.shape[-2:]), use_ego_state=False)
+                agent_tokens, agent_features, coverage = temporal_agent(encoded["bev_features"],
+                    previous_encoded["bev_features"], history, self.geometry_lift.x_range, self.geometry_lift.y_range)
+                output = self.forward_agent(agent_tokens, agent_features)
+                output["agent_temporal_coverage"] = coverage
+            else:
+                output = self.forward_agent(encoded["bev_tokens"], encoded["bev_features"])
+        with torch.autocast(device_type=images.device.type, enabled=False) if temporal_agent is not None else nullcontext():
+            output.update(self.forward_map(encoded, intrinsics, extrinsics, ego_state,
+                                           tuple(images.shape[-2:]), include_dense=self.training))
         if self.dense_frontend is not None:
             output.update(self._decode_dense(encoded, intrinsics, tuple(images.shape[-2:]),
-                                             extrinsics, distortion, camera_mask))
+                                             extrinsics, distortion, camera_mask, history, previous_features))
         else:
             output.update({
                 "seg_logits": self.seg_head(
