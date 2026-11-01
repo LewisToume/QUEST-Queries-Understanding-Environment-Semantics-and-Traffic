@@ -4,6 +4,13 @@
 unit tests, teacher inference, training, or server commands. Runtime, memory and
 quality below require real user-run results; no PASS is claimed in advance.
 
+The first user-run CPU test batch reported two Depth identity failures (maximum
+1.90735e-6m). The warm-start fixtures had left the source dense branch in train
+mode after optimizer setup while the destination was in eval mode. Both fixtures
+now explicitly put the source in eval and assert matching dense modes before
+comparison. Zero-tolerance assertions, model code, losses and weights are unchanged.
+This correction still requires a user-run test rerun; it is not a claimed PASS.
+
 ## Teacher Input Audit
 
 | Task/source | Actual temporal contract | QUEST decision |

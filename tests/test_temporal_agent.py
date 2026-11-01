@@ -80,6 +80,11 @@ class TemporalAgentTest(unittest.TestCase):
             with patch("quest.model.FrozenDINOv2Backbone", TinyBackbone):
                 model = QUESTModel(**new_model).eval()
             load_depth_warm_start(model, source)
+            # configure_dense_training() above re-enabled the source dense train path.
+            # Compare both models in eval mode, including the MHA inference fast path.
+            base.eval()
+            self.assertFalse(base.dense_frontend.training)
+            self.assertFalse(model.dense_frontend.training)
             with torch.no_grad():
                 before, initial = base(**data), model(**data, history=context)
             for key in ("agent_cls_logits", "agent_boxes", "map_cls_logits", "map_points", "depth"):

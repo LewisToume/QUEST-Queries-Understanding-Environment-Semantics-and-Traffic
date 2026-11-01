@@ -156,6 +156,11 @@ class TemporalDepthTest(unittest.TestCase):
             with patch("quest.model.FrozenDINOv2Backbone", TinyBackbone):
                 model = QUESTModel(**new_config).eval()
             self.assertGreater(load_depth_warm_start(model, source), 0)
+            # Optimizer setup switched the source dense branch back to train mode.
+            # Dropout=0 does not make train/eval attention kernels bitwise identical.
+            base.eval()
+            self.assertFalse(base.dense_frontend.training)
+            self.assertFalse(model.dense_frontend.training)
             with torch.no_grad():
                 before = base(**data)
                 after = model(**data, history=history(data))
