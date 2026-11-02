@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 from quest.agent_training import load_checkpoint_cpu
 from quest.cuda_runtime import initialize_cuda_device
-from quest.geometry_depth import TEMPORAL_DEPTH_VERSION
+from quest.geometry_depth import TEMPORAL_DEPTH_VERSIONS
 from quest.seg_depth_diagnostics import DenseEvaluationDiagnostics, preview_positions, save_dense_previews
 from quest.seg_depth_losses import compute_seg_depth_loss
 from quest.seg_depth_training import load_dense_model, validate_dense_checkpoint
@@ -84,7 +84,7 @@ def main():
     device = initialize_cuda_device()
     model = load_dense_model(checkpoint).to(device).eval()
     diagnostics = DenseEvaluationDiagnostics(dataset.images.camera_names, config["loss"], config["tasks"])
-    temporal = config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION
+    temporal = config["frontend"]["version"] in TEMPORAL_DEPTH_VERSIONS
     current_only = DenseEvaluationDiagnostics(dataset.images.camera_names, config["loss"], config["tasks"]) if temporal else None
     joint = config.get("temporal_agent", {}).get("enabled", False)
     agent_metrics, agent_current_only = empty_agent_agreement(), empty_agent_agreement()

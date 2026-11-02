@@ -12,7 +12,7 @@ import torch
 
 from .dense_perception import SHARED_IMAGE_FRONTEND_VERSION
 from .geometry_depth import (GEOMETRY_DEPTH_VERSION, GEOMETRY_DEPTH_VERSIONS,
-                             TEMPORAL_DEPTH_VERSION, validate_geometry_depth_options)
+                             TEMPORAL_DEPTH_VERSION, SMALL_DVGT_VERSION, validate_geometry_depth_options)
 from .model import QUESTModel, load_quest_v3_checkpoint
 from .seg_teacher import CITYSCAPES_CLASSES
 
@@ -71,6 +71,9 @@ def validate_dense_config(config, tasks):
     if config.get("stage") != DENSE_STAGE or not tasks or set(tasks) - {"seg", "depth"} or len(set(tasks)) != len(tasks):
         raise ValueError("Invalid dense training stage/tasks")
     frontend, train = config["frontend"], config["train"]
+    if frontend["version"] == SMALL_DVGT_VERSION and (
+            train["batch_size"] != 1 or config["paths"].get("depth_warm_start_checkpoint")):
+        raise ValueError("Small DVGT uses batch=1 and NEW geometry weights, not incompatible V2 warm-start")
     if (frontend["version"] not in (SHARED_IMAGE_FRONTEND_VERSION, *GEOMETRY_DEPTH_VERSIONS)
             or frontend["preserve_spatial_features"] is not True
             or tuple(frontend["output_size"]) != (252, 448)):
@@ -153,7 +156,7 @@ def frozen_spatial_fingerprint(model):
 
 def validate_dense_checkpoint(checkpoint):
     profile = checkpoint.get("dense_frontend") or {}
-    expected_version = {GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3}.get(
+    expected_version = {GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3, SMALL_DVGT_VERSION: 5}.get(
         profile.get("version"), DENSE_CHECKPOINT_VERSION)
     if (checkpoint.get("stage") != DENSE_STAGE
             or checkpoint.get("dense_checkpoint_version") != expected_version
@@ -247,7 +250,7 @@ def save_dense_checkpoint(path, model, optimizer, scheduler, epoch, config, mode
         raise RuntimeError("Agent/Map/backbone changed during dense training; checkpoint refused")
     payload = {
         "stage": DENSE_STAGE, "dense_checkpoint_version": {
-            GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3}.get(
+            GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3, SMALL_DVGT_VERSION: 5}.get(
                 model.dense_frontend_config["version"], DENSE_CHECKPOINT_VERSION),
         "architecture_version": 3, "dense_frontend": model.dense_frontend_config,
         "model_config": model_config, "model_state_dict": model.state_dict(),

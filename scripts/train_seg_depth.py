@@ -21,7 +21,8 @@ from quest.agent_training import load_checkpoint_cpu
 from quest.cuda_runtime import initialize_cuda_device
 from quest.map_training import load_stage3_checkpoint, load_vector_capacity_audit, stage3_model_config
 from quest.model import QUESTModel
-from quest.geometry_depth import GEOMETRY_DEPTH_VERSIONS, TEMPORAL_DEPTH_VERSION
+from quest.geometry_depth import (GEOMETRY_DEPTH_VERSIONS, TEMPORAL_DEPTH_VERSION,
+                                  TEMPORAL_DEPTH_VERSIONS, SMALL_DVGT_VERSION)
 from quest.seg_depth_dataset import SegDepthDataset, collate_seg_depth
 from quest.temporal_depth_dataset import TemporalSegDepthDataset
 from quest.temporal_agent_training import (empty_agent_agreement, summarize_agent_agreement,
@@ -64,7 +65,7 @@ def make_dataset(config, dataset, manifest, split, count=None):
         frames = frames[:count]
     paths = config["paths"]
     experimental = config["depth_geometry_policy"] == "experimental_image_plane"
-    temporal = config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION
+    temporal = config["frontend"]["version"] in TEMPORAL_DEPTH_VERSIONS
     extra = ({"temporal_options": config["frontend"]["temporal"],
               "history_source_indices": allowed_indices} if temporal else {})
     if config.get("temporal_agent", {}).get("enabled", False):
@@ -127,7 +128,7 @@ def dense_predictions(model, batch, device, *, disable_history=False):
     if amp and not torch.cuda.is_bf16_supported():
         raise RuntimeError("This Depth profile requests bf16; no automatic precision/model fallback")
     extra = ({key: batch[key].to(device) for key in ("extrinsics", "distortion")} if geometry else {})
-    if model.dense_frontend_config["version"] == TEMPORAL_DEPTH_VERSION:
+    if model.dense_frontend_config["version"] in TEMPORAL_DEPTH_VERSIONS:
         history = {key: value.to(device) for key, value in batch["history"].items()}
         if disable_history:
             history["valid"] = torch.zeros_like(history["valid"])
@@ -144,7 +145,7 @@ def dense_predictions(model, batch, device, *, disable_history=False):
 def evaluate(model, dataset, config, device):
     model.eval()
     metrics, loss_sum, batches = empty_dense_metrics(), 0.0, 0
-    current_only = empty_dense_metrics() if config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION else None
+    current_only = empty_dense_metrics() if config["frontend"]["version"] in TEMPORAL_DEPTH_VERSIONS else None
     joint = config.get("temporal_agent", {}).get("enabled", False)
     agent_metrics, agent_current_only = empty_agent_agreement(), empty_agent_agreement()
     for batch in loader(dataset, config):
@@ -276,7 +277,7 @@ def main():
     torch.manual_seed(config["train"]["seed"])
     dataset_config, manifest = load_context(config)
     train_data, train_audit = make_dataset(config, dataset_config, manifest, "train", config["train"]["num_samples"])
-    temporal = config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION
+    temporal = config["frontend"]["version"] in TEMPORAL_DEPTH_VERSIONS
     if temporal and train_audit["temporal_context"]["with_history"] == 0:
         raise ValueError("No real historical frame in selection; use at least --num-samples 2 for temporal smoke")
     balance = resolve_seg_class_balance(config["loss"], train_audit, saved_weights_required=resumed is not None)
@@ -293,7 +294,7 @@ def main():
     model_config, source, initialization = prepare_spatial_initialization(config, manifest)
     depth_source = None
     depth_source_path = config["paths"].get("depth_warm_start_checkpoint")
-    if temporal and not depth_source_path:
+    if config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION and not depth_source_path:
         raise ValueError("Temporal V3 must explicitly warm-start from the trained Depth V2 checkpoint")
     if depth_source_path:
         if fine_source is not None:
@@ -375,6 +376,9 @@ def main():
         train_loader.generator.set_state(resumed["loader_rng_state"])
     print(f"parameters={model.parameter_summary()} frontend={model.dense_frontend_config['version']} "
           f"input=[B,8,3,252,448] tasks={config['tasks']} depth=[B,8,1,252,448]")
+    if model.dense_frontend_config["version"] == SMALL_DVGT_VERSION:
+        print("backbone=DINOv2_S_UNCHANGED geometry=scaled_native_DVGT "
+              "geometry_weights=NEW DVGT_large_weights=NOT_LOADED pose_XYZ_supervision=NONE")
     if model.dense_frontend_config["version"] in GEOMETRY_DEPTH_VERSIONS:
         dense = model.dense_frontend
         print("depth_component_parameters=" + str({
@@ -392,7 +396,7 @@ def main():
         if joint:
             print("shared_image_and_spatial_trunk=FP32 dense_decoder=profile_precision "
                   "Agent_base_weights=FROZEN Agent_temporal_adapter=TRAINABLE tracking_ID_supervision=NONE")
-        if args.smoke_steps:
+        if args.smoke_steps and config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION:
             position = next(i for i, plan in enumerate(train_data.history_plans) if plan["history_index"] is not None)
             check_batch = collate_seg_depth([train_data[position]])
             model.eval()

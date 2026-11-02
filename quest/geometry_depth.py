@@ -16,10 +16,17 @@ from .depth_geometry import sampling_geometry
 
 GEOMETRY_DEPTH_VERSION = "geometry_dpt_depth_v2"
 TEMPORAL_DEPTH_VERSION = "temporal_geometry_dpt_depth_v3"
-GEOMETRY_DEPTH_VERSIONS = (GEOMETRY_DEPTH_VERSION, TEMPORAL_DEPTH_VERSION)
+SMALL_DVGT_VERSION = "dinov2_small_dvgt_depth_v5"
+TEMPORAL_DEPTH_VERSIONS = (TEMPORAL_DEPTH_VERSION, SMALL_DVGT_VERSION)
+GEOMETRY_DEPTH_VERSIONS = (GEOMETRY_DEPTH_VERSION, *TEMPORAL_DEPTH_VERSIONS)
 
 
 def validate_geometry_depth_options(options):
+    if options["version"] == SMALL_DVGT_VERSION:
+        from .small_dvgt_depth import validate_small_dvgt
+
+        validate_small_dvgt(options)
+        return
     if (options["version"] not in GEOMETRY_DEPTH_VERSIONS or options["image_geometry"] != "raw_opencv"
             or options["preserve_spatial_features"] is not True
             or tuple(options["output_size"]) != (252, 448)):
