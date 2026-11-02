@@ -269,7 +269,7 @@ class QUESTModel(nn.Module):
             "encoded_bev_std": bev_tokens.std(dim=(1, 2)),
         }
 
-    def extract_camera_features(self, images: torch.Tensor) -> dict:
+    def extract_camera_features(self, images: torch.Tensor, *, layer_indices=None) -> dict:
         if images.ndim != 5:
             raise ValueError("images must be [B,N_camera,3,H,W]")
         batch_size, num_cameras, channels, height, width = images.shape
@@ -278,9 +278,11 @@ class QUESTModel(nn.Module):
             raise ValueError("Invalid camera count/RGB/patch-aligned image size")
         flat_images = images.reshape(batch_size * num_cameras, channels, height, width)
         levels = None
-        if self.dense_frontend is not None:
+        if layer_indices is None and self.dense_frontend is not None:
+            layer_indices = tuple(self.dense_frontend_config["layer_indices"])
+        if layer_indices is not None:
             backbone_output, levels = self.backbone.forward_intermediates(
-                flat_images, tuple(self.dense_frontend_config["layer_indices"]))
+                flat_images, tuple(layer_indices))
         else:
             backbone_output = self.backbone(flat_images)
         patch_grid_size = (

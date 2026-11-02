@@ -1,0 +1,14 @@
+# Full native DVGT, not another reduced Student encoder.
+profile: quest_dvgt_native_v4
+native_config: configs/depth_teacher_dvgt.yaml
+spatial_checkpoint: checkpoints/quest_depth_geometry_v2.pt
+dataset_config: configs/stage1.yaml
+split_manifest: data/stage3_split.json
+image_geometry: raw_opencv
+context:
+  timestamp_scale: 1.0e-6
+  max_gap_s: 1.1
+  policy: same_split_same_scene_strict_past_v1
+  cold_start: native_single_frame
+checkpoint: checkpoints/quest_dvgt_native_v4_init.pt
+report: data/diagnostics/quest_dvgt_native_v4_init/report.json
