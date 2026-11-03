@@ -12,7 +12,8 @@ import torch
 
 from .dense_perception import SHARED_IMAGE_FRONTEND_VERSION
 from .geometry_depth import (GEOMETRY_DEPTH_VERSION, GEOMETRY_DEPTH_VERSIONS,
-                             TEMPORAL_DEPTH_VERSION, SMALL_DVGT_VERSION, validate_geometry_depth_options)
+                             TEMPORAL_DEPTH_VERSION, SMALL_DVGT_VERSION, SMALL_DVGT_VERSIONS,
+                             CALIBRATED_SMALL_DVGT_VERSION, validate_geometry_depth_options)
 from .model import QUESTModel, load_quest_v3_checkpoint
 from .seg_teacher import CITYSCAPES_CLASSES
 
@@ -71,7 +72,7 @@ def validate_dense_config(config, tasks):
     if config.get("stage") != DENSE_STAGE or not tasks or set(tasks) - {"seg", "depth"} or len(set(tasks)) != len(tasks):
         raise ValueError("Invalid dense training stage/tasks")
     frontend, train = config["frontend"], config["train"]
-    if frontend["version"] == SMALL_DVGT_VERSION and (
+    if frontend["version"] in SMALL_DVGT_VERSIONS and (
             train["batch_size"] != 1 or config["paths"].get("depth_warm_start_checkpoint")):
         raise ValueError("Small DVGT uses batch=1 and NEW geometry weights, not incompatible V2 warm-start")
     if (frontend["version"] not in (SHARED_IMAGE_FRONTEND_VERSION, *GEOMETRY_DEPTH_VERSIONS)
@@ -156,7 +157,8 @@ def frozen_spatial_fingerprint(model):
 
 def validate_dense_checkpoint(checkpoint):
     profile = checkpoint.get("dense_frontend") or {}
-    expected_version = {GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3, SMALL_DVGT_VERSION: 5}.get(
+    expected_version = {GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3, SMALL_DVGT_VERSION: 5,
+                        CALIBRATED_SMALL_DVGT_VERSION: 6}.get(
         profile.get("version"), DENSE_CHECKPOINT_VERSION)
     if (checkpoint.get("stage") != DENSE_STAGE
             or checkpoint.get("dense_checkpoint_version") != expected_version
@@ -243,6 +245,53 @@ def load_depth_warm_start(model, source):
     return len(additions)
 
 
+def validate_small_dvgt_warm_start(source, config, model_config, manifest, audits, initialization, *, smoke=False):
+    validate_dense_checkpoint(source)
+    profile = dict(config["frontend"])
+    profile.pop("calibration", None)
+    profile["version"] = SMALL_DVGT_VERSION
+    if (config["frontend"]["version"] != CALIBRATED_SMALL_DVGT_VERSION
+            or source["dense_frontend"]["version"] != SMALL_DVGT_VERSION
+            or source["model_config"] != dict(model_config, dense_frontend=profile)
+            or source["initialization"] != initialization or source["trained_dense_tasks"] != ["depth"]
+            or source["training_config"]["loss"] != config["loss"]
+            or source["split_sha256"] != manifest["split_sha256"]
+            or source["metadata_sha256"] != manifest["metadata_sha256"]
+            or source["depth_geometry_policy"] != config["depth_geometry_policy"]):
+        raise ValueError("V6 warm-start must preserve V5 native dimensions, spatial source, loss and data split")
+    for split, audit in audits.items():
+        old = source["label_audits"][split]
+        if smoke and split == "train":
+            if audit["frames"] > old["frames"] or audit["teacher_signatures"] != old["teacher_signatures"]:
+                raise ValueError("V6 smoke teacher differs from trained V5")
+        elif audit != old:
+            raise ValueError("V6 label/context hashes differ from trained V5: " + split)
+
+
+def load_small_dvgt_warm_start(model, source):
+    if (model.dense_frontend_config["version"] != CALIBRATED_SMALL_DVGT_VERSION
+            or source.get("dense_frontend", {}).get("version") != SMALL_DVGT_VERSION):
+        raise ValueError("Only explicit V5 -> V6 migration is supported")
+    expected, state = model.state_dict(), source["model_state_dict"]
+    additions = set(expected) - set(state)
+    prefixes = tuple("dense_frontend." + name for name in (
+        "level_injections.", "injection_gates", "ray_embedding.", "position_gates",
+        "calibrated_norms.", "calibrated_spatial.", "spatial_gates", "calibrated_temporal.", "ray_depths"))
+    if not additions or set(state) - set(expected) or any(not key.startswith(prefixes) for key in additions):
+        raise ValueError("Unexpected V6 parameter migration; refusing arbitrary partial load")
+    dense = model.dense_frontend
+    gates = [dense.injection_gates, dense.position_gates, dense.spatial_gates,
+             *[block.gate for block in dense.calibrated_temporal]]
+    if any(bool((gate.detach() != 0).any()) for gate in gates):
+        raise ValueError("V6 migration requires all new residual gates to start at zero")
+    result = model.load_state_dict(state, strict=False)
+    if set(result.missing_keys) != additions or result.unexpected_keys:
+        raise ValueError("Unexpected V6 migration keys")
+    if frozen_spatial_fingerprint(model) != source["frozen_spatial_sha256"]:
+        raise ValueError("V6 migration changed frozen DINO/Agent/Map")
+    return len(additions)
+
+
 def save_dense_checkpoint(path, model, optimizer, scheduler, epoch, config, model_config,
                           manifest, audits, baseline_hash, initialization, loader_generator=None,
                           validation_history=None):
@@ -250,7 +299,8 @@ def save_dense_checkpoint(path, model, optimizer, scheduler, epoch, config, mode
         raise RuntimeError("Agent/Map/backbone changed during dense training; checkpoint refused")
     payload = {
         "stage": DENSE_STAGE, "dense_checkpoint_version": {
-            GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3, SMALL_DVGT_VERSION: 5}.get(
+            GEOMETRY_DEPTH_VERSION: 2, TEMPORAL_DEPTH_VERSION: 3, SMALL_DVGT_VERSION: 5,
+            CALIBRATED_SMALL_DVGT_VERSION: 6}.get(
                 model.dense_frontend_config["version"], DENSE_CHECKPOINT_VERSION),
         "architecture_version": 3, "dense_frontend": model.dense_frontend_config,
         "model_config": model_config, "model_state_dict": model.state_dict(),

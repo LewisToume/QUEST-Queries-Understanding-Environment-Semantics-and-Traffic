@@ -17,11 +17,18 @@ from .depth_geometry import sampling_geometry
 GEOMETRY_DEPTH_VERSION = "geometry_dpt_depth_v2"
 TEMPORAL_DEPTH_VERSION = "temporal_geometry_dpt_depth_v3"
 SMALL_DVGT_VERSION = "dinov2_small_dvgt_depth_v5"
-TEMPORAL_DEPTH_VERSIONS = (TEMPORAL_DEPTH_VERSION, SMALL_DVGT_VERSION)
+CALIBRATED_SMALL_DVGT_VERSION = "dinov2_calibrated_small_dvgt_depth_v6"
+SMALL_DVGT_VERSIONS = (SMALL_DVGT_VERSION, CALIBRATED_SMALL_DVGT_VERSION)
+TEMPORAL_DEPTH_VERSIONS = (TEMPORAL_DEPTH_VERSION, *SMALL_DVGT_VERSIONS)
 GEOMETRY_DEPTH_VERSIONS = (GEOMETRY_DEPTH_VERSION, *TEMPORAL_DEPTH_VERSIONS)
 
 
 def validate_geometry_depth_options(options):
+    if options["version"] == CALIBRATED_SMALL_DVGT_VERSION:
+        from .calibrated_small_dvgt import validate_calibrated_small_dvgt
+
+        validate_calibrated_small_dvgt(options)
+        return
     if options["version"] == SMALL_DVGT_VERSION:
         from .small_dvgt_depth import validate_small_dvgt
 

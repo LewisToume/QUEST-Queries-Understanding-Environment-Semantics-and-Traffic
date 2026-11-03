@@ -22,7 +22,7 @@ from quest.cuda_runtime import initialize_cuda_device
 from quest.map_training import load_stage3_checkpoint, load_vector_capacity_audit, stage3_model_config
 from quest.model import QUESTModel
 from quest.geometry_depth import (GEOMETRY_DEPTH_VERSIONS, TEMPORAL_DEPTH_VERSION,
-                                  TEMPORAL_DEPTH_VERSIONS, SMALL_DVGT_VERSION)
+                                  TEMPORAL_DEPTH_VERSIONS, SMALL_DVGT_VERSION, CALIBRATED_SMALL_DVGT_VERSION)
 from quest.seg_depth_dataset import SegDepthDataset, collate_seg_depth
 from quest.temporal_depth_dataset import TemporalSegDepthDataset
 from quest.temporal_agent_training import (empty_agent_agreement, summarize_agent_agreement,
@@ -32,7 +32,8 @@ from quest.seg_depth_losses import (compute_seg_depth_loss, empty_dense_metrics,
 from quest.seg_depth_training import (configure_dense_training, frozen_spatial_fingerprint,
                                       load_dense_model, save_dense_checkpoint, validate_dense_config,
                                       resolve_seg_class_balance, validate_dense_checkpoint, validate_dense_data_join,
-                                      validate_depth_warm_start, load_depth_warm_start)
+                                      validate_depth_warm_start, load_depth_warm_start,
+                                      validate_small_dvgt_warm_start, load_small_dvgt_warm_start)
 from quest.seg_teacher import CITYSCAPES_CLASSES
 from quest.stage3_split import file_sha256, load_stage3_split, selected_frames
 from quest.utils import load_yaml_config
@@ -183,6 +184,10 @@ def gradient_health(model):
             groups["temporal"] = (dense.temporal_blocks,)
         if getattr(dense, "agent_temporal", None) is not None:
             groups["agent_temporal"] = (dense.agent_temporal,)
+        if model.dense_frontend_config["version"] == CALIBRATED_SMALL_DVGT_VERSION:
+            groups["calibrated_view"] = (dense.calibrated_spatial,)
+            groups["calibrated_time"] = (dense.calibrated_temporal,)
+            groups["multilevel"] = (dense.level_injections,)
     else:
         groups = {"neck": (dense.lateral, dense.refine), "seg": (dense.seg_decoder,),
                   "depth": (dense.camera_condition, dense.depth_decoder)}
@@ -293,7 +298,10 @@ def main():
             raise ValueError("Training/validation teachers or preprocessing differ")
     model_config, source, initialization = prepare_spatial_initialization(config, manifest)
     depth_source = None
-    depth_source_path = config["paths"].get("depth_warm_start_checkpoint")
+    calibrated = config["frontend"]["version"] == CALIBRATED_SMALL_DVGT_VERSION
+    depth_source_path = config["paths"].get("small_dvgt_warm_start_checkpoint" if calibrated else "depth_warm_start_checkpoint")
+    if calibrated and not depth_source_path:
+        raise ValueError("V6 must explicitly inherit its trained V5 source")
     if config["frontend"]["version"] == TEMPORAL_DEPTH_VERSION and not depth_source_path:
         raise ValueError("Temporal V3 must explicitly warm-start from the trained Depth V2 checkpoint")
     if depth_source_path:
@@ -301,8 +309,8 @@ def main():
             raise ValueError("Do not combine balanced fine-tuning and Depth profile migration")
         depth_source_path = resolve(depth_source_path)
         depth_source = load_checkpoint_cpu(depth_source_path)
-        validate_depth_warm_start(depth_source, config, model_config, manifest, audits, initialization,
-                                  smoke=bool(args.smoke_steps))
+        validator = validate_small_dvgt_warm_start if calibrated else validate_depth_warm_start
+        validator(depth_source, config, model_config, manifest, audits, initialization, smoke=bool(args.smoke_steps))
         identity = {"path": str(depth_source_path), "sha256": file_sha256(depth_source_path),
                     "epoch": int(depth_source["epoch"]), "profile": depth_source["dense_frontend"]["version"]}
         if resumed is not None and config.get("depth_warm_start") != identity:
@@ -345,7 +353,8 @@ def main():
     elif resumed is None:
         model = QUESTModel(**model_config)
         if depth_source is not None:
-            additions = load_depth_warm_start(model, depth_source)
+            migrate = load_small_dvgt_warm_start if calibrated else load_depth_warm_start
+            additions = migrate(model, depth_source)
             print(f"depth_warm_start_epoch={depth_source['epoch']} new_temporal_state_keys={additions} "
                   "baseline_preserved=True optimizer_schedule=NEW")
         else:
@@ -379,6 +388,10 @@ def main():
     if model.dense_frontend_config["version"] == SMALL_DVGT_VERSION:
         print("backbone=DINOv2_S_UNCHANGED geometry=scaled_native_DVGT "
               "geometry_weights=NEW DVGT_large_weights=NOT_LOADED pose_XYZ_supervision=NONE")
+    if calibrated:
+        print("backbone=DINOv2_S_UNCHANGED native_geometry=V5_INHERITED "
+              "DINO_levels=4 calibration=RAW_DISTORTION_AWARE temporal_alignment=EGO_MOTION "
+              "new_residual_gates=ZERO_INIT")
     if model.dense_frontend_config["version"] in GEOMETRY_DEPTH_VERSIONS:
         dense = model.dense_frontend
         print("depth_component_parameters=" + str({
@@ -421,6 +434,7 @@ def main():
         steps = args.smoke_steps or len(train_loader)
         before = [parameter.detach().clone() for parameter in parameters] if args.smoke_steps else None
         temporal_updates = 0
+        calibrated_active = set()
         for step in range(steps):
             try:
                 batch = next(iterator)
@@ -440,6 +454,9 @@ def main():
                 continue
             losses["total_loss"].backward()
             last_gradient = gradient_health(model)
+            if calibrated:
+                calibrated_active.update(name for name in ("calibrated_view", "calibrated_time", "multilevel")
+                                         if last_gradient.get(name) is not None and last_gradient[name] > 0)
             if temporal and float(output["history_frame_fraction"]) > 0 and float(output["depth_temporal_coverage"]) > 0:
                 if last_gradient["temporal"] is None or (args.smoke_steps and last_gradient["temporal"] <= 0):
                     raise RuntimeError("Real historical images received no temporal training signal")
@@ -480,6 +497,9 @@ def main():
               ("frozen_spatial_weights=UNCHANGED Agent_predictions_require_validation=True" if joint
                else "frozen_Agent_Map=UNCHANGED"))
         if args.smoke_steps:
+            if calibrated and calibrated_active != {"calibrated_view", "calibrated_time", "multilevel"}:
+                raise RuntimeError("V6 new branches received no signal: " + str(
+                    {"calibrated_view", "calibrated_time", "multilevel"} - calibrated_active))
             if temporal and not temporal_updates:
                 raise RuntimeError("Temporal smoke did not exercise a projectable real previous frame")
             if not any(not torch.equal(old, new) for old, new in zip(before, parameters)):

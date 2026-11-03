@@ -11,7 +11,8 @@ from .bev import BEVEncoder
 from .geometry import GeometryAwareBEVLift
 from .dense_perception import SHARED_IMAGE_FRONTEND_VERSION, SharedDensePerception
 from .geometry_depth import (GEOMETRY_DEPTH_VERSION, GEOMETRY_DEPTH_VERSIONS, TEMPORAL_DEPTH_VERSION,
-                             TEMPORAL_DEPTH_VERSIONS, SMALL_DVGT_VERSION, GeometryDepthFrontend)
+                             TEMPORAL_DEPTH_VERSIONS, SMALL_DVGT_VERSION,
+                             CALIBRATED_SMALL_DVGT_VERSION, GeometryDepthFrontend)
 from .temporal_depth import TemporalGeometryDepthFrontend
 from .heads import AgentHead, AgentProposalHead, DepthHead, MapHead, SegHead
 from .queries import AgentDecoder, MapDecoder
@@ -138,7 +139,11 @@ class QUESTModel(nn.Module):
         self.seg_head = SegHead(self.backbone.hidden_dim, C_seg, seg_size) if dense_frontend is None else None
         self.depth_head = DepthHead(self.backbone.hidden_dim, depth_size) if dense_frontend is None else None
         self.dense_frontend = None
-        if dense_frontend is not None and dense_frontend["version"] == SMALL_DVGT_VERSION:
+        if dense_frontend is not None and dense_frontend["version"] == CALIBRATED_SMALL_DVGT_VERSION:
+            from .calibrated_small_dvgt import CalibratedSmallDVGTDepthFrontend
+
+            self.dense_frontend = CalibratedSmallDVGTDepthFrontend(hidden_dim, dense_frontend)
+        elif dense_frontend is not None and dense_frontend["version"] == SMALL_DVGT_VERSION:
             from .small_dvgt_depth import SmallDVGTDepthFrontend
 
             self.dense_frontend = SmallDVGTDepthFrontend(hidden_dim, dense_frontend)

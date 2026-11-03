@@ -69,6 +69,15 @@ class SmallDVGTDepthFrontend(nn.Module):
     def temporal_blocks(self):
         return self.geometry_blocks.cross_frame_blocks
 
+    def prepare_tokens(self, maps, feature_levels, history, intrinsics, extrinsics, distortion, image_size):
+        return self.level_projections[0](maps.flatten(-2).transpose(-1, -2)), None
+
+    def refine_tokens(self, tokens, index, shape, context):
+        return tokens
+
+    def geometry_diagnostics(self, context):
+        return {}
+
     def forward(self, feature_levels, intrinsics, extrinsics, distortion, image_size,
                 camera_mask=None, history=None):
         if (history is None or camera_mask is not None or feature_levels[-1].shape[0] != 1
@@ -88,7 +97,7 @@ class SmallDVGTDepthFrontend(nn.Module):
         geometry = self.geometry_blocks
         geometry.train(self.training and self.options["gradient_checkpointing"])
         c, p = self.options["geometry_dim"], h * w
-        tokens = self.level_projections[0](maps.flatten(-2).transpose(-1, -2))
+        tokens, context = self.prepare_tokens(maps, feature_levels, history, intrinsics, extrinsics, distortion, image_size)
         tokens = tokens + geometry.temporal_pos_embed[:, :t, None, None]
         tokens = tokens.reshape(b * t * v, p, c)
 
@@ -103,6 +112,7 @@ class SmallDVGTDepthFrontend(nn.Module):
         pos = torch.cat((pos.new_zeros(b * t * v, geometry.patch_start_idx, 2), pos), 1)
         levels = []
         for index in range(self.options["geometry_layers"]):
+            tokens = self.refine_tokens(tokens, index, (b, t, v, h, w), context)
             tokens, _, intra = geometry._process_intra_view_attention(tokens, b, t, v, p, c, index, pos)
             tokens, _, views = geometry._process_cross_view_attention(tokens, b, t, v, p, c, index, pos)
             tokens, _, frames = geometry._process_cross_frame_attention(tokens, b, t, v, p, c, index, pos)
@@ -115,4 +125,5 @@ class SmallDVGTDepthFrontend(nn.Module):
                                          geometry.patch_start_idx, frames_chunk_size=1)
         depth = depth[:, -1].permute(0, 1, 4, 2, 3).float() + self.options["min_depth_m"]
         return {"depth": depth, "history_frame_fraction": depth.new_tensor(float(has_history)),
-                "depth_temporal_coverage": depth.new_tensor(float(has_history))}
+                "depth_temporal_coverage": depth.new_tensor(float(has_history)),
+                **self.geometry_diagnostics(context)}
