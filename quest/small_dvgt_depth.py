@@ -10,6 +10,17 @@ from torch import nn
 from .dvgt_depth import DVGT_REVISION, native_working_directory, repository_revision
 
 
+def validate_native_package_origin(module, repo):
+    """Namespace packages have __path__ but may have no __file__. Reject mixed roots."""
+    expected = (Path(repo).resolve() / "dvgt").resolve()
+    locations = [Path(value).resolve() for value in getattr(module, "__path__", ())]
+    filename = getattr(module, "__file__", None)
+    if filename:
+        locations.append(Path(filename).resolve().parent)
+    if not locations or any(location != expected for location in locations):
+        raise RuntimeError("Conflicting or unverifiable dvgt source package; expected=" + str(expected))
+
+
 def validate_small_dvgt(options):
     width, rounds = options["geometry_dim"], options["geometry_layers"]
     if not isinstance(options["heads"], int) or options["heads"] <= 0:
@@ -35,8 +46,8 @@ def native_small_modules(options):
     repo = repo if repo.is_absolute() else project_root() / repo
     repository_revision(repo, DVGT_REVISION)
     existing = sys.modules.get("dvgt")
-    if existing is not None and repo.resolve() not in Path(existing.__file__).resolve().parents:
-        raise RuntimeError("Conflicting dvgt source package")
+    if existing is not None:
+        validate_native_package_origin(existing, repo)
     sys.path.insert(0, str(repo.resolve()))
     # The native aggregator constructor asks for an image backbone. QUEST already
     # owns DINOv2, so this parameter-free placeholder is removed before any forward.

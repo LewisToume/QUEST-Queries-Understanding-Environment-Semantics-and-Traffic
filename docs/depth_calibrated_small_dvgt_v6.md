@@ -52,6 +52,13 @@ Native CPU tests cover V5-to-V6 identity, all four DINO gradients, calibrated
 spatial/temporal gradients, pose/calibration sensitivity, cold starts and bad
 inputs. Full data/calibration checks reuse the audited existing dataset.
 
+The user's first server test reached V6 construction but failed because an
+already loaded `dvgt` namespace package has `__file__=None`. The source guard
+now validates every package `__path__` location (and `__file__` when present).
+Unknown, foreign and mixed roots still fail. This fix changes no model weights,
+geometry calculations, losses or test tolerances. Namespace/regular-package
+and conflicting-source regression fixtures are included; server rerun required.
+
 ```bash
 OMP_NUM_THREADS=2 python -m unittest discover -s tests -p 'test_calibrated_small_dvgt.py' -q
 CUDA_VISIBLE_DEVICES=3 python -u scripts/train_seg_depth.py --config configs/depth_calibrated_small_dvgt_v6.yaml --num-samples 2 --smoke-steps 4 --experimental-unverified-depth

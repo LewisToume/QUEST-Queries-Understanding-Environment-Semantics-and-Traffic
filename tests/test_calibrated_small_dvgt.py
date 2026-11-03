@@ -2,12 +2,13 @@
 
 import copy
 import unittest
+from types import SimpleNamespace
 
 import torch
 from torch import nn
 
 from quest.calibrated_small_dvgt import CalibratedSmallDVGTDepthFrontend, validate_calibrated_small_dvgt
-from quest.small_dvgt_depth import SmallDVGTDepthFrontend
+from quest.small_dvgt_depth import SmallDVGTDepthFrontend, validate_native_package_origin
 from quest.geometry_depth import SMALL_DVGT_VERSION, CALIBRATED_SMALL_DVGT_VERSION
 from quest.seg_depth_training import frozen_spatial_fingerprint, load_small_dvgt_warm_start
 from quest.utils import project_root, load_yaml_config
@@ -44,6 +45,26 @@ class Container(nn.Module):
 
 
 class CalibratedSmallDVGTTest(unittest.TestCase):
+    def test_regular_and_namespace_package_origins(self):
+        repo = project_root() / "third_party/DVGT"
+        package = repo / "dvgt"
+        # The server's second constructor sees an already imported namespace
+        # package with __file__=None. This must not call Path(None).
+        namespace = SimpleNamespace(__file__=None, __path__=[str(package)])
+        validate_native_package_origin(namespace, repo)
+        validate_native_package_origin(namespace, repo)
+        validate_native_package_origin(SimpleNamespace(__path__=[str(package)]), repo)
+        validate_native_package_origin(SimpleNamespace(__file__=str(package / "__init__.py"),
+                                                       __path__=[str(package)]), repo)
+        for bad in (
+            SimpleNamespace(__file__=None),
+            SimpleNamespace(__file__=None, __path__=[str(project_root() / "other/dvgt")]),
+            SimpleNamespace(__file__=None, __path__=[str(package), str(project_root() / "other/dvgt")]),
+            SimpleNamespace(__file__=str(project_root() / "other/dvgt/__init__.py"), __path__=[str(package)]),
+        ):
+            with self.assertRaises(RuntimeError):
+                validate_native_package_origin(bad, repo)
+
     def test_invalid_calibration_rounds(self):
         value = options()
         validate_calibrated_small_dvgt(value)
