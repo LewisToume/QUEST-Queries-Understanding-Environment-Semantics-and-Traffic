@@ -15,6 +15,11 @@ branch adapts four DINO block features to the actual teacher decoder channel
 widths (64/128/320/512), learns reassembly scales, adds a small RGB detail
 adapter, and uses the native Transformers SegFormer B5 decode head (width 768).
 Every teacher decode-head weight/buffer is loaded strictly; missing keys fail.
+Transformers renamed the projection container from `linear_c` to
+`linear_projections`. Raw checkpoint loads translate this one known prefix in
+either direction to match the installed decoder, without changing tensors.
+Strict loading still rejects missing/extra parameters, wrong shapes and duplicate
+aliases. The same mapping is used when reloading the combined checkpoint.
 Adapter-generated scales are not the teacher's native MiT image hierarchy,
 and teacher decoder initialization does not guarantee immediate good predictions.
 

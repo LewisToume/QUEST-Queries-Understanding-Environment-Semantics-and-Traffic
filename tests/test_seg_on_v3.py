@@ -10,7 +10,8 @@ import torch
 
 from quest.model import QUESTModel
 from quest.seg_on_v3 import (SEG_ON_V3_STAGE, DINOSegFormerBranch, SegOnFrozenV3, full_base_fingerprint,
-                             initialize_segformer_decoder, segmentation_loss, load_seg_on_v3)
+                             initialize_segformer_decoder, segmentation_loss, load_seg_on_v3,
+                             align_segformer_decoder_keys)
 from quest.seg_teacher import CITYSCAPES_CLASSES
 from quest.seg_depth_training import frozen_spatial_fingerprint
 from test_geometry_depth_v2 import TinyBackbone, inputs, model_config, training_config
@@ -43,6 +44,41 @@ class SegOnV3Test(unittest.TestCase):
             torch.save(state, path)
             with self.assertRaises(RuntimeError):
                 initialize_segformer_decoder(branch, directory)
+
+    def test_decoder_projection_rename_both_directions_and_strict_failures(self):
+        branch = DINOSegFormerBranch(16, teacher_config())
+        expected = branch.decode_head.state_dict()
+        legacy = {key.replace("linear_projections.", "linear_c.", 1): tensor.clone()
+                  for key, tensor in expected.items()}
+        modern = {key.replace("linear_c.", "linear_projections.", 1): tensor.clone()
+                  for key, tensor in expected.items()}
+        for state in (legacy, modern, expected):
+            mapped = align_segformer_decoder_keys(state, expected)
+            self.assertEqual(set(mapped), set(expected))
+            branch.decode_head.load_state_dict(mapped, strict=True)
+            for key, value in expected.items():
+                torch.testing.assert_close(mapped[key], value, rtol=0, atol=0)
+        inverse = align_segformer_decoder_keys(legacy, modern)
+        self.assertEqual(set(inverse), set(modern))
+        inverse = align_segformer_decoder_keys(modern, legacy)
+        self.assertEqual(set(inverse), set(legacy))
+        both = dict(legacy)
+        alias = next(key for key in modern if key.startswith("linear_projections."))
+        both[alias] = modern[alias]
+        with self.assertRaises(RuntimeError):
+            align_segformer_decoder_keys(both, expected)
+        bad = dict(modern)
+        bad[alias] = torch.zeros(1)
+        with self.assertRaises(RuntimeError):
+            branch.decode_head.load_state_dict(align_segformer_decoder_keys(bad, expected), strict=True)
+        bad = dict(modern, unknown_parameter=torch.zeros(1))
+        with self.assertRaises(RuntimeError):
+            branch.decode_head.load_state_dict(align_segformer_decoder_keys(bad, expected), strict=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pytorch_model.bin"
+            for state in (legacy, modern):
+                torch.save({"decode_head." + key: value for key, value in state.items()}, path)
+                self.assertEqual(initialize_segformer_decoder(branch, directory), len(state))
 
     def test_seg_update_preserves_all_base_weights_outputs_and_eval_modes(self):
         torch.manual_seed(42)

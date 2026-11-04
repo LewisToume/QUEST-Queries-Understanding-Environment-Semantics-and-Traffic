@@ -55,6 +55,28 @@ class DINOSegFormerBranch(nn.Module):
             b, n, 19, *images.shape[-2:])
 
 
+def align_segformer_decoder_keys(state, expected):
+    """Translate only the known Transformers projection-container rename.
+
+    Never discard an unknown key, invent a missing weight, reshape a tensor,
+    or silently choose one value from two aliases of the same parameter.
+    """
+    mapped = {}
+    for key, value in state.items():
+        target = key
+        if key not in expected:
+            for old, new in (("linear_c.", "linear_projections."), ("linear_projections.", "linear_c.")):
+                if key.startswith(old):
+                    candidate = new + key[len(old):]
+                    if candidate in expected:
+                        target = candidate
+                    break
+        if target in mapped:
+            raise RuntimeError("Ambiguous duplicate SegFormer decoder weight: " + target)
+        mapped[target] = value
+    return mapped
+
+
 def initialize_segformer_decoder(branch, bundle):
     bundle = Path(bundle)
     if (bundle / "model.safetensors").is_file():
@@ -66,7 +88,11 @@ def initialize_segformer_decoder(branch, bundle):
     selected = {key.removeprefix("decode_head."): value for key, value in state.items() if key.startswith("decode_head.")}
     if not selected:
         raise ValueError("Teacher checkpoint contains no SegFormer decode_head weights")
-    branch.decode_head.load_state_dict(selected, strict=True)
+    mapped = align_segformer_decoder_keys(selected, branch.decode_head.state_dict())
+    renamed = len(set(selected) - set(mapped))
+    if renamed:
+        print(f"teacher_decoder_projection_key_aliases={renamed}; strict_load=True")
+    branch.decode_head.load_state_dict(mapped, strict=True)
     return len(selected)
 
 
@@ -136,7 +162,13 @@ def load_seg_on_v3(checkpoint, model_factory=None):
     validate_dense_checkpoint(metadata)
     base = (model_factory or QUESTModel)(**metadata["model_config"])
     model = SegOnFrozenV3(base, DINOSegFormerBranch(base.hidden_dim, checkpoint["teacher_config"]))
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    state = dict(checkpoint["model_state_dict"])
+    prefix = "seg_branch.decode_head."
+    decoder = {key[len(prefix):]: value for key, value in state.items() if key.startswith(prefix)}
+    mapped = align_segformer_decoder_keys(decoder, model.seg_branch.decode_head.state_dict())
+    state = {key: value for key, value in state.items() if not key.startswith(prefix)}
+    state.update({prefix + key: value for key, value in mapped.items()})
+    model.load_state_dict(state, strict=True)
     if full_base_fingerprint(model.base) != checkpoint["base_sha256"]:
         raise ValueError("Frozen V3 state changed")
     return model
