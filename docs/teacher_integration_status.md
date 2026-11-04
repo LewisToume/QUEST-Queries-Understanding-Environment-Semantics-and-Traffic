@@ -7,6 +7,11 @@ The same-domain-only Seg restriction below is historical and no longer blocks
 this experiment; nuPlan semantic GT accuracy remains unverified. Depth V3 is
 the selected depth baseline; V5/V6 remain experimental comparison results.
 
+Implementation: [Seg on frozen Depth V3, 12-epoch runner](seg_on_depth_v3_12ep.md)
+adds a native pretrained SegFormer decode head with learned DINO/RGB adapters.
+It reuses existing labels and freezes ALL V3 state; server tests/runtime are
+pending, not a new teacher-accuracy or successful-training claim.
+
 Design contract: [Four-Teacher Student](four_teacher_student_design.md).
 Current encoder/decoder audit and proposed integration:
 [Teacher/QUEST comparison, 2026-10-31](teacher_encoder_decoder_comparison.md).

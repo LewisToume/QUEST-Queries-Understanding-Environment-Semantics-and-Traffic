@@ -1,0 +1,21 @@
+stage: segformer_on_frozen_depth_v3_v1
+base_checkpoint: checkpoints/quest_agent_depth_temporal_v3.pt
+teacher_bundle: weights/teachers/segformer_cityscapes_b5
+dataset_config: configs/stage1.yaml
+split_manifest: data/stage3_split.json
+seg_labels: data/soft_labels_segformer_cityscapes19_v1
+checkpoint: checkpoints/quest_seg_on_depth_v3_v1.pt
+train:
+  num_samples: 5000
+  epochs: 12
+  batch_size: 1
+  lr: 0.0001
+  weight_decay: 0.0001
+  log_interval: 500
+  seed: 42
+loss:
+  seg:
+    class_balance:
+      mode: inverse_sqrt_train_pixels
+      min_weight: 0.5
+      max_weight: 5.0
