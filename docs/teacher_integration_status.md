@@ -1,5 +1,12 @@
 # Teacher Integration Status
 
+Update 2026-11-04: the user accepts public Seg weights with documented nuPlan
+application, without requiring nuPlan training. SegFormer-B5 Cityscapes is now
+selected for the camera-Seg experiment. [Primary-source confirmation and scope](segformer_nuplan_teacher_confirmation.md).
+The same-domain-only Seg restriction below is historical and no longer blocks
+this experiment; nuPlan semantic GT accuracy remains unverified. Depth V3 is
+the selected depth baseline; V5/V6 remain experimental comparison results.
+
 Design contract: [Four-Teacher Student](four_teacher_student_design.md).
 Current encoder/decoder audit and proposed integration:
 [Teacher/QUEST comparison, 2026-10-31](teacher_encoder_decoder_comparison.md).
@@ -17,7 +24,7 @@ Four ready domain-qualified neural teachers are NOT available in this checkout.
 | DVGT-1 | Offline Depth / geometry teacher; experimental adaptation | User-reported strict native GPU inference, label export and five-epoch 5,000-frame Student training; full 120-frame evaluation | RUNTIME REPORTED PASS; Student/teacher AbsRel=0.1238268, RMSE=6.0619m, delta1=0.8278686; real LiDAR accuracy / geometry NOT verified |
 | ViGT | Backup geometry candidate | Author paper/README includes nuPlan and publishes weight link | No checkpoint-content/load/rendering check; not camera Seg |
 | No selected same-domain camera-Seg checkpoint | Semantic Segmentation | Search did not verify a reusable qualifying release | BLOCKED; BEV segmentation does not satisfy camera-Seg |
-| SegFormer-B5 Cityscapes | Out-of-domain Seg control | User-reported export, Student training and 120-frame pseudo-agreement | NOT FORMAL: Cityscapes weights, no independent nuPlan semantic GT validation |
+| SegFormer-B5 Cityscapes | Selected camera-Seg teacher under revised nuPlan-use criterion | DriveStudio nuPlan mask-extraction source + public HF weights + prior user-reported export/inference | APPROVED TO TRY; Cityscapes-trained, independent nuPlan semantic GT accuracy unknown |
 | Metric3Dv2 ViT-L | Unqualified-domain Depth control | User-reported export/training and 120-frame pseudo-agreement | NOT FORMAL: no verified nuPlan/OpenScene checkpoint task provenance; geometry experimental |
 
 QUEST Stage2 reads exported labels by OpenScene sample token. Online teacher

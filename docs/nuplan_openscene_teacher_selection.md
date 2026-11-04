@@ -1,5 +1,11 @@
 # nuPlan / OpenScene Teacher Selection
 
+Update 2026-11-04: the user relaxed the camera-Seg teacher criterion to permit
+documented use on nuPlan with usable public weights. SegFormer-B5 Cityscapes is
+selected under that rule; see [source confirmation](segformer_nuplan_teacher_confirmation.md).
+Earlier same-domain-only search conclusions below are retained as historical
+evidence, not a current prohibition on the selected Seg experiment.
+
 Research audit: 2026-10-29. Primary papers, author repositories and model-file
 listings were inspected. No weights were downloaded; no Python, tests,
 inference, export, installation or training was executed.
