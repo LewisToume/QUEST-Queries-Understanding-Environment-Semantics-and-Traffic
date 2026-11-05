@@ -59,8 +59,8 @@ def causal_history_plans(infos, targets, allowed_indices, options):
 class TemporalSegDepthDataset(SegDepthDataset):
     def __init__(self, *args, temporal_options, history_source_indices, agent_labels=None, **kwargs):
         super().__init__(*args, **kwargs)
-        if self.required_depth_geometry != "raw_opencv" or self.tasks not in (("depth",), ("seg",)):
-            raise ValueError("Temporal dataset requires explicit raw geometry and one Depth or Seg target task")
+        if self.required_depth_geometry != "raw_opencv" or self.tasks not in (("depth",), ("seg",), ("seg", "depth")):
+            raise ValueError("Temporal dataset requires explicit raw geometry and Depth/Seg target tasks")
         with self.images.metadata_path.open("rb") as stream:
             infos = pickle.load(stream)["infos"]  # Same trusted metadata, not external annotations.
         self.history_plans = causal_history_plans(infos, self.source_indices, history_source_indices, temporal_options)

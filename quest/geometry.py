@@ -99,6 +99,7 @@ class GeometryAwareBEVLift(nn.Module):
         intrinsics: torch.Tensor,
         sensor2lidar: torch.Tensor,
         image_size: tuple[int, int],
+        distortion: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Project LiDAR-frame BEV anchors into cameras for grid_sample."""
 
@@ -124,6 +125,13 @@ class GeometryAwareBEVLift(nn.Module):
         camera_points = torch.einsum("bnij,qzj->bnqzi", lidar2camera, homogeneous)
         xyz = camera_points[..., :3]
         depth = xyz[..., 2]
+        if distortion is not None:
+            from .depth_geometry import project_raw
+
+            if distortion.shape != (*intrinsics.shape[:2], 8):
+                raise ValueError("Raw BEV projection requires eight packed OpenCV distortion coefficients")
+            grid, visible = project_raw(xyz, intrinsics, distortion, image_size)
+            return grid, visible, depth
         projected = torch.einsum("bnij,bnqzj->bnqzi", intrinsics, xyz)
         safe_depth = depth.clamp_min(torch.finfo(dtype).eps)
         pixel_x = projected[..., 0] / safe_depth
@@ -151,6 +159,7 @@ class GeometryAwareBEVLift(nn.Module):
         image_size: tuple[int, int],
         return_diagnostics: bool = False,
         use_ego_state: bool = True,
+        distortion: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if camera_features.ndim != 5:
             raise ValueError(
@@ -178,7 +187,7 @@ class GeometryAwareBEVLift(nn.Module):
             device=camera_features.device, dtype=projection_dtype
         )
         grid, visible, _ = self.project_reference_points(
-            intrinsics, extrinsics, image_size
+            intrinsics, extrinsics, image_size, distortion
         )
         sampling_features = (
             camera_features.float()

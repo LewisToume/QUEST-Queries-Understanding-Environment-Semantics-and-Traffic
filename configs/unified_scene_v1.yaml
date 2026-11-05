@@ -1,0 +1,61 @@
+# New jointly trained student; never overwrites the selected four-task baseline.
+stage: shared_scene_four_task_v1
+paths:
+  baseline: checkpoints/quest_seg_on_depth_v3_v1_best.pt
+  checkpoint: checkpoints/quest_unified_scene_v1.pt
+  dataset_config: configs/stage1.yaml
+  split_manifest: data/stage3_split.json
+  stage3_config: configs/stage3_map.yaml
+  capacity_audit: data/vector_map_capacity_audit.json
+  seg_labels: data/soft_labels_segformer_cityscapes19_v1
+  depth_labels: data/soft_labels_depth_dvgt1_v1_candidate
+  agent_labels: data/soft_labels_navformer
+  vector_labels: data/vector_map_gt
+  reports: data/diagnostics/unified_scene_v1
+model:
+  version: shared_scene_four_task_v1
+  bev_h: 64
+  bev_w: 64
+  bev_layers: 4
+  window_size: 8
+  bev_levels: 3
+  heads: 8
+  ffn_dim: 1536
+  query_layers: 4
+  sampling_points: 4
+  agent_queries: 100
+  map_queries: 224  # Must equal the certified capacity, never truncate labels.
+  map_points: 20
+  dropout: 0.1
+  gradient_checkpointing: true
+train:
+  num_samples: 5000
+  epochs: 12
+  shared_lr: 1.0e-5
+  new_lr: 1.0e-4
+  head_lr: 3.0e-5
+  weight_decay: 1.0e-4
+  clip_norm: 1.0
+  calibration_frames: 16  # Fixed loss normalizers from TRAIN ONLY, before updates.
+  gradient_mode: sum     # Optional pcgrad; extra backward passes and VRAM, not an accuracy guarantee.
+  seed: 42
+  log_interval: 500
+loss:
+  task_weights: {agent: 1.0, map: 1.0, seg: 1.0, depth: 1.0}
+  dense:
+    weights: {seg_ce: 1.0, depth_log: 1.0, depth_relative: 0.5, depth_gradient: 0.5}
+    depth: {min_depth_m: 0.1, max_depth_m: 80.0, exclude_sky: false}
+    seg:
+      class_balance: {mode: inverse_sqrt_train_pixels, min_weight: 0.5, max_weight: 5.0}
+eval:
+  map_confidence_threshold: 0.25
+  map_match_distance_m: 1.5
+  gate:
+    seg_miou_drop: 0.01
+    depth_absrel_increase_ratio: 0.05
+    depth_delta1_drop: 0.01
+    agent_precision_recall_drop: 0.02
+    map_precision_recall_drop: 0.01
+    seg_min_teacher_pixels: 20000
+    seg_class_iou_drop: 0.05
+    depth_far_absrel_increase_ratio: 0.10

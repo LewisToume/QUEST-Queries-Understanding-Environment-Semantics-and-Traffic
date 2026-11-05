@@ -152,7 +152,7 @@ class DPTMetricDecoder(nn.Module):
         self.minimum = minimum
         nn.init.constant_(self.output[-1].bias, 10.)
 
-    def forward(self, levels, output_size):
+    def forward_features(self, levels):
         pyramid = [scratch(resize(project(x))) for x, project, resize, scratch in
                    zip(levels, self.projects, self.resize, self.scratch)]
         value = None
@@ -160,6 +160,10 @@ class DPTMetricDecoder(nn.Module):
             skip = self.skip_refine[index](pyramid[index])
             value = skip if value is None else F.interpolate(value, skip.shape[-2:], mode="bilinear", align_corners=False) + skip
             value = self.fuse_refine[index](value)
+        return value
+
+    def forward(self, levels, output_size):
+        value = self.forward_features(levels)
         logits = F.interpolate(self.output(value), output_size, mode="bilinear", align_corners=False)
         return F.softplus(logits.float()) + self.minimum
 

@@ -72,8 +72,8 @@ class TemporalGeometryDepthFrontend(GeometryDepthFrontend):
         self.agent_temporal = (TemporalAgentBEV(dim, options["temporal"]["agent_bev"], options["temporal"]["max_gap_s"])
                                if options["temporal"].get("agent_bev") is not None else None)
 
-    def forward(self, feature_levels, intrinsics, extrinsics, distortion, image_size,
-                camera_mask=None, history=None):
+    def encode_levels(self, feature_levels, intrinsics, extrinsics, distortion, image_size,
+                      camera_mask=None, history=None):
         if camera_mask is not None:
             raise ValueError("Temporal V3 currently requires all eight current cameras")
         if (history is None or len(feature_levels) != 4 or len(history["feature_levels"]) != 4
@@ -105,8 +105,14 @@ class TemporalGeometryDepthFrontend(GeometryDepthFrontend):
                 x, y = block(x, shape, current_geometry), block(y, shape, previous_geometry)
                 x = temporal(x, y, shape, temporal_geometry, history["dt_s"])
             levels.append(norm(x).reshape(b * n, h, w, c).permute(0, 3, 1, 2))
-        depth = self.depth_decoder(levels, self.options["output_size"])
-        return {"depth": depth.reshape(b, n, 1, *self.options["output_size"]),
-                "depth_cross_view_coverage": torch.stack(current_geometry[2]).any(0).any(-1).float().mean(),
+        return levels, {"depth_cross_view_coverage": torch.stack(current_geometry[2]).any(0).any(-1).float().mean(),
                 "depth_temporal_coverage": torch.stack(temporal_geometry[2]).any(0).any(-1).float().mean(),
                 "history_frame_fraction": history["valid"].float().mean()}
+
+    def forward(self, feature_levels, intrinsics, extrinsics, distortion, image_size,
+                camera_mask=None, history=None):
+        levels, diagnostics = self.encode_levels(feature_levels, intrinsics, extrinsics, distortion,
+                                                 image_size, camera_mask, history)
+        b, n = feature_levels[-1].shape[:2]
+        depth = self.depth_decoder(levels, self.options["output_size"])
+        return {"depth": depth.reshape(b, n, 1, *self.options["output_size"]), **diagnostics}
