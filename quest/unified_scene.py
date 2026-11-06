@@ -280,16 +280,27 @@ class UnifiedQUEST(nn.Module):
         return tuple(x[:, 1:].transpose(1, 2).reshape(b, n, self.backbone.hidden_dim,
                      h // self.backbone.patch_size, w // self.backbone.patch_size) for x in levels)
 
-    def forward(self, *, images, intrinsics, extrinsics, distortion, history, ego_state=None):
+    def forward_from_levels(self, levels, previous, *, images, intrinsics, extrinsics, distortion,
+                            history, ego_state=None, return_shared_features=False):
         if history is None or history["images"].shape != images.shape:
             raise ValueError("Require actual causal history buffers and cold-start mask")
-        levels, previous = self.extract_levels(images), self.extract_levels(history["images"])
         scene = self.trunk(levels, previous, images, intrinsics, extrinsics, distortion, history)
         output = self.heads(scene, images.shape[0], images.shape[1], tuple(images.shape[-2:]))
         output.update({key: scene[key] for key in ("proposal_objectness_logits", "proposal_xy_offsets",
             "proposal_indices", "agent_reference_xyz", "depth_cross_view_coverage", "depth_temporal_coverage",
             "history_frame_fraction")})
+        if return_shared_features:
+            output["shared_dense_features"] = scene["dense_features"]
         return output
+
+    def forward(self, *, images, intrinsics, extrinsics, distortion, history, ego_state=None,
+                return_shared_features=False):
+        if history is None or history["images"].shape != images.shape:
+            raise ValueError("Require actual causal history buffers and cold-start mask")
+        levels, previous = self.extract_levels(images), self.extract_levels(history["images"])
+        return self.forward_from_levels(levels, previous, images=images, intrinsics=intrinsics,
+            extrinsics=extrinsics, distortion=distortion, history=history, ego_state=ego_state,
+            return_shared_features=return_shared_features)
 
     def warm_start(self, source):
         """Explicit compatible transfers only; never claim prediction identity."""

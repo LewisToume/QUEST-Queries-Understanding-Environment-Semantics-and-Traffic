@@ -1,0 +1,21 @@
+stage: shared_scene_feature_distillation_v1
+paths:
+  student_init: checkpoints/quest_unified_scene_v1.pt
+  checkpoint: checkpoints/quest_unified_feature_kd_v1.pt
+  reports: data/diagnostics/unified_feature_kd_v1
+train:
+  epochs: 6
+  shared_lr: 3.0e-6
+  new_lr: 3.0e-5
+  head_lr: 1.0e-5
+  adapter_lr: 1.0e-4
+  weight_decay: 1.0e-4
+  clip_norm: 1.0
+  seed: 42
+  log_interval: 500
+distillation:
+  feature_grid: [18, 32]
+  min_valid_fraction: 0.5
+  seg_weight: 1.0
+  depth_weight: 0.1
+  guide_role: FROZEN_PREINTEGRATION_QUEST_PROXY_NOT_ORIGINAL_TEACHERS
