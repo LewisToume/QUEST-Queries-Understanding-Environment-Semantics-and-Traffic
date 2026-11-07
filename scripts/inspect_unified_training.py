@@ -30,8 +30,8 @@ def print_row(label, metrics, passed):
 
 
 def review(saved):
-    if saved.get("stage") != "shared_scene_four_task_v1":
-        raise ValueError("Expected a shared-scene checkpoint")
+    if saved.get("stage") not in ("shared_scene_four_task_v1", "shared_scene_feature_distillation_v1", "shared_scene_gradnorm_v1"):
+        raise ValueError("Expected a full shared-scene training checkpoint, not a deployment export")
     baseline, history = saved["baseline_validation"], saved["validation_history"]
     if not history:
         raise ValueError("No completed validation epochs in checkpoint")
@@ -72,6 +72,12 @@ def review(saved):
     print("last_epoch_mean_loss task raw scale weighted_normalized")
     for task in ("agent", "map", "seg", "depth"):
         print(f"{task} {raw[task]:.6f} {scales[task]:.6f} {raw[task]*weights[task]/scales[task]:.6f}")
+    if saved.get("stage") != "shared_scene_four_task_v1":
+        print("above_base_normalization_excludes_feature_KD_and_GradNorm_weights=True")
+    if "mean_weighted_task_losses" in history[-1]:
+        print("actual_mean_weighted_task_losses=" + str(history[-1]["mean_weighted_task_losses"]))
+    if saved.get("gradnorm_state_dict"):
+        print("final_gradnorm_weights=" + str(saved["gradnorm_state_dict"]["weights"].tolist()))
     print("passing_epochs=" + str([row["epoch"] for row in history if row["baseline_gate"]["all_pass"]]))
     print("gradient_cosines_are_in_training_log_not_checkpoint=True; macroF1_is_custom_not_official_mAP=True")
 

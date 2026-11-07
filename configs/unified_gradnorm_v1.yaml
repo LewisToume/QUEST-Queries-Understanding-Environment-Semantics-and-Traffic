@@ -1,0 +1,19 @@
+stage: shared_scene_gradnorm_v1
+paths:
+  student_init: checkpoints/quest_unified_scene_v1.pt
+  checkpoint: checkpoints/quest_unified_gradnorm_v1.pt
+  reports: data/diagnostics/unified_gradnorm_v1
+train:
+  epochs: 6
+  shared_lr: 3.0e-6
+  new_lr: 3.0e-5
+  head_lr: 1.0e-5
+  weight_decay: 1.0e-4
+  clip_norm: 1.0
+  seed: 42
+  log_interval: 500
+gradnorm:
+  alpha: 1.5
+  weight_lr: 1.0e-3
+  update_every: 10
+  reference_losses: parent_last_epoch_train_mean

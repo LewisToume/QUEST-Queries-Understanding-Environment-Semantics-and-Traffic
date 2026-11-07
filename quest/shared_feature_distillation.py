@@ -98,7 +98,7 @@ class SharedFeatureDistiller(nn.Module):
 
 
 def restore_student(parent, model):
-    if parent.get("stage") not in (FEATURE_KD_STAGE, "shared_scene_four_task_v1"):
+    if parent.get("stage") not in (FEATURE_KD_STAGE, "shared_scene_four_task_v1", "shared_scene_gradnorm_v1"):
         raise ValueError("Feature KD requires a trained shared-scene student")
     if set(parent.get("trained_tasks", [])) != {"agent", "map", "seg", "depth"}:
         raise ValueError("Feature KD cannot silently start from a single-task ablation")
@@ -107,11 +107,11 @@ def restore_student(parent, model):
     model.load_state_dict(parent["model_state_dict"], strict=True)
 
 
-def deployment_payload(model, parent, epoch, validation, gate):
+def deployment_payload(model, parent, epoch, validation, gate, experiment=FEATURE_KD_STAGE):
     """Only the original student architecture/state; guides/adapters cannot be loaded."""
     return {"stage": "shared_scene_four_task_v1", "model_config": model.model_config, "profile": model.profile,
             "model_state_dict": model.state_dict(), "trained_tasks": list(parent["trained_tasks"]),
-            "epoch": epoch, "experiment": FEATURE_KD_STAGE, "validation": validation, "baseline_gate": gate,
+            "epoch": epoch, "experiment": experiment, "validation": validation, "baseline_gate": gate,
             "source_epoch": parent.get("epoch", 0), "total_student_epochs": parent.get("epoch", 0) + epoch,
             "depth_geometry_policy": "experimental_image_plane", "inference_guides": 0, "inference_adapters": 0}
 
@@ -119,7 +119,7 @@ def deployment_payload(model, parent, epoch, validation, gate):
 def load_deployment(payload, backbone=None):
     from .unified_scene import UNIFIED_SCENE_VERSION, UnifiedQUEST
 
-    if (payload.get("stage") != UNIFIED_SCENE_VERSION or payload.get("experiment") != FEATURE_KD_STAGE
+    if (payload.get("stage") != UNIFIED_SCENE_VERSION or payload.get("experiment") not in (FEATURE_KD_STAGE, "shared_scene_gradnorm_v1")
             or payload.get("inference_guides") != 0 or payload.get("inference_adapters") != 0):
         raise ValueError("Not a standalone feature-KD deployment checkpoint")
     model = UnifiedQUEST(payload["model_config"], payload["profile"], backbone=backbone)
