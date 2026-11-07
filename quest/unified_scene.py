@@ -23,6 +23,7 @@ from .temporal_depth import TemporalGeometryDepthFrontend
 
 
 UNIFIED_SCENE_VERSION = "shared_scene_four_task_v1"
+MAP_REFINEMENT_STAGE = "shared_scene_map_refinement_v1"
 
 
 def sample_bev(features, xy):
@@ -144,7 +145,8 @@ class SharedSceneTrunk(nn.Module):
             contexts.append(context.reshape(b, -1, h, w))
         return self.bev_to_camera(torch.stack(contexts, 1).flatten(0, 1))
 
-    def forward(self, levels, previous_levels, images, intrinsics, extrinsics, distortion, history):
+    def forward(self, levels, previous_levels, images, intrinsics, extrinsics, distortion, history,
+                map_point_update=None):
         b, n, dim, h, w = levels[-1].shape
         image_size = tuple(images.shape[-2:])
         previous = {**history, "feature_levels": previous_levels}
@@ -169,6 +171,7 @@ class SharedSceneTrunk(nn.Module):
         agent_xy = reference_xy.unsqueeze(2)
         vector_xy = (self.map_reference_logits.sigmoid()[:, None] + self.map_point_offsets[None]).clamp(1e-4, 1 - 1e-4)
         vector_xy = vector_xy[None].expand(b, -1, -1, -1)
+        initial_vector_xy = vector_xy
         agent = sample_bev(bev, agent_xy).permute(0, 2, 3, 1) + self.query_type[0]
         vector = sample_bev(bev, vector_xy).permute(0, 2, 3, 1)
         vector = vector + self.map_instance_embedding[None, :, None] + self.map_point_embedding[None, None] + self.query_type[1]
@@ -177,6 +180,7 @@ class SharedSceneTrunk(nn.Module):
         for _ in range(1, self.profile["bev_levels"]):
             pyramid.append(F.avg_pool2d(pyramid[-1], 2))
         agent_layers, vector_layers = [], []
+        map_point_predictions = []
         for layer in self.query_layers:
             if self.training and self.profile["gradient_checkpointing"]:
                 agent, vector = checkpoint(layer, agent, vector, agent_xy, vector_xy,
@@ -185,6 +189,11 @@ class SharedSceneTrunk(nn.Module):
                 agent, vector = layer(agent, vector, agent_xy, vector_xy, self.reference_embedding, pyramid)
             agent_layers.append(self.query_output_norm(agent.squeeze(2)))
             vector_layers.append(self.query_output_norm(vector))
+            if map_point_update is not None:
+                points = (inverse_sigmoid(vector_xy) + map_point_update(vector_layers[-1])).sigmoid()
+                map_point_predictions.append(points)
+                # Supervise each prediction directly; only the next layer's sampling coordinates are detached.
+                vector_xy = points.detach()
         # Equal task contribution: do not let 224*20 Map tokens dominate 100 Agent tokens.
         joint_context = .5 * (agent_layers[-1].mean(1) + vector_layers[-1].mean((1, 2)))
         spatial = self.camera_context(bev, intrinsics, extrinsics, distortion, (h, w), image_size)
@@ -193,7 +202,8 @@ class SharedSceneTrunk(nn.Module):
         dense = dense + self.context_gate.tanh()[None, :, None, None] * context
         return {"dense_features": dense, "bev_features": bev, "agent_features_layers": agent_layers,
                 "map_features_layers": vector_layers, "agent_reference_xyz": agent_xyz,
-                "map_reference_xy": vector_xy, "proposal_objectness_logits": objectness,
+                "map_reference_xy": initial_vector_xy, "map_point_predictions": map_point_predictions,
+                "proposal_objectness_logits": objectness,
                 "proposal_xy_offsets": offsets, "proposal_indices": top, **diagnostics}
 
 
@@ -215,7 +225,10 @@ class UnifiedReadouts(nn.Module):
         boxes, velocity = torch.stack([x[1] for x in agents]), torch.stack([x[2] for x in agents])
         maps = scene["map_features_layers"]
         map_classes = torch.stack([self.map_class(x.mean(2)) for x in maps])
-        points = torch.stack([(inverse_sigmoid(scene["map_reference_xy"]) + self.map_point(x)).sigmoid() for x in maps])
+        predictions = scene["map_point_predictions"]
+        if not predictions:
+            predictions = [(inverse_sigmoid(scene["map_reference_xy"]) + self.map_point(x)).sigmoid() for x in maps]
+        points = torch.stack(predictions)
         dense = scene["dense_features"]
         seg = F.interpolate(self.seg(dense).float(), output_size, mode="bilinear", align_corners=False)
         depth = F.softplus(F.interpolate(self.depth(dense).float(), output_size, mode="bilinear", align_corners=False)) + self.minimum
@@ -238,8 +251,9 @@ class UnifiedQUEST(nn.Module):
                            "query_layers", "sampling_points", "agent_queries", "map_queries", "map_points")
         if (any(not isinstance(profile[k], int) or isinstance(profile[k], bool) or profile[k] <= 0 for k in integer_options)
                 or not math.isfinite(profile["dropout"]) or not 0 <= profile["dropout"] < 1
-                or not isinstance(profile["gradient_checkpointing"], bool)):
-            raise ValueError("Invalid shared-scene dimensions/dropout/checkpointing")
+                or not isinstance(profile["gradient_checkpointing"], bool)
+                or not isinstance(profile.get("refine_map_references", False), bool)):
+            raise ValueError("Invalid shared-scene dimensions/dropout/checkpointing/refinement")
         dim = model_config["hidden_dim"]
         options = copy.deepcopy(model_config["dense_frontend"])
         if options["version"] != TEMPORAL_DEPTH_VERSION:
@@ -284,7 +298,8 @@ class UnifiedQUEST(nn.Module):
                             history, ego_state=None, return_shared_features=False):
         if history is None or history["images"].shape != images.shape:
             raise ValueError("Require actual causal history buffers and cold-start mask")
-        scene = self.trunk(levels, previous, images, intrinsics, extrinsics, distortion, history)
+        point_update = self.heads.map_point if self.profile.get("refine_map_references", False) else None
+        scene = self.trunk(levels, previous, images, intrinsics, extrinsics, distortion, history, point_update)
         output = self.heads(scene, images.shape[0], images.shape[1], tuple(images.shape[-2:]))
         output.update({key: scene[key] for key in ("proposal_objectness_logits", "proposal_xy_offsets",
             "proposal_indices", "agent_reference_xyz", "depth_cross_view_coverage", "depth_temporal_coverage",

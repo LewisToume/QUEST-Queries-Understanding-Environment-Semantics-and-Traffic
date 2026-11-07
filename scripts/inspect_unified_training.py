@@ -30,7 +30,8 @@ def print_row(label, metrics, passed):
 
 
 def review(saved):
-    if saved.get("stage") not in ("shared_scene_four_task_v1", "shared_scene_feature_distillation_v1", "shared_scene_gradnorm_v1"):
+    if saved.get("stage") not in ("shared_scene_four_task_v1", "shared_scene_feature_distillation_v1",
+                                  "shared_scene_gradnorm_v1", "shared_scene_map_refinement_v1"):
         raise ValueError("Expected a full shared-scene training checkpoint, not a deployment export")
     baseline, history = saved["baseline_validation"], saved["validation_history"]
     if not history:

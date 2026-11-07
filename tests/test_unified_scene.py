@@ -13,8 +13,9 @@ from quest.geometry import GeometryAwareBEVLift
 from quest.geometry_depth import DPTMetricDecoder
 from quest.model import DEFAULT_CAMERA_NAMES, QUESTModel
 from quest.seg_on_v3 import full_base_fingerprint
+from quest.shared_feature_distillation import deployment_payload, load_deployment, restore_student
 from quest.teacher_adapters import NAVFORMER_CLASS_SUPPORT, empty_canonical_agent
-from quest.unified_scene import UNIFIED_SCENE_VERSION, UnifiedQUEST
+from quest.unified_scene import MAP_REFINEMENT_STAGE, UNIFIED_SCENE_VERSION, UnifiedQUEST
 from quest.unified_training import (four_task_losses, joint_backward, pcgrad_vectors,
                                     quality_gate, scaled_task_losses, shared_gradient_audit)
 from quest.utils import load_yaml_config, project_root
@@ -63,6 +64,55 @@ class UnifiedSceneTest(unittest.TestCase):
     def make_model(self):
         config, profile = fixtures()
         return UnifiedQUEST(config, profile, backbone=TinyBackbone()), config, profile
+
+    def test_map_refinement_reuses_readout_and_resamples_at_detached_predictions(self):
+        torch.manual_seed(31)
+        base, config, profile = self.make_model()
+        with torch.no_grad():
+            base.heads.map_point[-1].weight.zero_()
+            base.heads.map_point[-1].bias.fill_(.25)
+        parent = dict(stage=UNIFIED_SCENE_VERSION, model_config=config, profile=profile,
+                      model_state_dict=base.state_dict(), trained_tasks=["agent", "map", "seg", "depth"])
+        refined = UnifiedQUEST(config, {**profile, "refine_map_references": True}, backbone=TinyBackbone())
+        self.assertEqual(list(base.state_dict()), list(refined.state_dict()))
+        with self.assertRaises(ValueError):
+            restore_student(parent, refined)
+        restore_student(parent, refined, allow_map_refinement_upgrade=True)
+        data = inputs()
+        data["history"] = history(data)
+
+        def capture(model):
+            references = []
+            hooks = [layer.register_forward_pre_hook(lambda _module, args: references.append(args[3]))
+                     for layer in model.trunk.query_layers]
+            try:
+                output = model(**data)
+            finally:
+                for hook in hooks:
+                    hook.remove()
+            return output, references
+
+        fixed, fixed_references = capture(base.eval())
+        output, references = capture(refined.train())
+        torch.testing.assert_close(fixed_references[0], fixed_references[1], rtol=0, atol=0)
+        torch.testing.assert_close(references[1], output["map_points_layers"][0].detach(), rtol=0, atol=0)
+        self.assertTrue(references[0].requires_grad)
+        self.assertFalse(references[1].requires_grad)
+        self.assertFalse(torch.equal(references[0], references[1]))
+        self.assertFalse(torch.allclose(fixed["map_points"], output["map_points"]))
+        output["map_points_layers"].mean().backward()
+        grad = refined.heads.map_point[-1].bias.grad
+        self.assertTrue(bool(torch.isfinite(grad).all()))
+        self.assertGreater(float(grad.norm()), 0.)
+
+        payload = deployment_payload(refined, parent, 1, {}, {"all_pass": False}, experiment=MAP_REFINEMENT_STAGE)
+        deployed = load_deployment(payload, backbone=TinyBackbone()).eval()
+        self.assertTrue(deployed.profile["refine_map_references"])
+        with torch.no_grad():
+            actual = deployed(**data)
+            expected = refined.eval()(**data)
+            for key in expected:
+                torch.testing.assert_close(actual[key], expected[key])
 
     def test_four_real_losses_reach_common_geometry_fusion_bev_query_and_update(self):
         torch.manual_seed(17)

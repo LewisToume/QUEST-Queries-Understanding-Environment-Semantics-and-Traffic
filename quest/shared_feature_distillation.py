@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .seg_depth_losses import depth_valid_mask
+from .unified_scene import MAP_REFINEMENT_STAGE, UNIFIED_SCENE_VERSION, UnifiedQUEST
 
 
 FEATURE_KD_STAGE = "shared_scene_feature_distillation_v1"
@@ -97,18 +98,23 @@ class SharedFeatureDistiller(nn.Module):
                 "depth_feature_kd": self.distance(pooled, guide_features["depth"], masks["depth"])}
 
 
-def restore_student(parent, model):
-    if parent.get("stage") not in (FEATURE_KD_STAGE, "shared_scene_four_task_v1", "shared_scene_gradnorm_v1"):
-        raise ValueError("Feature KD requires a trained shared-scene student")
+def restore_student(parent, model, *, allow_map_refinement_upgrade=False):
+    if parent.get("stage") not in (FEATURE_KD_STAGE, UNIFIED_SCENE_VERSION, "shared_scene_gradnorm_v1", MAP_REFINEMENT_STAGE):
+        raise ValueError("Continuation requires a trained shared-scene student")
     if set(parent.get("trained_tasks", [])) != {"agent", "map", "seg", "depth"}:
-        raise ValueError("Feature KD cannot silently start from a single-task ablation")
-    if parent["model_config"] != model.model_config or parent["profile"] != model.profile:
-        raise ValueError("Feature KD must preserve the exact trained student architecture")
+        raise ValueError("Continuation cannot silently start from a single-task ablation")
+    expected_profile = dict(parent["profile"])
+    if allow_map_refinement_upgrade:
+        if parent["stage"] != UNIFIED_SCENE_VERSION or expected_profile.get("refine_map_references", False) is not False:
+            raise ValueError("Map refinement requires a fixed-reference unified V1 parent")
+        expected_profile["refine_map_references"] = True
+    if parent["model_config"] != model.model_config or expected_profile != model.profile:
+        raise ValueError("Unexpected continuation model configuration or profile")
     model.load_state_dict(parent["model_state_dict"], strict=True)
 
 
 def deployment_payload(model, parent, epoch, validation, gate, experiment=FEATURE_KD_STAGE):
-    """Only the original student architecture/state; guides/adapters cannot be loaded."""
+    """Export only the standalone student, without any training guides/adapters."""
     return {"stage": "shared_scene_four_task_v1", "model_config": model.model_config, "profile": model.profile,
             "model_state_dict": model.state_dict(), "trained_tasks": list(parent["trained_tasks"]),
             "epoch": epoch, "experiment": experiment, "validation": validation, "baseline_gate": gate,
@@ -117,11 +123,10 @@ def deployment_payload(model, parent, epoch, validation, gate, experiment=FEATUR
 
 
 def load_deployment(payload, backbone=None):
-    from .unified_scene import UNIFIED_SCENE_VERSION, UnifiedQUEST
-
-    if (payload.get("stage") != UNIFIED_SCENE_VERSION or payload.get("experiment") not in (FEATURE_KD_STAGE, "shared_scene_gradnorm_v1")
+    if (payload.get("stage") != UNIFIED_SCENE_VERSION
+            or payload.get("experiment") not in (FEATURE_KD_STAGE, "shared_scene_gradnorm_v1", MAP_REFINEMENT_STAGE)
             or payload.get("inference_guides") != 0 or payload.get("inference_adapters") != 0):
-        raise ValueError("Not a standalone feature-KD deployment checkpoint")
+        raise ValueError("Not a standalone controlled-continuation deployment checkpoint")
     model = UnifiedQUEST(payload["model_config"], payload["profile"], backbone=backbone)
     model.load_state_dict(payload["model_state_dict"], strict=True)
     return model
