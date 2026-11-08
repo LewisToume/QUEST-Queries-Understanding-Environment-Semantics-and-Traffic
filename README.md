@@ -1,88 +1,68 @@
-# QUEST
+# QUEST: Queries for Understanding Environment Semantics and Traffic
 
-QUEST V3 is an 8-camera geometry-aware perception model with shared BEV latent and four
-outputs: Semantic Segmentation, Depth, Agent, Vector Map.
+QUEST is a research prototype for **multi-camera perception in autonomous driving**.
+It studies whether one trainable scene representation can support four outputs:
+3D agent detection, vectorized local maps, semantic segmentation, and metric depth.
 
-The central requirement is ONE student learning all four tasks from specialists
-and/or real GT, with shared trainable representations and task-specific decoders.
-BEV is their spatial representation, not a fifth teacher task. See the
-[four-teacher design and readiness audit](docs/four_teacher_student_design.md).
-The versioned Seg/Depth profile now has dataset, losses, training, evaluation and
-checkpoint integration. Its runtime and accuracy still require server validation;
-implemented code is not evidence of a fully trained multi-task model.
+The model has been trained and evaluated on an internal OpenScene/nuPlan split.
+It is not a production system or a ready-to-run pretrained release. Datasets,
+teacher weights, and trained QUEST checkpoints are not distributed here.
 
-Active same-domain supervision is Navformer Agent, real nuPlan Vector Map GT
-and OpenScene DVGT-1 candidate depth. Same-domain Seg teacher readiness remains
-unresolved; SegFormer Cityscapes and Metric3Dv2 are out-of-domain controls, not
-approved nuPlan/OpenScene teachers. MapTRv2 is a structure reference, not a required
-teacher checkpoint; unreliable Navformer raster-map KD remains disabled.
-See [dense teacher export](docs/dense_teacher_export.md) for asset preparation
-and the eight-view semantic export entry point.
-See [Seg/Depth student training](docs/seg_depth_training.md) for the runnable
-dense training path, preserving the existing Agent/Map checkpoint.
-The opt-in [Geometry Depth V2](docs/depth_geometry_v2.md) adds calibrated cross-view
-attention and a full DPT-style decoder while freezing DINO/Agent/Map. It reuses
-DVGT labels; new runtime and quality are not yet server-verified. This Depth-only
-profile does not emit untrained Seg logits or claim four-task completion.
-The [selective temporal profile](docs/teacher_temporal_inputs.md) adds real
-previous-frame inputs to Agent (Navformer-inspired BEV fusion) and Depth (DVGT-
-inspired geometry). Map and Seg are not automatically made temporal. It preserves
-old weights, audits causal context and measures Agent/Depth history ablations;
-server runtime/quality checks are still required.
-
-## Model
+## Shared-Scene Model
 
 ```text
-8 camera images
-  -> shared frozen DINOv2
-  -> calibrated GeometryAwareBEVLift
-  -> 32x32 metric BEV Transformer
-  -> image-conditioned Agent proposals and decoder
-  -> independent Vector Map query decoder
-
-per-camera DINO patch features
-  -> Semantic Segmentation head
-  -> Depth head
+Current and previous frames (8 calibrated cameras per frame)
+  -> frozen DINOv2-S image encoder
+  -> shared geometric and temporal feature fusion
+  -> shared 64 x 64 bird's-eye-view (BEV) representation and scene-query decoder
+  -> task readouts: 3D agents, vector polylines, semantic pixels, camera depth
 ```
 
-The fixed OpenScene camera order is:
+Agent and Map use object and polyline queries in the same decoder. Segmentation
+and Depth read from a shared camera-plane feature pyramid with BEV and query
+feedback. The scene trunk is trained jointly with all four losses. BEV is an
+intermediate representation, not an output task. See the
+[architecture and training design](docs/unified_scene_four_task_design.md).
 
-```text
-CAM_F0, CAM_L0, CAM_R0, CAM_L1, CAM_R1, CAM_L2, CAM_R2, CAM_B0
-```
+| Output | Training reference |
+| --- | --- |
+| 3D agents | Navformer pseudo-labels for vehicles and pedestrians |
+| Vector map | nuPlan ground-truth centerlines, crossings, and road boundaries |
+| Semantic segmentation | SegFormer-B5 Cityscapes pseudo-labels on OpenScene images |
+| Metric depth | DVGT-1 OpenScene candidate depth labels |
 
-Stage1 reads the official OpenScene metadata pickle directly. It currently uses
-real Agent annotations; Semantic Segmentation, Depth, and Vector Map losses stay
-disabled until real labels are available.
+The teachers are used offline. Teacher agreement for Agent, Segmentation, and
+Depth is not accuracy against real ground truth. SegFormer is an out-of-domain
+teacher, and the depth labels remain experimental for image-plane supervision.
+Map uses nuPlan vector ground truth, not raster-map distillation.
 
-Stage2 is offline-only. Teacher inference and label export run separately, and
-student training reads token-aligned Navformer Agent labels from
-`data/soft_labels_navformer`.
+## Evaluation
 
-Stage 3 now uses an independent trainable 64x64 Map BEV and six-layer spatial
-instance/point decoder, with metric vector loss and dense supervision from real
-nuPlan vector GT. The original 32x32 BEV/Agent stays frozen. The Stage 3 config
-overrides only the Map architecture; the base Stage 1/2 model remains compatible.
-See [Stage 3 spatial Map](docs/stage3_spatial_map.md) for references, loss details,
-checkpoint versioning and server-only validation commands. Map teacher KD is off.
+The joint V1 run used 5,000 training frames and 120 held-out validation frames.
+At epoch 12, semantic agreement with the teacher was 42.37% mIoU and depth
+agreement was 0.103 AbsRel. Against vector ground truth, centerline precision
+and recall were 5.25% and 6.63% under the internal ordered-distance protocol.
+These are internal results, not official benchmark scores. Map accuracy and
+several regression checks remain below the staged baseline; the joint
+checkpoint does not replace it.
 
-Stage 1 BEV pretraining can first supervise the Geometry lift and BEV encoder
-directly from rasterized Navformer vehicle/pedestrian centers:
+- [V1 validation and regression analysis](docs/unified_scene_v1_server_review.md)
+- [Feature distillation](docs/unified_feature_kd_v1.md), [GradNorm](docs/unified_gradnorm_v1.md),
+  and [Map reference refinement](docs/unified_map_refinement_v1.md) continuations
+- [Read-only Map candidate diagnostic](scripts/audit_unified_map_candidates.py)
+
+## Code and Reproduction
+
+- [Shared model](quest/unified_scene.py), [training entry point](scripts/train_unified_scene.py),
+  and [experiment configuration](configs/unified_scene_v1.yaml)
+- [Offline label preparation](docs/dense_teacher_export.md) and
+  [teacher and dataset notes](docs/nuplan_openscene_teacher_selection.md)
+- [Staged vector-map baseline](docs/stage3_spatial_map.md) and
+  [Segmentation/Depth baseline training](docs/seg_depth_training.md)
+
+Run the preflight on a configured data server to verify local assets and label
+provenance before training:
 
 ```bash
-python scripts/train_stage1_bev.py --num-samples 500 --epochs 5
-python scripts/evaluate_stage1_bev.py --start 500 --count 100
-python scripts/train_stage2_distill.py \
-  --bev-pretrain-checkpoint checkpoints/quest_stage1_bev.pt
-```
-
-QUEST V1/V2 checkpoints are architecture-incompatible and are explicitly rejected
-by V3 checkpoint loading.
-
-## Checks
-
-```powershell
-python -m quest.model
-python scripts/check_training_ready.py
-python scripts/train_stage1.py
+python scripts/train_unified_scene.py --preflight-only --experimental-unverified-depth
 ```
