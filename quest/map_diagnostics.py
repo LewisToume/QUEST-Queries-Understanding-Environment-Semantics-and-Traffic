@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 import torch
+from scipy.optimize import linear_sum_assignment
 
 from .map_training import (
     class_aware_vector_matches, denormalize_points, normalize_points, pairwise_vector_distances,
@@ -43,6 +44,44 @@ def frame_geometry_stats(labels: torch.Tensor, points: torch.Tensor, record: Map
                                                if len(predicted) else None)
         result[name] = item
     return result
+
+
+def map_candidate_audit(labels, scores, points, target, *, distance_m, confidence):
+    """Partition each GT by the first failed stage; coverage allows query reuse."""
+    ordered = pairwise_vector_distances(points, target, "ordered")
+    chamfer = pairwise_vector_distances(points, target, "chamfer")
+    near = ordered <= distance_m
+    foreground = labels != len(MAP_CLASS_NAMES)
+    confident = scores >= confidence
+    results = {}
+    for class_id, name in enumerate(MAP_CLASS_NAMES):
+        gt = target["class_ids"] == class_id
+        category = labels == class_id
+        kept = category & confident
+        local_near = near[:, gt]
+        geometry = local_near.any(dim=0)
+        nearby_foreground = local_near[foreground].any(dim=0)
+        same_class = local_near[category].any(dim=0)
+        accepted = local_near[kept].any(dim=0)
+        valid = local_near[kept]
+        costs = ordered[:, gt][kept].masked_fill(~valid, 1e6)
+        matched = 0
+        if costs.numel():
+            rows, columns = linear_sum_assignment(costs.numpy())
+            matched = int(valid[rows, columns].sum())
+        results[name] = {
+            "gt": int(gt.sum()),
+            "predictions": int(kept.sum()),
+            "matched": matched,
+            "no_ordered_geometry": int((~geometry).sum()),
+            "nearby_background_only": int((geometry & ~nearby_foreground).sum()),
+            "nearby_wrong_class": int((nearby_foreground & ~same_class).sum()),
+            "below_confidence": int((same_class & ~accepted).sum()),
+            "one_to_one_conflict": int(accepted.sum()) - matched,
+            "chamfer_coverage": int((chamfer[:, gt] <= distance_m).any(dim=0).sum()),
+            "ordered_2x_coverage": int((ordered[:, gt] <= 2 * distance_m).any(dim=0).sum()),
+        }
+    return results
 
 
 def evenly_spaced_indices(frames: list[Mapping[str, Any]], count: int) -> list[int]:
